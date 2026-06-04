@@ -25,7 +25,7 @@
 namespace f3a::modules::autowalk {
 namespace {
 
-enum class State { Idle, Walking };
+enum class State { Idle, Walking, Avoiding };
 
 State        g_state = State::Idle;
 game::Vec3   g_target_pos{};
@@ -36,6 +36,24 @@ game::Vec3   g_last_probe_pos{};
 float        g_probe_timer   = 0.0f;
 constexpr float kProbeEvery  = 1.5f;   // seconds
 constexpr float kMinProgress = 12.0f;  // game units per probe window
+
+// Obstacle avoidance ("bug" algorithm): when blocked heading straight at the
+// goal, veer off-axis to slide along the obstacle, then re-aim at the goal.
+// We don't have raycasts, so we just TRY a side; if still stuck, widen the
+// angle and alternate sides; after enough failures, give up.
+float g_avoid_timer   = 0.0f;
+int   g_avoid_side    = 1;     // +1 right, -1 left (alternates)
+float g_avoid_angle   = 50.0f; // degrees off the goal heading
+int   g_avoid_tries   = 0;
+constexpr float kAvoidDuration = 1.6f;  // seconds spent veering per attempt
+constexpr int   kAvoidMaxTries = 5;     // give up after this many
+
+float YawToDegrees(const game::Vec3& from, const game::Vec3& to)
+{
+    float dx = to.x - from.x, dy = to.y - from.y;
+    float deg = std::atan2(dx, dy) * 57.2957795f;   // 0 = north, matches game
+    return deg;
+}
 
 // Distance callouts.
 float        g_callout_timer = 0.0f;
@@ -104,9 +122,33 @@ void StopWalking(const char* reason_utf8)
     }
 }
 
+// Steer along the goal heading offset by the current avoidance angle/side.
+void SteerAvoiding()
+{
+    auto pp = game::GetPlayerPosition();
+    float goalDeg  = YawToDegrees(pp, g_target_pos);
+    float veerDeg  = goalDeg + g_avoid_side * g_avoid_angle;
+    float rad      = veerDeg * 0.01745329252f;
+    game::Vec3 p{ pp.x + std::sin(rad) * 300.0f,
+                  pp.y + std::cos(rad) * 300.0f, pp.z };
+    SteerToward(p);
+}
+
+void EnterAvoiding()
+{
+    g_state       = State::Avoiding;
+    g_avoid_timer = 0.0f;
+    g_avoid_side  = -g_avoid_side;                  // alternate side each time
+    g_avoid_angle = 50.0f + 20.0f * g_avoid_tries;  // widen with each failure
+    if (g_avoid_angle > 110.0f) g_avoid_angle = 110.0f;
+    ++g_avoid_tries;
+    g_last_probe_pos = game::GetPlayerPosition();
+    g_probe_timer    = 0.0f;
+}
+
 } // namespace
 
-bool IsWalking() { return g_state == State::Walking; }
+bool IsWalking() { return g_state != State::Idle; }
 
 void StartTo(const game::Vec3& pos, const std::string& name)
 {
@@ -118,6 +160,8 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_last_probe_pos = game::GetPlayerPosition();
     g_probe_timer    = 0.0f;
     g_callout_timer  = 0.0f;
+    g_avoid_tries    = 0;
+    g_avoid_side     = 1;
 
     g_state = State::Walking;
     SendForward(true);
@@ -134,9 +178,18 @@ void Stop()
     StopWalking("Zatrzymano.");
 }
 
+float ProbeMoved()
+{
+    auto pp = game::GetPlayerPosition();
+    float mx = pp.x - g_last_probe_pos.x;
+    float my = pp.y - g_last_probe_pos.y;
+    g_last_probe_pos = pp;
+    return std::sqrt(mx * mx + my * my);
+}
+
 void Tick(float dt)
 {
-    if (g_state != State::Walking) return;
+    if (g_state == State::Idle) return;
 
     // Any menu (other than the HUD) opening cancels the walk — so does
     // leaving gameplay (load, main menu).
@@ -164,21 +217,45 @@ void Tick(float dt)
         return;
     }
 
-    // Steer toward the target gradually (avoids orbiting the goal).
-    SteerToward(g_target_pos);
+    if (g_state == State::Walking) {
+        // Head straight for the goal.
+        SteerToward(g_target_pos);
 
-    // Stuck probe.
-    g_probe_timer += dt;
-    if (g_probe_timer >= kProbeEvery) {
-        auto pp = game::GetPlayerPosition();
-        float mx = pp.x - g_last_probe_pos.x;
-        float my = pp.y - g_last_probe_pos.y;
-        float moved = std::sqrt(mx * mx + my * my);
-        g_last_probe_pos = pp;
-        g_probe_timer    = 0.0f;
-        if (moved < kMinProgress) {
-            StopWalking("Przeszkoda. Zatrzymano.");
-            return;
+        g_probe_timer += dt;
+        if (g_probe_timer >= kProbeEvery) {
+            g_probe_timer = 0.0f;
+            if (ProbeMoved() < kMinProgress) {
+                // Blocked — try to go around instead of giving up.
+                tolk::Speak("Przeszkoda, próbuję obejść.",
+                            tolk::Priority::Background, false);
+                EnterAvoiding();
+            } else {
+                g_avoid_tries = 0;   // making progress; reset failure count
+            }
+        }
+    } else { // Avoiding
+        SteerAvoiding();
+        g_avoid_timer += dt;
+        g_probe_timer  += dt;
+
+        // Check progress mid-veer; if we're moving freely, resume straight.
+        if (g_probe_timer >= kProbeEvery) {
+            g_probe_timer = 0.0f;
+            float moved = ProbeMoved();
+            if (moved < kMinProgress) {
+                if (g_avoid_tries >= kAvoidMaxTries) {
+                    StopWalking("Nie mogę obejść przeszkody. "
+                                "Spróbuj naprowadzania ręcznego.");
+                    return;
+                }
+                EnterAvoiding();   // try the other side / wider angle
+                return;
+            }
+        }
+        if (g_avoid_timer >= kAvoidDuration) {
+            g_state = State::Walking;   // re-aim at the goal
+            g_probe_timer = 0.0f;
+            g_last_probe_pos = game::GetPlayerPosition();
         }
     }
 
