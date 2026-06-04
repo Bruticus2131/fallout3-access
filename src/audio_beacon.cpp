@@ -74,11 +74,13 @@ void Synthesize(std::vector<short>& out, float azimuth_deg, float dist01)
     }
 }
 
-} // namespace
-
-bool Init()
+// Open the device. MUST be called with g_mutex held. We do NOT open at plugin
+// load: waveOutOpen during the game's early init (FOSEPlugin_Load runs on the
+// main thread before the engine's audio is up) hangs/crashes the game. Instead
+// we open lazily on the first Ping, which only happens once the player is in
+// the world.
+bool OpenLocked()
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
     if (g_wave) return true;
 
     WAVEFORMATEX fmt{};
@@ -96,6 +98,15 @@ bool Init()
         return false;
     }
     F3A_INFO("audio: beacon device ready.");
+    return true;
+}
+
+} // namespace
+
+bool Init()
+{
+    // Intentionally a no-op at load time — opening the device here crashes
+    // the game. The device opens lazily on the first Ping().
     return true;
 }
 
@@ -123,7 +134,7 @@ bool Available()
 void Ping(float azimuth_deg, float distance01)
 {
     std::lock_guard<std::mutex> lk(g_mutex);
-    if (!g_wave) return;
+    if (!g_wave && !OpenLocked()) return;   // lazy open on first ping
 
     // Find a free buffer (one that's never been used or is flagged done).
     Buf* buf = nullptr;
