@@ -58,6 +58,12 @@ static bool SuppressOpenAnnouncement(Id id)
         // announcement is context-dependent, so polling_loop speaks it
         // (with the right "Menu główne" vs "Pauza" wording) instead.
         return true;
+    case Id::Message:
+    case Id::Book:
+    case Id::LevelUp:
+        // The message module reads the actual popup text (and the LevelUp
+        // line); announcing "Wiadomość otwarte" on top would be noise.
+        return true;
     default:
         return false;
     }

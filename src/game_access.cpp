@@ -809,6 +809,30 @@ void CollectInfoPairs(Tile* box, std::string& out)
     }
 }
 
+// Collect every visible, non-empty string in a menu subtree, in tree order,
+// de-duplicated. Used to read out a whole message box / notification (title,
+// body text, and button labels like OK / Boy / Girl) when it opens.
+void CollectAllVisibleText(Tile* t, int depth, std::string& out)
+{
+    if (!t || depth > 8) return;
+    if (TileVisible(t)) {
+        if (const char* s = TileStringTrait(t)) {
+            std::string part = GameStrToUtf8(s);
+            if (!part.empty() && out.find(part) == std::string::npos) {
+                if (!out.empty()) out += ". ";
+                out += part;
+            }
+        }
+    }
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&t->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) CollectAllVisibleText(cn->child, depth + 1, out);
+        node = node->next;
+    }
+}
+
 } // namespace
 
 PipBoyTab GetActivePipBoyTab()
@@ -855,6 +879,17 @@ std::string GetPipBoyVitals()
 }
 
 std::optional<InventoryItem> GetSelectedInventoryItem() { return std::nullopt; }
+
+std::string GetActiveMessageText()
+{
+    // The plain notification / yes-no / gender-choice popups are Message
+    // menus. Read the whole thing: title, body, and button labels.
+    Tile* m = FindVisibleMenuTile(kMenuType_Message);
+    if (!m) return {};
+    std::string out;
+    CollectAllVisibleText(m, 0, out);
+    return out;
+}
 
 // ---- Dialog / Barter / Lockpick / VATS — TODO ----------------------------
 

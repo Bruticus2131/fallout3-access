@@ -188,6 +188,11 @@ int                     GetVatsSelectedIndex();
 int                     GetVatsQueueLength();
 int                     GetVatsQueueCapacity();
 
+// Full text of an open Message popup (title + body + button labels), e.g.
+// an OK notification or the character-creation gender prompt. Empty if no
+// Message menu is visible.
+std::string GetActiveMessageText();
+
 // ---- Subtitles / voice lines ----
 
 // Returns the most-recently-spoken NPC line if not yet announced.
