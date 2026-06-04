@@ -134,7 +134,12 @@ bool ClickMenuBack();
 enum class PipBoyTab { Stats, Items, Data };
 PipBoyTab    GetActivePipBoyTab();
 std::string  GetActivePipBoyTabName();
+// Labels of the currently ACTIVE sub-tab buttons (the game dims the active
+// tab strip button to alpha 32) — e.g. "Status, KND" on the Stats page.
 std::string  GetActivePipBoySubTabName();
+// "POZ. 1, PW 156/200, PA 79/79, PD 158/200" — read off the Stats page's
+// info boxes. Empty when the Stats page isn't the visible Pip-Boy page.
+std::string  GetPipBoyVitals();
 std::optional<InventoryItem> GetSelectedInventoryItem();
 
 // ---- Dialog ----

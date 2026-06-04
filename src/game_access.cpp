@@ -457,6 +457,51 @@ void DescribeRowParts(Tile* t, std::string& label, std::string& value)
     }
 }
 
+// Which top-level menu does this tile belong to? (typeID of the TileMenu
+// that is a direct child of menuRoot on this tile's parent chain.)
+UInt32 OwningMenuType(Tile* t)
+{
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot || !t) return 0;
+    Tile* prev = t;
+    for (Tile* p = t->parent; p; p = p->parent) {
+        if (p == ifm->menuRoot) {
+            auto* tm = reinterpret_cast<TileMenu*>(prev);
+            Menu* m = tm->menu;
+            return m ? m->typeID : 0;
+        }
+        prev = p;
+    }
+    return 0;
+}
+
+// The Polish localization labels some keys confusingly in the key-binding
+// list — most famously Caps Lock is "KAPSLE" (= bottle caps!). Normalize
+// such names, but ONLY for rows inside StartMenu (settings/controls); in
+// Barter "Kapsle" legitimately means the currency.
+std::string NormalizeKeyNamePart(const std::string& part)
+{
+    if (_stricmp(part.c_str(), "KAPSLE") == 0) return "Caps Lock";
+    return part;
+}
+
+std::string NormalizeKeyNames(const std::string& label)
+{
+    std::string out;
+    size_t start = 0;
+    while (start <= label.size()) {
+        size_t end = label.find(", ", start);
+        std::string part = (end == std::string::npos)
+                               ? label.substr(start)
+                               : label.substr(start, end - start);
+        if (!out.empty()) out += ", ";
+        out += NormalizeKeyNamePart(part);
+        if (end == std::string::npos) break;
+        start = end + 2;
+    }
+    return out;
+}
+
 } // namespace
 
 std::optional<MenuSelection> GetKeyboardSelection()
@@ -492,6 +537,13 @@ std::optional<MenuSelection> GetKeyboardSelection()
     if (sel.label.empty() && sel.value.empty()) return std::nullopt;
     sel.container = listbox;
     sel.context   = CollectPanelStaticText(listbox);
+
+    // In settings/controls (StartMenu) normalize confusing key names
+    // ("KAPSLE" → "Caps Lock").
+    if (OwningMenuType(listbox) == kMenuType_Start) {
+        sel.label = NormalizeKeyNames(sel.label);
+        sel.value = NormalizeKeyNames(sel.value);
+    }
     return sel;
 }
 
@@ -540,15 +592,92 @@ bool ClickMenuBack()
 
 // ---- Pip-Boy --------------------------------------------------------------
 
+namespace {
+
+// Find the top-level TileMenu of the given engine type, but only if it is
+// actually VISIBLE (in gameplay all Pip-Boy pages stay mounted; the active
+// page is the one with visible=1 on its menu tile).
+Tile* FindVisibleMenuTile(UInt32 menuType)
+{
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot) return nullptr;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child && rt::TileIsVisible(cn->child)) {
+            auto* tm = reinterpret_cast<TileMenu*>(cn->child);
+            Menu* m = tm->menu;
+            if (m && m->typeID == menuType) return cn->child;
+        }
+        node = node->next;
+    }
+    return nullptr;
+}
+
+// The game marks the ACTIVE tab button of a tab strip by dimming it to
+// alpha == 32 (all Pip-Boy sub-tab strips follow this: Status/SPECIAL/...,
+// KND/RAD/SKT, the Data page's Local Map/.../Radio). Collect the labels of
+// such buttons in the page's subtree.
+void CollectActiveTabButtons(Tile* t, int depth, std::string& out)
+{
+    if (!t || depth > 7) return;
+    if (TileNum(t, kTileValue_target) != 0.0f) {
+        float a = TileNum(t, kTileValue_alpha);
+        if (a >= 24.0f && a <= 48.0f) {
+            if (const char* s = TileStringTrait(t)) {
+                std::string part = GameStrToUtf8(s);
+                if (!part.empty() && out.find(part) == std::string::npos) {
+                    if (!out.empty()) out += ", ";
+                    out += part;
+                }
+            }
+        }
+    }
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&t->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) CollectActiveTabButtons(cn->child, depth + 1, out);
+        node = node->next;
+    }
+}
+
+// Read "Title Value" pairs out of a Pip-Boy info box (CI_TitleText +
+// CI_ValueText children, one pair per sub-box) — e.g. "PW 156/200".
+void CollectInfoPairs(Tile* box, std::string& out)
+{
+    if (!box) return;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&box->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) {
+            Tile* c = cn->child;
+            Tile* tt = TileNameHas(c, "TitleText") ? c
+                       : FindChildByName(c, "TitleText", 1);
+            Tile* vt = TileNameHas(c, "ValueText") ? c
+                       : FindChildByName(c, "ValueText", 1);
+            const char* ts = tt ? TileStringTrait(tt) : nullptr;
+            const char* vs = vt ? TileStringTrait(vt) : nullptr;
+            if (ts && vs) {
+                if (!out.empty()) out += ", ";
+                out += GameStrToUtf8(ts);
+                out += " ";
+                out += GameStrToUtf8(vs);
+            }
+        }
+        node = node->next;
+    }
+}
+
+} // namespace
+
 PipBoyTab GetActivePipBoyTab()
 {
-    // Distinguish by which of the Pip-Boy sub-menus is visible:
-    //   Stats     → kMenuType_Stats     (0x3EB)
-    //   Items     → kMenuType_Inventory (0x3EA)
-    //   Data/Map  → kMenuType_Map       (0x3FF) or the Quest/Notes/Radio
-    //               sub-tab inside the StatsMenu container
-    if (rt::IsMenuVisible(kMenuType_Inventory)) return PipBoyTab::Items;
-    if (rt::IsMenuVisible(kMenuType_Map))       return PipBoyTab::Data;
+    // The active page is the VISIBLE one — all three stay mounted.
+    if (FindVisibleMenuTile(kMenuType_Inventory)) return PipBoyTab::Items;
+    if (FindVisibleMenuTile(kMenuType_Map))       return PipBoyTab::Data;
     return PipBoyTab::Stats;
 }
 
@@ -562,7 +691,31 @@ std::string GetActivePipBoyTabName()
     return {};
 }
 
-std::string GetActivePipBoySubTabName() { return {}; }
+std::string GetActivePipBoySubTabName()
+{
+    static const UInt32 kPages[] = {
+        kMenuType_Stats, kMenuType_Inventory, kMenuType_Map,
+    };
+    for (UInt32 mt : kPages) {
+        if (Tile* page = FindVisibleMenuTile(mt)) {
+            std::string out;
+            CollectActiveTabButtons(page, 0, out);
+            return out;
+        }
+    }
+    return {};
+}
+
+std::string GetPipBoyVitals()
+{
+    Tile* stats = FindVisibleMenuTile(kMenuType_Stats);
+    if (!stats) return {};
+    std::string out;
+    CollectInfoPairs(FindChildByName(stats, "lvl_info", 4), out);
+    CollectInfoPairs(FindChildByName(stats, "hp_info", 4), out);
+    return out;
+}
+
 std::optional<InventoryItem> GetSelectedInventoryItem() { return std::nullopt; }
 
 // ---- Dialog / Barter / Lockpick / VATS — TODO ----------------------------

@@ -66,6 +66,15 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 | F11 | diagnostic: dump the current menu structure to a file (attach it to bug reports) |
 | F10 | debug: run the console command from `[Debug] StartGameCommand` (e.g. start a game skipping the intro) |
 
+### Pip-Boy (vanilla game keys, listed here because they matter)
+
+| Key | Action |
+| --- | --- |
+| Tab | open / close the Pip-Boy |
+| **F1 / F2 / F3** | switch main page: Stats / Items / Data |
+| Arrow Left / Right | switch sub-tab on the current page |
+| Arrow Up / Down | move through the list (or switch the CND/RAD/EFF view on the Status page) |
+
 ### In the game world
 
 | Key | Action | Status |

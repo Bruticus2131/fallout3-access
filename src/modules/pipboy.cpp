@@ -14,6 +14,7 @@ namespace {
 
 std::string g_last_selection;
 std::string g_last_tab;
+std::string g_last_subtab;
 
 void AnnounceSelection(bool force)
 {
@@ -69,11 +70,49 @@ void AnnounceTabIfChanged()
     }
 }
 
+// Announce the active sub-tab strip selection (Status / SPECIAL / Skills...,
+// KND / RAD / SKT, Weapons / Apparel / ... on the Items page) on change.
+// A page has several tab strips at once (tailline + the KND/RAD/SKT view
+// switch), so on change we voice ONLY the parts that weren't active before —
+// e.g. switching the view says just "RAD", not "Status, RAD" again.
+void AnnounceSubTabIfChanged(bool queue_after_tab)
+{
+    std::string sub = game::GetActivePipBoySubTabName();
+    if (sub.empty() || sub == g_last_subtab) return;
+
+    std::string fresh;
+    size_t start = 0;
+    while (start <= sub.size()) {
+        size_t end = sub.find(", ", start);
+        std::string part = (end == std::string::npos)
+                               ? sub.substr(start)
+                               : sub.substr(start, end - start);
+        if (!part.empty() &&
+            g_last_subtab.find(part) == std::string::npos) {
+            if (!fresh.empty()) fresh += ", ";
+            fresh += part;
+        }
+        if (end == std::string::npos) break;
+        start = end + 2;
+    }
+    g_last_subtab = sub;
+    if (fresh.empty()) return;
+    // Don't interrupt the page announcement when both change at once.
+    tolk::Speak(fresh, tolk::Priority::Ui, !queue_after_tab);
+}
+
 void OnOpen()
 {
     g_last_selection.clear();
     g_last_tab.clear();
+    g_last_subtab.clear();
     AnnounceTabIfChanged();
+    AnnounceSubTabIfChanged(/*queue_after_tab=*/true);
+    // On the Stats page read the vitals once: level, HP, AP, XP.
+    std::string vitals = game::GetPipBoyVitals();
+    if (!vitals.empty()) {
+        tolk::Speak(vitals, tolk::Priority::Ui, false);  // queue, don't cut
+    }
     AnnounceSelection(true);
 }
 
@@ -81,11 +120,13 @@ void OnClose()
 {
     g_last_selection.clear();
     g_last_tab.clear();
+    g_last_subtab.clear();
 }
 
 void OnTick(float)
 {
     AnnounceTabIfChanged();
+    AnnounceSubTabIfChanged(false);
     AnnounceSelection(false);
 }
 
