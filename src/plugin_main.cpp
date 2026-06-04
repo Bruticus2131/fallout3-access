@@ -206,7 +206,11 @@ void OnPluginLoad()
 
 void OnGameLoaded()
 {
-    f3a::hotkeys::Rebind();
+    // Do NOT Rebind() here: Rebind() clears every binding and re-adds only
+    // the unconditional global hotkeys — the per-module keys (L/K/F/H/X/C,
+    // scanner, beacon...) are registered once at plugin load and would be
+    // wiped, leaving only F11/F12/Backspace working after a save loads.
+    // The bindings from load stay valid across game loads, so we keep them.
     tolk::Speak(str::Render(str::Key::LoadingDone),
                 tolk::Priority::System, true);
 }
