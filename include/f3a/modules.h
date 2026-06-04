@@ -30,4 +30,14 @@ void Stop();
 bool IsWalking();
 }
 
+// Beacon guidance: the player walks; the mod gives audio direction cues.
+namespace guide {
+void Init();
+void Shutdown();
+void Tick(float dt);
+void StartTo(const game::Vec3& pos, const std::string& name);
+void Stop();
+bool IsActive();
+}
+
 } // namespace f3a::modules

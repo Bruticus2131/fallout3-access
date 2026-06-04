@@ -81,10 +81,23 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 | --- | --- | --- |
 | T | where am I — location and facing direction | works |
 | F | compass direction | works |
+| X | read nearby objects | works |
+| C | read nearby hostiles | works |
 | H | player status (HP, AP, rads, caps) | work in progress |
 | Q | current quest target direction | work in progress |
-| X | scan nearby objects | work in progress |
-| C | scan for hostiles | work in progress |
+
+### World navigation
+
+Explore and travel without sight:
+
+| Key | Action |
+| --- | --- |
+| Page Down / Page Up | cycle nearby objects (reads "name, distance, clock direction, i of N") |
+| Home | turn to face the selected object |
+| End | **beacon guidance**: you walk (W), the mod steers you by ear — a beep means on-course, a spoken clock direction ("3 o'clock") means turn; distance is called out, and you're warned if the target is on another floor. Press again to stop. |
+| Insert | **auto-walk**: the mod walks you to the target on open ground (gentle steering, stops on obstacles or a different floor). Press again to stop. |
+
+Beacon guidance (End) is the recommended way to get around indoors; auto-walk (Insert) is handy on open terrain.
 
 ## Configuration
 

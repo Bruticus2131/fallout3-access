@@ -44,6 +44,35 @@ constexpr float kCalloutEvery = 2.5f;
 // Arrival radius (~1.7 m).
 constexpr float kArriveDist = 110.0f;
 
+// Different-floor guard: a straight-line driver can't climb stairs, so if the
+// target is well above/below us, stop and tell the player to use the beacon.
+constexpr float kFloorDelta = 160.0f;
+
+// Gentle steering: snapping yaw straight at the target each tick makes the
+// player orbit the goal (the heading error swings 180° as you pass abeam).
+// Turn toward the desired heading by at most this many degrees per tick, and
+// don't bother correcting within a small dead zone.
+constexpr float kMaxTurnDeg  = 18.0f;
+constexpr float kDeadZoneDeg = 4.0f;
+
+void SteerToward(const game::Vec3& target)
+{
+    auto pp = game::GetPlayerPosition();
+    auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), target);
+    float rel = br.relative_yaw;            // -180..180, 0 = ahead
+    if (std::fabs(rel) <= kDeadZoneDeg) return;
+    float step = rel;
+    if (step >  kMaxTurnDeg) step =  kMaxTurnDeg;
+    if (step < -kMaxTurnDeg) step = -kMaxTurnDeg;
+    float new_yaw_deg = game::GetPlayerYaw() + step;
+    // Convert back to a world point ahead at the new heading and reuse
+    // SetPlayerYawTo, so all yaw-convention math stays in one place.
+    float rad = new_yaw_deg * 0.01745329252f;
+    game::Vec3 ahead{ pp.x + std::sin(rad) * 100.0f,
+                      pp.y + std::cos(rad) * 100.0f, pp.z };
+    game::SetPlayerYawTo(ahead);
+}
+
 // Forward key as a hardware scancode (W = 0x11). DirectInput sees scancode
 // injection; configurable later if the user rebinds movement.
 constexpr WORD kForwardScan = 0x11;
@@ -126,8 +155,17 @@ void Tick(float dt)
         return;
     }
 
-    // Steer toward the target continuously.
-    game::SetPlayerYawTo(g_target_pos);
+    // Different floor → a straight-line walk can't get there. Bail out and
+    // point the player at the beacon instead.
+    float dz = g_target_pos.z - game::GetPlayerPosition().z;
+    if (std::fabs(dz) > kFloorDelta) {
+        StopWalking(dz > 0 ? "Cel jest wyżej. Użyj naprowadzania i schodów."
+                           : "Cel jest niżej. Użyj naprowadzania i schodów.");
+        return;
+    }
+
+    // Steer toward the target gradually (avoids orbiting the goal).
+    SteerToward(g_target_pos);
 
     // Stuck probe.
     g_probe_timer += dt;

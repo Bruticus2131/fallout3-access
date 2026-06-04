@@ -146,18 +146,30 @@ void TurnToCurrent()
     tolk::Speak("Skierowano na: " + e.name, tolk::Priority::Ui, true);
 }
 
+bool HaveTarget()
+{
+    if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size()) return true;
+    tolk::Speak("Najpierw wybierz cel skanerem.",
+                tolk::Priority::System, true);
+    return false;
+}
+
+void GuideToggle()
+{
+    if (!GameplayAndHud()) return;
+    if (guide::IsActive()) { guide::Stop(); return; }
+    if (!HaveTarget()) return;
+    autowalk::Stop();   // the two modes are mutually exclusive
+    const auto& e = g_scan_list[g_scan_index];
+    guide::StartTo(e.position, e.name);
+}
+
 void AutoWalkToggle()
 {
     if (!GameplayAndHud()) return;
-    if (autowalk::IsWalking()) {
-        autowalk::Stop();
-        return;
-    }
-    if (g_scan_index < 0 || g_scan_index >= (int)g_scan_list.size()) {
-        tolk::Speak("Najpierw wybierz cel skanerem.",
-                    tolk::Priority::System, true);
-        return;
-    }
+    if (autowalk::IsWalking()) { autowalk::Stop(); return; }
+    if (!HaveTarget()) return;
+    guide::Stop();      // the two modes are mutually exclusive
     const auto& e = g_scan_list[g_scan_index];
     autowalk::StartTo(e.position, e.name);
 }
@@ -172,6 +184,7 @@ void Init()
     hotkeys::Bind(h.scan_next,     &ScanNext);
     hotkeys::Bind(h.scan_prev,     &ScanPrev);
     hotkeys::Bind(h.turn_to,       &TurnToCurrent);
+    hotkeys::Bind(h.guide_beacon,  &GuideToggle);
     hotkeys::Bind(h.auto_walk,     &AutoWalkToggle);
     F3A_INFO("World scan module ready.");
 }

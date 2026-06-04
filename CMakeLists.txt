@@ -84,6 +84,7 @@ set(F3A_SOURCES
     src/modules/nav_assist.cpp
     src/modules/world_scan.cpp
     src/modules/autowalk.cpp
+    src/modules/guide.cpp
     src/modules/modules_init.cpp
 )
 

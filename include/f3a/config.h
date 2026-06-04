@@ -24,7 +24,8 @@ struct Hotkeys {
     uint32_t scan_next        = 0xD1; // Page Down — next nearby object
     uint32_t scan_prev        = 0xC9; // Page Up — previous nearby object
     uint32_t turn_to          = 0xC7; // Home — face the selected object
-    uint32_t auto_walk        = 0xCF; // End — walk to the selected object
+    uint32_t guide_beacon     = 0xCF; // End — beacon guidance to the target
+    uint32_t auto_walk        = 0xD2; // Insert — auto-walk to the target
 };
 
 struct Settings {

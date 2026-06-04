@@ -15,6 +15,7 @@ void InitAll()
     if (c.enable_nav)       nav::Init();
     if (c.enable_worldscan) worldscan::Init();
     if (c.enable_worldscan) autowalk::Init();
+    if (c.enable_worldscan) guide::Init();
     container::Init();
     message::Init();
     F3A_INFO("Modules initialized.");
@@ -30,6 +31,7 @@ void ShutdownAll()
     nav::Shutdown();
     worldscan::Shutdown();
     autowalk::Shutdown();
+    guide::Shutdown();
     container::Shutdown();
     message::Shutdown();
 }

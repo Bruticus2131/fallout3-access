@@ -447,6 +447,7 @@ void Tick(float dt)
     if (config::IsEnabled()) {
         hotkeys::Poll();
         modules::autowalk::Tick(dt);
+        modules::guide::Tick(dt);
     }
 }
 

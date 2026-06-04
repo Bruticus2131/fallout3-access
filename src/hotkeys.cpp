@@ -24,31 +24,42 @@ std::vector<Binding> g_bindings;
 
 int DikToVk(uint32_t dik)
 {
-    // MapVirtualKey with MAPVK_VSC_TO_VK_EX gives us a usable VK for the
-    // common scancodes. Extended keys (arrow cluster, numpad) need the high
-    // bit, but we only expose alpha/F-keys/symbol keys in the default INI.
-    UINT vk = MapVirtualKeyW(dik, MAPVK_VSC_TO_VK_EX);
-    if (vk == 0) {
-        // Fallback table for the keys we ship by default.
-        switch (dik) {
-        case 0x10: return 'Q';
-        case 0x14: return 'T';
-        case 0x21: return 'F';
-        case 0x23: return 'H';
-        case 0x2D: return 'X';
-        case 0x2E: return 'C';
-        case 0x35: return VK_OEM_2;       // '/'
-        case 0x39: return VK_SPACE;
-        case 0x1C: return VK_RETURN;
-        case 0x0E: return VK_BACK;        // Backspace
-        case 0xC9: return VK_PRIOR;       // Page Up
-        case 0xD1: return VK_NEXT;        // Page Down
-        case 0xC7: return VK_HOME;        // Home
-        case 0xCF: return VK_END;         // End
-        case 0x58: return VK_F12;
-        default:   return 0;
-        }
+    // Known table FIRST. Extended DIK codes (0xC7 Home, 0xC9 PgUp, 0xCF End,
+    // 0xD1 PgDn, ...) are E0-prefixed scancodes that MapVirtualKey does NOT
+    // translate correctly — it returns a bogus non-zero VK (numpad aliases),
+    // which used to shadow the fallback and silently bind the wrong key.
+    switch (dik) {
+    case 0x10: return 'Q';
+    case 0x14: return 'T';
+    case 0x21: return 'F';
+    case 0x23: return 'H';
+    case 0x2D: return 'X';
+    case 0x2E: return 'C';
+    case 0x35: return VK_OEM_2;       // '/'
+    case 0x39: return VK_SPACE;
+    case 0x1C: return VK_RETURN;
+    case 0x0E: return VK_BACK;        // Backspace
+    case 0xC7: return VK_HOME;
+    case 0xC9: return VK_PRIOR;       // Page Up
+    case 0xCF: return VK_END;
+    case 0xD1: return VK_NEXT;        // Page Down
+    case 0xD2: return VK_INSERT;
+    case 0xD3: return VK_DELETE;
+    case 0x3B: return VK_F1;
+    case 0x3C: return VK_F2;
+    case 0x3D: return VK_F3;
+    case 0x3E: return VK_F4;
+    case 0x3F: return VK_F5;
+    case 0x40: return VK_F6;
+    case 0x41: return VK_F7;
+    case 0x42: return VK_F8;
+    case 0x43: return VK_F9;
+    case 0x44: return VK_F10;
+    case 0x57: return VK_F11;
+    case 0x58: return VK_F12;
+    default:   break;
     }
+    UINT vk = MapVirtualKeyW(dik, MAPVK_VSC_TO_VK_EX);
     return (int)vk;
 }
 

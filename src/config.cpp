@@ -106,6 +106,7 @@ bool Load(const wchar_t* ini_path)
     h.scan_next        = ReadKey(L"Hotkeys", L"ScanNext",        h.scan_next,        ini_path);
     h.scan_prev        = ReadKey(L"Hotkeys", L"ScanPrev",        h.scan_prev,        ini_path);
     h.turn_to          = ReadKey(L"Hotkeys", L"TurnTo",          h.turn_to,          ini_path);
+    h.guide_beacon     = ReadKey(L"Hotkeys", L"GuideBeacon",     h.guide_beacon,     ini_path);
     h.auto_walk        = ReadKey(L"Hotkeys", L"AutoWalk",        h.auto_walk,        ini_path);
 
     F3A_INFO("Config loaded. Language='%s'.", s.language.c_str());
