@@ -79,12 +79,14 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 
 | Key | Action | Status |
 | --- | --- | --- |
-| T | where am I — location and facing direction | works |
+| L | where am I — location and facing direction | works |
 | F | compass direction | works |
 | X | read nearby objects | works |
 | C | read nearby hostiles | works |
 | H | player status (HP, AP, rads, caps) | work in progress |
-| Q | current quest target direction | work in progress |
+| K | current quest target direction | work in progress |
+
+(Defaults deliberately avoid keys Fallout 3 uses itself.)
 
 ### World navigation
 
@@ -92,12 +94,12 @@ Explore and travel without sight:
 
 | Key | Action |
 | --- | --- |
-| Page Down / Page Up | cycle nearby objects (reads "name, distance, clock direction, i of N") |
-| Home | turn to face the selected object |
-| End | **beacon guidance**: you walk (W), the mod plays a positional sonar ping at the target — panned left/right by direction, higher-pitched when it's ahead and lower when behind, faster as you close in. Turn until the ping is centred and high, then walk toward it. Distance is called out and you're warned if the target is on another floor. Press again to stop. |
-| Insert | **auto-walk**: the mod walks you to the target on open ground (gentle steering, stops on obstacles or a different floor). Press again to stop. |
+| `[` / `]` | cycle nearby objects (reads "name, distance, clock direction, i of N") |
+| `'` (apostrophe) | turn to face the selected object |
+| `;` (semicolon) | **beacon guidance**: you walk (W), the mod plays a positional sonar ping at the target — panned left/right by direction, higher-pitched when it's ahead and lower when behind, faster as you close in. Turn until the ping is centred and high, then walk toward it. Distance is called out and you're warned if the target is on another floor. Press again to stop. |
+| `\` (backslash) | **auto-walk**: the mod walks you to the target on open ground (gentle steering, stops on obstacles or a different floor). Press again to stop. |
 
-Beacon guidance (End) is the recommended way to get around indoors; auto-walk (Insert) is handy on open terrain.
+Beacon guidance (`;`) is the recommended way to get around indoors; auto-walk (`\`) is handy on open terrain. All keys are remappable in the INI.
 
 ## Configuration
 

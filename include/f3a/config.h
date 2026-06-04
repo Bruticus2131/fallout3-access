@@ -7,12 +7,15 @@ namespace f3a::config {
 
 struct Hotkeys {
     // DirectInput scancodes (DIK_*). 0 = disabled.
+    // Defaults avoid keys Fallout 3 binds itself, and avoid extended (E0)
+    // scancodes (PgUp/Home/...) which GetAsyncKeyState reads unreliably for
+    // some keyboards. We use plain letters and the punctuation cluster.
     uint32_t read_selection   = 0x1C; // ENTER
     uint32_t repeat_last      = 0x35; // /
     uint32_t silence          = 0x39; // SPACE-ish — overridden in INI usually
-    uint32_t where_am_i       = 0x14; // T
-    uint32_t player_status    = 0x23; // H  (HP/AP/etc.)
-    uint32_t quest_target     = 0x10; // Q
+    uint32_t where_am_i       = 0x26; // L — location ("where am I")
+    uint32_t player_status    = 0x23; // H — HP/AP/etc.
+    uint32_t quest_target     = 0x25; // K — quest target direction
     uint32_t scan_nearby      = 0x2D; // X
     uint32_t scan_hostiles    = 0x2E; // C
     uint32_t describe_compass = 0x21; // F
@@ -20,12 +23,12 @@ struct Hotkeys {
     uint32_t dump_menu_tree   = 0x57; // F11 — diagnostic dump to log
     uint32_t debug_start_game = 0x44; // F10 — run [Debug] StartGameCommand
     uint32_t menu_back        = 0x0E; // Backspace — click the menu Back button
-    // Object scanner + AutoWalk (world navigation).
-    uint32_t scan_next        = 0xD1; // Page Down — next nearby object
-    uint32_t scan_prev        = 0xC9; // Page Up — previous nearby object
-    uint32_t turn_to          = 0xC7; // Home — face the selected object
-    uint32_t guide_beacon     = 0xCF; // End — beacon guidance to the target
-    uint32_t auto_walk        = 0xD2; // Insert — auto-walk to the target
+    // Object scanner + navigation (punctuation cluster, all non-extended).
+    uint32_t scan_prev        = 0x1A; // [ — previous nearby object
+    uint32_t scan_next        = 0x1B; // ] — next nearby object
+    uint32_t turn_to          = 0x28; // ' — face the selected object
+    uint32_t guide_beacon     = 0x27; // ; — beacon guidance to the target
+    uint32_t auto_walk        = 0x2B; // \ — auto-walk to the target
 };
 
 struct Settings {

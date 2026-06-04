@@ -91,6 +91,7 @@ void Rescan()
     g_scan_list = game::ScanNearby(cfg.nearby_scan_radius * 2, 40,
                                    false, false);
     g_scan_index = g_scan_list.empty() ? -1 : 0;
+    F3A_INFO("Scanner rescan: %d objects found.", (int)g_scan_list.size());
 }
 
 void AnnounceCurrent()
@@ -116,7 +117,10 @@ void AnnounceCurrent()
 
 void ScanNext()
 {
-    if (!GameplayAndHud()) return;
+    if (!GameplayAndHud()) {
+        F3A_DEBUG("ScanNext ignored: not gameplay/HUD.");
+        return;
+    }
     if (g_scan_list.empty() || g_scan_index < 0) {
         Rescan();
     } else if (++g_scan_index >= (int)g_scan_list.size()) {

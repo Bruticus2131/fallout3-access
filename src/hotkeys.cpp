@@ -33,8 +33,17 @@ int DikToVk(uint32_t dik)
     case 0x14: return 'T';
     case 0x21: return 'F';
     case 0x23: return 'H';
+    case 0x25: return 'K';
+    case 0x26: return 'L';
     case 0x2D: return 'X';
     case 0x2E: return 'C';
+    case 0x1A: return VK_OEM_4;       // [
+    case 0x1B: return VK_OEM_6;       // ]
+    case 0x27: return VK_OEM_1;       // ;
+    case 0x28: return VK_OEM_7;       // '
+    case 0x2B: return VK_OEM_5;       // backslash
+    case 0x33: return VK_OEM_COMMA;   // ,
+    case 0x34: return VK_OEM_PERIOD;  // .
     case 0x35: return VK_OEM_2;       // '/'
     case 0x39: return VK_SPACE;
     case 0x1C: return VK_RETURN;
@@ -168,6 +177,7 @@ void Poll()
         if (!vk) continue;
         bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
         if (down && !b.was_down) {
+            F3A_DEBUG("hotkey fired: dik=0x%02X vk=0x%02X", b.dik, vk);
             if (b.action) b.action();
         }
         b.was_down = down;
