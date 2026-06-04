@@ -20,6 +20,11 @@ struct Hotkeys {
     uint32_t dump_menu_tree   = 0x57; // F11 — diagnostic dump to log
     uint32_t debug_start_game = 0x44; // F10 — run [Debug] StartGameCommand
     uint32_t menu_back        = 0x0E; // Backspace — click the menu Back button
+    // Object scanner + AutoWalk (world navigation).
+    uint32_t scan_next        = 0xD1; // Page Down — next nearby object
+    uint32_t scan_prev        = 0xC9; // Page Up — previous nearby object
+    uint32_t turn_to          = 0xC7; // Home — face the selected object
+    uint32_t auto_walk        = 0xCF; // End — walk to the selected object
 };
 
 struct Settings {

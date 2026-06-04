@@ -41,6 +41,10 @@ int DikToVk(uint32_t dik)
         case 0x39: return VK_SPACE;
         case 0x1C: return VK_RETURN;
         case 0x0E: return VK_BACK;        // Backspace
+        case 0xC9: return VK_PRIOR;       // Page Up
+        case 0xD1: return VK_NEXT;        // Page Down
+        case 0xC7: return VK_HOME;        // Home
+        case 0xCF: return VK_END;         // End
         case 0x58: return VK_F12;
         default:   return 0;
         }

@@ -83,6 +83,7 @@ set(F3A_SOURCES
     src/modules/message.cpp
     src/modules/nav_assist.cpp
     src/modules/world_scan.cpp
+    src/modules/autowalk.cpp
     src/modules/modules_init.cpp
 )
 

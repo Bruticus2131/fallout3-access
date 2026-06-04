@@ -2,6 +2,7 @@
 #include "f3a/fose_runtime.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/game_access.h"
+#include "f3a/modules.h"
 #include "f3a/hotkeys.h"
 #include "f3a/config.h"
 #include "f3a/logger.h"
@@ -445,6 +446,7 @@ void Tick(float dt)
 
     if (config::IsEnabled()) {
         hotkeys::Poll();
+        modules::autowalk::Tick(dt);
     }
 }
 

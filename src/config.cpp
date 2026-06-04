@@ -103,6 +103,10 @@ bool Load(const wchar_t* ini_path)
     h.dump_menu_tree   = ReadKey(L"Hotkeys", L"DumpMenuTree",    h.dump_menu_tree,   ini_path);
     h.debug_start_game = ReadKey(L"Hotkeys", L"DebugStartGame",  h.debug_start_game, ini_path);
     h.menu_back        = ReadKey(L"Hotkeys", L"MenuBack",        h.menu_back,        ini_path);
+    h.scan_next        = ReadKey(L"Hotkeys", L"ScanNext",        h.scan_next,        ini_path);
+    h.scan_prev        = ReadKey(L"Hotkeys", L"ScanPrev",        h.scan_prev,        ini_path);
+    h.turn_to          = ReadKey(L"Hotkeys", L"TurnTo",          h.turn_to,          ini_path);
+    h.auto_walk        = ReadKey(L"Hotkeys", L"AutoWalk",        h.auto_walk,        ini_path);
 
     F3A_INFO("Config loaded. Language='%s'.", s.language.c_str());
     F3A_INFO("Hotkeys: toggle=0x%02X silence=0x%02X dump=0x%02X",

@@ -12,6 +12,7 @@
 #include "f3a/polling_loop.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -116,11 +117,142 @@ QuestTarget GetCurrentQuestTarget()
 
 // ---- World scan -----------------------------------------------------------
 
-std::vector<WorldEntity> ScanNearby(int, int, bool, bool)
+namespace {
+
+// Defensive read of a possibly-bogus char*: a wrong fullName offset must not
+// crash the scanner thread.
+const char* SafeCStr(const char* s)
 {
-    // Walking the parent cell's object list requires GetFirstRef-style
-    // iteration over BSTArray<TESObjectREFR*>. Deferred to a follow-up.
-    return {};
+    if (!s) return nullptr;
+    if (IsBadReadPtr(s, 4)) return nullptr;
+    return s;
+}
+
+// Display name of a reference's BASE form. FOSE finds TESFullName via game
+// RTTI; we can't link that, so use the per-type member offsets documented in
+// FOSE's GameForms.h class layouts instead. Types not in the table (statics,
+// grass...) return null and get skipped by the scanner.
+const char* BaseFormName(TESForm* base)
+{
+    if (!base) return nullptr;
+    UInt32 off;
+    switch (base->typeID) {
+    // TESBoundAnimObject children — TESFullName directly after TESBoundObject.
+    case kFormType_Activator:
+    case kFormType_TalkingActivator:
+    case kFormType_Terminal:
+    case kFormType_Container:
+    case kFormType_Door:
+    case kFormType_Light:
+    case kFormType_Furniture:
+    // Bound objects with the same layout prefix.
+    case kFormType_Armor:
+    case kFormType_Book:
+    case kFormType_Clothing:
+    case kFormType_Misc:
+    case kFormType_Weapon:
+    case kFormType_Ammo:
+    case kFormType_Key:
+        off = 0x30;
+        break;
+    // TESActorBase embeds TESFullName at 0xD0.
+    case kFormType_NPC:
+    case kFormType_Creature:
+        off = 0xD0;
+        break;
+    // AlchemyItem (MagicItem mixin) — 0x48.
+    case kFormType_AlchemyItem:
+        off = 0x48;
+        break;
+    default:
+        return nullptr;
+    }
+    auto* fn = reinterpret_cast<TESFullName*>(
+        reinterpret_cast<UInt8*>(base) + off);
+    const char* s = SafeCStr(fn->name.m_data);
+    if (!s || !*s) return nullptr;
+    if (fn->name.m_dataLen == 0 || fn->name.m_dataLen > 200) return nullptr;
+    return s;
+}
+
+WorldEntity::Kind KindOf(UInt32 typeID)
+{
+    switch (typeID) {
+    case kFormType_NPC:
+    case kFormType_Creature:  return WorldEntity::Kind::Actor;
+    case kFormType_Container: return WorldEntity::Kind::Container;
+    case kFormType_Door:      return WorldEntity::Kind::Door;
+    case kFormType_Note:      return WorldEntity::Kind::Note;
+    default:                  return WorldEntity::Kind::Item;
+    }
+}
+
+} // namespace
+
+std::vector<WorldEntity> ScanNearby(int radius, int max_results,
+                                    bool actors_only, bool /*hostiles_only*/)
+{
+    std::vector<WorldEntity> out;
+    auto* p = rt::Player();
+    if (!p || !p->parentCell) return out;
+    Vec3 pp = GetPlayerPosition();
+
+    const float r2 = (float)radius * (float)radius;
+
+    // Walk the cell's tList<TESObjectREFR> with the same node semantics as
+    // tile child lists (terminate on null NODE, skip null items).
+    struct Node { TESObjectREFR* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&p->parentCell->objectList);
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        TESObjectREFR* r = node->item;
+        node = node->next;
+        if (!r || r == (TESObjectREFR*)p) continue;
+
+        // Skip disabled (0x800) / deleted (0x20) references.
+        if (r->flags & 0x820) continue;
+
+        TESForm* base = r->baseForm;
+        if (!base) continue;
+
+        WorldEntity::Kind kind = KindOf(base->typeID);
+        if (actors_only && kind != WorldEntity::Kind::Actor) continue;
+
+        float dx = r->posX - pp.x, dy = r->posY - pp.y;
+        float d2 = dx * dx + dy * dy;
+        if (d2 > r2) continue;
+
+        const char* nm = BaseFormName(base);
+        if (!nm) continue;
+
+        WorldEntity e;
+        e.kind     = kind;
+        e.name     = GameStrToUtf8(nm);
+        e.position = { r->posX, r->posY, r->posZ };
+        e.form_id  = r->refID;
+        out.push_back(std::move(e));
+    }
+
+    std::sort(out.begin(), out.end(),
+              [&pp](const WorldEntity& a, const WorldEntity& b) {
+                  float da = (a.position.x - pp.x) * (a.position.x - pp.x) +
+                             (a.position.y - pp.y) * (a.position.y - pp.y);
+                  float db = (b.position.x - pp.x) * (b.position.x - pp.x) +
+                             (b.position.y - pp.y) * (b.position.y - pp.y);
+                  return da < db;
+              });
+    if ((int)out.size() > max_results) out.resize(max_results);
+    return out;
+}
+
+void SetPlayerYawTo(const Vec3& target)
+{
+    auto* p = rt::Player();
+    if (!p) return;
+    float dx = target.x - p->posX;
+    float dy = target.y - p->posY;
+    // Engine yaw: radians, 0 = north (+Y), increasing clockwise — the same
+    // convention ComputeBearing assumes (atan2(dx, dy)).
+    p->rotZ = std::atan2(dx, dy);
 }
 
 Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to)

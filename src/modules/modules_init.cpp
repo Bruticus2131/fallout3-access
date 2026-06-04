@@ -14,6 +14,7 @@ void InitAll()
     if (c.enable_vats)      vats::Init();
     if (c.enable_nav)       nav::Init();
     if (c.enable_worldscan) worldscan::Init();
+    if (c.enable_worldscan) autowalk::Init();
     container::Init();
     message::Init();
     F3A_INFO("Modules initialized.");
@@ -28,6 +29,7 @@ void ShutdownAll()
     vats::Shutdown();
     nav::Shutdown();
     worldscan::Shutdown();
+    autowalk::Shutdown();
     container::Shutdown();
     message::Shutdown();
 }

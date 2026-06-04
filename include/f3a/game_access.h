@@ -95,6 +95,9 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
 
 Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to);
 
+// Rotate the player to face `target` (writes the player's yaw directly).
+void SetPlayerYawTo(const Vec3& target);
+
 // ---- Menus & UI state ----
 
 // Generic accessor for "what is currently highlighted in the active menu".
