@@ -66,6 +66,7 @@ set(F3A_SOURCES
     src/plugin_main.cpp
     src/tolk_bridge.cpp
     src/console.cpp
+    src/audio_beacon.cpp
     src/config.cpp
     src/strings_pl.cpp
     src/logger.cpp
@@ -133,7 +134,7 @@ target_compile_options(Fallout3Access PRIVATE
 )
 
 target_link_libraries(Fallout3Access PRIVATE
-    user32 kernel32 shell32 advapi32 shlwapi version
+    user32 kernel32 shell32 advapi32 shlwapi version winmm
 )
 
 set_target_properties(Fallout3Access PROPERTIES

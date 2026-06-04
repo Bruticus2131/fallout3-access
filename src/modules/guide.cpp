@@ -19,12 +19,11 @@
 #include "f3a/polling_loop.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/tolk_bridge.h"
+#include "f3a/audio_beacon.h"
 #include "f3a/strings.h"
 #include "f3a/logger.h"
 
-#include <windows.h>
 #include <cmath>
-#include <thread>
 #include <string>
 
 namespace f3a::modules::guide {
@@ -34,20 +33,18 @@ bool        g_active = false;
 game::Vec3  g_target{};
 std::string g_name;
 
-float g_cue_timer  = 0.0f;   // beep / direction cue cadence
+float g_ping_timer = 0.0f;   // positional beacon cadence
 float g_dist_timer = 0.0f;   // spoken distance cadence
-std::string g_last_clock;    // avoid repeating the same clock cue
 
 constexpr float kArriveDist   = 140.0f;  // ~2 m
-constexpr float kOnCourseDeg  = 12.0f;
 constexpr float kFloorDelta   = 160.0f;  // |dz| above this = different floor
-constexpr float kCueEvery     = 0.55f;
-constexpr float kDistEvery    = 3.0f;
+constexpr float kDistEvery    = 4.0f;
+constexpr float kRangeUnits   = 2500.0f; // distance mapped to 0..1 over this
 
-void BeepAsync(int freq, int ms)
-{
-    std::thread([freq, ms] { Beep(freq, ms); }).detach();
-}
+// Beacon ping interval shortens as you close in (classic sonar): far apart,
+// near rapid-fire.
+constexpr float kPingFar      = 0.90f;
+constexpr float kPingNear     = 0.18f;
 
 bool GameplayAndHud()
 {
@@ -62,12 +59,11 @@ bool IsActive() { return g_active; }
 
 void StartTo(const game::Vec3& pos, const std::string& name)
 {
-    g_target    = pos;
-    g_name      = name;
-    g_active    = true;
-    g_cue_timer = 0.0f;
+    g_target     = pos;
+    g_name       = name;
+    g_active     = true;
+    g_ping_timer = 0.0f;
     g_dist_timer = 0.0f;
-    g_last_clock.clear();
 
     auto pp = game::GetPlayerPosition();
     float dx = pos.x - pp.x, dy = pos.y - pp.y;
@@ -106,27 +102,17 @@ void Tick(float dt)
     auto br = game::ComputeBearing(pp, yaw, g_target);
     float rel = br.relative_yaw;
 
-    g_cue_timer += dt;
-    if (g_cue_timer >= kCueEvery) {
-        g_cue_timer = 0.0f;
-        if (std::fabs(rel) <= kOnCourseDeg) {
-            // On course: bright confirming beep. Pitch a touch higher the
-            // straighter you are.
-            int freq = 1500 + (int)((kOnCourseDeg - std::fabs(rel)) * 20);
-            BeepAsync(freq, 30);
-            g_last_clock.clear();
-        } else {
-            // Off course: speak the clock direction, but only when it
-            // changes, so small wobble doesn't chatter.
-            std::string clock = strings::ClockDirection(rel);
-            if (clock != g_last_clock) {
-                g_last_clock = clock;
-                tolk::Speak(clock, tolk::Priority::Ui, true);
-            } else {
-                // Same direction still needed: a low nudge beep.
-                BeepAsync(rel < 0 ? 500 : 700, 25);
-            }
-        }
+    // Positional beacon ping: panned by heading, pitched front/back, quieter
+    // with distance. The interval shortens as you approach. You steer by
+    // turning until the ping is centred and high-pitched, then walk in.
+    float dist01 = dist / kRangeUnits;
+    if (dist01 > 1.0f) dist01 = 1.0f;
+    float interval = kPingFar - (kPingFar - kPingNear) * (1.0f - dist01);
+
+    g_ping_timer += dt;
+    if (g_ping_timer >= interval) {
+        g_ping_timer = 0.0f;
+        audio::Ping(rel, dist01);
     }
 
     g_dist_timer += dt;
@@ -141,7 +127,16 @@ void Tick(float dt)
     }
 }
 
-void Init()     { F3A_INFO("Guide (beacon) module ready."); }
-void Shutdown() { g_active = false; }
+void Init()
+{
+    audio::Init();
+    F3A_INFO("Guide (beacon) module ready.");
+}
+
+void Shutdown()
+{
+    g_active = false;
+    audio::Shutdown();
+}
 
 } // namespace f3a::modules::guide

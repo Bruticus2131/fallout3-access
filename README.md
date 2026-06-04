@@ -94,7 +94,7 @@ Explore and travel without sight:
 | --- | --- |
 | Page Down / Page Up | cycle nearby objects (reads "name, distance, clock direction, i of N") |
 | Home | turn to face the selected object |
-| End | **beacon guidance**: you walk (W), the mod steers you by ear — a beep means on-course, a spoken clock direction ("3 o'clock") means turn; distance is called out, and you're warned if the target is on another floor. Press again to stop. |
+| End | **beacon guidance**: you walk (W), the mod plays a positional sonar ping at the target — panned left/right by direction, higher-pitched when it's ahead and lower when behind, faster as you close in. Turn until the ping is centred and high, then walk toward it. Distance is called out and you're warned if the target is on another floor. Press again to stop. |
 | Insert | **auto-walk**: the mod walks you to the target on open ground (gentle steering, stops on obstacles or a different floor). Press again to stop. |
 
 Beacon guidance (End) is the recommended way to get around indoors; auto-walk (Insert) is handy on open terrain.
