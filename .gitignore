@@ -1,0 +1,12 @@
+build/
+dist/
+*.user
+*.suo
+*.vs/
+*.vcxproj.filters
+CMakeUserPresets.json
+third_party/tolk/include/Tolk.h
+third_party/fose/
+xFOSE-main/
+xFOSE-main.zip
+*.log
