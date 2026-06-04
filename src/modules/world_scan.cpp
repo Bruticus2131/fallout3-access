@@ -73,9 +73,8 @@ void ScanHostiles() { DoScan(true);  }
 // to face the current pick; End starts/stops AutoWalk toward it.
 
 std::vector<game::WorldEntity> g_scan_list;
-int    g_scan_index = -1;
-double g_scan_age   = 0;     // ticks of staleness aren't tracked; we rescan
-                             // whenever the list is empty or index wraps.
+int         g_scan_index = -1;
+const void* g_scan_cell  = nullptr;  // cell the list was built for
 
 bool GameplayAndHud()
 {
@@ -91,7 +90,15 @@ void Rescan()
     g_scan_list = game::ScanNearby(cfg.nearby_scan_radius * 2, 40,
                                    false, false);
     g_scan_index = g_scan_list.empty() ? -1 : 0;
+    g_scan_cell  = game::GetPlayerCell();
     F3A_INFO("Scanner rescan: %d objects found.", (int)g_scan_list.size());
+}
+
+// True if the cached list belongs to a different cell than the player is in
+// now (changed save, walked through a door) — then it must be rebuilt.
+bool ScanListStale()
+{
+    return g_scan_list.empty() || g_scan_cell != game::GetPlayerCell();
 }
 
 void AnnounceCurrent()
@@ -121,7 +128,7 @@ void ScanNext()
         F3A_DEBUG("ScanNext ignored: not gameplay/HUD.");
         return;
     }
-    if (g_scan_list.empty() || g_scan_index < 0) {
+    if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (++g_scan_index >= (int)g_scan_list.size()) {
         // Wrapped — refresh the snapshot (things move) and start over.
@@ -133,7 +140,7 @@ void ScanNext()
 void ScanPrev()
 {
     if (!GameplayAndHud()) return;
-    if (g_scan_list.empty() || g_scan_index < 0) {
+    if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (--g_scan_index < 0) {
         g_scan_index = (int)g_scan_list.size() - 1;

@@ -98,6 +98,11 @@ Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to);
 // Rotate the player to face `target` (writes the player's yaw directly).
 void SetPlayerYawTo(const Vec3& target);
 
+// Opaque token identifying the player's current cell — changes when the
+// player moves to another cell or a different save is loaded. Used to drop a
+// stale scan list. nullptr if there is no player.
+const void* GetPlayerCell();
+
 // ---- Menus & UI state ----
 
 // Generic accessor for "what is currently highlighted in the active menu".

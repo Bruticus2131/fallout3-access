@@ -244,6 +244,12 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     return out;
 }
 
+const void* GetPlayerCell()
+{
+    auto* p = rt::Player();
+    return p ? (const void*)p->parentCell : nullptr;
+}
+
 void SetPlayerYawTo(const Vec3& target)
 {
     auto* p = rt::Player();

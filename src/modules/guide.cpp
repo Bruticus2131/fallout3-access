@@ -36,6 +36,16 @@ std::string g_name;
 float g_ping_timer = 0.0f;   // positional beacon cadence
 float g_dist_timer = 0.0f;   // spoken distance cadence
 
+// No-progress ("blocked") detection: a straight-line beacon points through
+// walls, so in corridors you can walk into a wall while the target stays the
+// same distance away. We watch distance over a window and warn when it isn't
+// shrinking, so the player knows to look for a way around (scanner → door).
+float g_prog_timer = 0.0f;
+float g_prog_dist  = 0.0f;
+bool  g_warned_blocked = false;
+constexpr float kProgEvery    = 2.5f;
+constexpr float kProgMin      = 60.0f;   // must close at least this per window
+
 constexpr float kArriveDist   = 140.0f;  // ~2 m
 constexpr float kFloorDelta   = 160.0f;  // |dz| above this = different floor
 constexpr float kDistEvery    = 4.0f;
@@ -64,10 +74,13 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_active     = true;
     g_ping_timer = 0.0f;
     g_dist_timer = 0.0f;
+    g_prog_timer = 0.0f;
+    g_warned_blocked = false;
 
     auto pp = game::GetPlayerPosition();
     float dx = pos.x - pp.x, dy = pos.y - pp.y;
     float dist = std::sqrt(dx * dx + dy * dy);
+    g_prog_dist = dist;
     tolk::Speak("Prowadzę do: " + name + ", " +
                 strings::FormatDistance(dist),
                 tolk::Priority::System, true);
@@ -124,6 +137,24 @@ void Tick(float dt)
                           : ", cel niżej — poszukaj schodów";
         }
         tolk::Speak(msg, tolk::Priority::Background, false);
+    }
+
+    // No-progress detector: are we actually getting closer?
+    g_prog_timer += dt;
+    if (g_prog_timer >= kProgEvery) {
+        g_prog_timer = 0.0f;
+        float closed = g_prog_dist - dist;     // positive = got closer
+        g_prog_dist = dist;
+        if (closed < kProgMin) {
+            if (!g_warned_blocked) {
+                g_warned_blocked = true;
+                tolk::Speak("Brak postępu — przeszkoda. Poszukaj obejścia "
+                            "skanerem, na przykład drzwi.",
+                            tolk::Priority::System, true);
+            }
+        } else {
+            g_warned_blocked = false;          // moving again; re-arm warning
+        }
     }
 }
 
