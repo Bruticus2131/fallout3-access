@@ -244,11 +244,23 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
         if (d2 > r2) continue;
 
         const char* nm = BaseFormName(base);
-        if (!nm) continue;
+        std::string label;
+        if (nm) {
+            label = GameStrToUtf8(nm);
+        } else if (kind == WorldEntity::Kind::Door) {
+            // Metro/subway entrances are often UNNAMED load doors — exactly
+            // what a blind player needs to find. Surface them generically
+            // instead of skipping for having no name.
+            label = "Drzwi";
+        } else if (kind == WorldEntity::Kind::Container) {
+            label = "Pojemnik";
+        } else {
+            continue;   // unnamed item/actor/etc. — skip noise
+        }
 
         WorldEntity e;
         e.kind     = kind;
-        e.name     = GameStrToUtf8(nm);
+        e.name     = std::move(label);
         e.position = { r->posX, r->posY, r->posZ };
         e.form_id  = r->refID;
         out.push_back(std::move(e));
