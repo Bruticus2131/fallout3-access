@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace f3a::game {
@@ -209,6 +210,53 @@ WorldEntity::Kind KindOf(UInt32 typeID)
     }
 }
 
+bool Readable(const void* p, size_t n) { return p && !IsBadReadPtr(p, n); }
+
+// Scan one cell's reference list into `out`.
+void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
+                  const void* selfRef, bool actors_only,
+                  std::vector<WorldEntity>& out)
+{
+    if (!Readable(cell, 0xB4)) return;
+    struct Node { TESObjectREFR* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&cell->objectList);
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        if (!Readable(node, 8)) break;
+        TESObjectREFR* r = node->item;
+        node = node->next;
+        if (!r || r == selfRef || !Readable(r, 0x40)) continue;
+        if (r->flags & 0x820) continue;          // disabled / deleted
+
+        TESForm* base = r->baseForm;
+        if (!Readable(base, 0x08)) continue;
+
+        WorldEntity::Kind kind = KindOf(base->typeID);
+        if (actors_only && kind != WorldEntity::Kind::Actor) continue;
+
+        float dx = r->posX - pp.x, dy = r->posY - pp.y;
+        if (dx * dx + dy * dy > r2) continue;
+
+        const char* nm = BaseFormName(base);
+        std::string label;
+        if (nm) {
+            label = GameStrToUtf8(nm);
+        } else if (kind == WorldEntity::Kind::Door) {
+            label = "Drzwi";       // unnamed load doors = metro entrances
+        } else if (kind == WorldEntity::Kind::Container) {
+            label = "Pojemnik";
+        } else {
+            continue;              // unnamed item/actor/etc. — skip noise
+        }
+
+        WorldEntity e;
+        e.kind     = kind;
+        e.name     = std::move(label);
+        e.position = { r->posX, r->posY, r->posZ };
+        e.form_id  = r->refID;
+        out.push_back(std::move(e));
+    }
+}
+
 } // namespace
 
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
@@ -218,52 +266,49 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     auto* p = rt::Player();
     if (!p || !p->parentCell) return out;
     Vec3 pp = GetPlayerPosition();
-
     const float r2 = (float)radius * (float)radius;
 
-    // Walk the cell's tList<TESObjectREFR> with the same node semantics as
-    // tile child lists (terminate on null NODE, skip null items).
-    struct Node { TESObjectREFR* item; Node* next; };
-    auto* node = reinterpret_cast<Node*>(&p->parentCell->objectList);
-    for (int safety = 0; node && safety < 8192; ++safety) {
-        TESObjectREFR* r = node->item;
-        node = node->next;
-        if (!r || r == (TESObjectREFR*)p) continue;
+    TESObjectCELL* pcell = p->parentCell;
+    ScanCellRefs(pcell, pp, r2, p, actors_only, out);
 
-        // Skip disabled (0x800) / deleted (0x20) references.
-        if (r->flags & 0x820) continue;
-
-        TESForm* base = r->baseForm;
-        if (!base) continue;
-
-        WorldEntity::Kind kind = KindOf(base->typeID);
-        if (actors_only && kind != WorldEntity::Kind::Actor) continue;
-
-        float dx = r->posX - pp.x, dy = r->posY - pp.y;
-        float d2 = dx * dx + dy * dy;
-        if (d2 > r2) continue;
-
-        const char* nm = BaseFormName(base);
-        std::string label;
-        if (nm) {
-            label = GameStrToUtf8(nm);
-        } else if (kind == WorldEntity::Kind::Door) {
-            // Metro/subway entrances are often UNNAMED load doors — exactly
-            // what a blind player needs to find. Surface them generically
-            // instead of skipping for having no name.
-            label = "Drzwi";
-        } else if (kind == WorldEntity::Kind::Container) {
-            label = "Pojemnik";
-        } else {
-            continue;   // unnamed item/actor/etc. — skip noise
+    // Exteriors are split into a grid of cells; the player's parentCell holds
+    // only its own square, so a metro door one square over is invisible from
+    // it. Walk the worldspace cell map and also scan the loaded cells around
+    // the player (objectList non-empty = loaded). Uses only FOSE-defined
+    // layouts; heavily guarded.
+    auto* ws = reinterpret_cast<UInt8*>(pcell->worldSpace);
+    auto* pcoords = reinterpret_cast<UInt8*>(pcell->coords);   // cell+0x44
+    if (Readable(ws, 0x34) && Readable(pcoords, 8)) {
+        int px = *reinterpret_cast<int*>(pcoords + 0);
+        int py = *reinterpret_cast<int*>(pcoords + 4);
+        // TESWorldSpace::cellMap @ +0x30 (NiTPointerMap<TESObjectCELL>).
+        UInt8* map = *reinterpret_cast<UInt8**>(ws + 0x30);
+        if (Readable(map, 0x10)) {
+            UInt32 nb = *reinterpret_cast<UInt32*>(map + 0x04);     // m_numBuckets
+            UInt8** buckets = *reinterpret_cast<UInt8***>(map + 0x08);
+            int scannedCells = 0;
+            if (nb > 0 && nb < 1000000 && Readable(buckets, nb * sizeof(void*))) {
+                for (UInt32 b = 0; b < nb && scannedCells < 64; ++b) {
+                    UInt8* entry = buckets[b];
+                    for (int guard = 0; entry && guard < 8192; ++guard) {
+                        if (!Readable(entry, 0x0C)) break;
+                        // Entry { next@0, key@4, data@8 }
+                        auto* cell = *reinterpret_cast<TESObjectCELL**>(entry + 8);
+                        entry = *reinterpret_cast<UInt8**>(entry + 0);
+                        if (cell == pcell || !Readable(cell, 0xB4)) continue;
+                        auto* cc = reinterpret_cast<UInt8*>(cell->coords);
+                        if (!Readable(cc, 8)) continue;
+                        int cx = *reinterpret_cast<int*>(cc + 0);
+                        int cy = *reinterpret_cast<int*>(cc + 4);
+                        if (std::abs(cx - px) > 2 || std::abs(cy - py) > 2)
+                            continue;
+                        ScanCellRefs(cell, pp, r2, p, actors_only, out);
+                        ++scannedCells;
+                    }
+                }
+            }
+            F3A_DEBUG("ScanNearby: grid cells scanned=%d", scannedCells);
         }
-
-        WorldEntity e;
-        e.kind     = kind;
-        e.name     = std::move(label);
-        e.position = { r->posX, r->posY, r->posZ };
-        e.form_id  = r->refID;
-        out.push_back(std::move(e));
     }
 
     std::sort(out.begin(), out.end(),
