@@ -20,4 +20,8 @@ void Poll();
 // Re-load bindings from config (after INI reload).
 void Rebind();
 
+// True if Shift is (or was very recently) held — a short grace window makes
+// Shift+key combos reliable despite the ~80 ms poll granularity.
+bool ShiftActive();
+
 } // namespace f3a::hotkeys

@@ -168,9 +168,19 @@ void Rebind()
     F3A_INFO("Hotkeys: %u bindings active.", (unsigned)g_bindings.size());
 }
 
+int g_shift_grace = 0;   // ticks remaining where Shift "counts" as held
+
 void Poll()
 {
     if (!IsForegroundFallout()) return;
+
+    // Track Shift with a short grace window so Shift+key combos register even
+    // if the key edge lands a tick or two before Shift is read as down.
+    bool shiftNow = (GetAsyncKeyState(VK_SHIFT)  & 0x8000) ||
+                    (GetAsyncKeyState(VK_LSHIFT) & 0x8000) ||
+                    (GetAsyncKeyState(VK_RSHIFT) & 0x8000);
+    if (shiftNow)             g_shift_grace = 4;   // ~320 ms at the poll rate
+    else if (g_shift_grace)   --g_shift_grace;
 
     for (auto& b : g_bindings) {
         int vk = DikToVk(b.dik);
@@ -183,5 +193,7 @@ void Poll()
         b.was_down = down;
     }
 }
+
+bool ShiftActive() { return g_shift_grace > 0; }
 
 } // namespace f3a::hotkeys

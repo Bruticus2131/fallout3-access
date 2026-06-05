@@ -183,7 +183,9 @@ void AnnounceCurrent()
 
 bool ShiftHeld()
 {
-    return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    // Use the poll's grace-windowed Shift state so Shift+[ / Shift+] reliably
+    // cycle categories instead of occasionally falling through to item cycle.
+    return hotkeys::ShiftActive();
 }
 
 // Cycle the scanner category (Shift+] / Shift+[), announce it, then the first
