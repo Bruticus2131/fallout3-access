@@ -615,6 +615,75 @@ void DumpTileRec(Tile* t, int depth)
 bool IsGameplayActive() { return g_in_gameplay && !g_in_main_menu; }
 bool IsInMainMenu()     { return g_in_main_menu; }
 
+// --- Navmesh dumper (read-only RE aid) -------------------------------------
+//
+// FOSE doesn't define FO3's NavMesh structure (only TESObjectCELL::NavMeshArray
+// @0x60 = BSSimpleArray<NavMesh*>, and a forward-declared `class NavMesh;`).
+// To build navmesh A* pathfinding we first need the FO3 layout, so this dumps
+// the array region and the first NavMesh's leading bytes — annotated as
+// int/float/pointer — so the vertex & triangle sub-arrays can be identified.
+// Everything is guarded by IsBadReadPtr; it never writes game memory.
+namespace {
+
+bool MemReadable(const void* p, size_t n)
+{
+    return p && !IsBadReadPtr(p, n);
+}
+
+void DumpDwords(const char* tag, const UInt8* base, int from, int to)
+{
+    for (int off = from; off < to; off += 4) {
+        if (!MemReadable(base + off, 4)) {
+            log::DumpWrite("  %s+0x%03X = <unreadable>", tag, off);
+            continue;
+        }
+        UInt32 v = *reinterpret_cast<const UInt32*>(base + off);
+        float  f = *reinterpret_cast<const float*>(&v);
+        bool   isptr = MemReadable(reinterpret_cast<void*>(v), 4);
+        log::DumpWrite("  %s+0x%03X = 0x%08X  int=%-9d f=%11.3f%s",
+                       tag, off, v, (int)v, f, isptr ? "  <ptr>" : "");
+    }
+}
+
+void DumpNavmesh()
+{
+    log::DumpWrite("===== Navmesh dump =====");
+    auto* player = fose_rt::Player();
+    if (!player) { log::DumpWrite("navmesh: no player"); return; }
+    auto* cell = reinterpret_cast<UInt8*>(player->parentCell);
+    if (!MemReadable(cell, 0x90)) { log::DumpWrite("navmesh: no/bad cell"); return; }
+    log::DumpWrite("cell=%p", cell);
+
+    // NavMeshArray lives inline at cell+0x60. Dump a window around it so we
+    // can spot the {?, data, size, alloc} layout regardless of exact offsets.
+    DumpDwords("cell", cell, 0x5C, 0x88);
+
+    // Best guess: BSSimpleArray { void* vtbl@0x60, T* data@0x64, u32 size@0x68 }.
+    void** data = nullptr;
+    UInt32 size = 0;
+    if (MemReadable(cell + 0x68, 8)) {
+        data = *reinterpret_cast<void***>(cell + 0x64);
+        size = *reinterpret_cast<UInt32*>(cell + 0x68);
+    }
+    log::DumpWrite("guess BSSimpleArray: data=%p size=%u", (void*)data, size);
+    if (!data || size == 0 || size > 64 || !MemReadable(data, sizeof(void*))) {
+        log::DumpWrite("navmesh: array data/size implausible — read raw above");
+        return;
+    }
+
+    void* nav0 = data[0];
+    if (!MemReadable(nav0, 0x160)) {
+        log::DumpWrite("navmesh[0]=%p unreadable", nav0);
+        return;
+    }
+    log::DumpWrite("navmesh[0]=%p — leading 0x150 bytes "
+                   "(look for <ptr> followed by two small ints = a sub-array):",
+                   nav0);
+    DumpDwords("nm", reinterpret_cast<UInt8*>(nav0), 0x00, 0x150);
+}
+
+} // namespace
+
 void DumpActiveMenuTree()
 {
     InterfaceManager* ifm = fose_rt::IFM();
@@ -668,9 +737,14 @@ void DumpActiveMenuTree()
         log::DumpWrite("--- cursor tile ---");
         DumpTileRec(ifm->cursor, 0);
     }
+    // In gameplay, also dump the navmesh so we can decode it for pathfinding.
+    if (game::IsPlayerValid()) {
+        DumpNavmesh();
+    }
+
     log::DumpWrite("===== End dump =====");
     log::EndDump();
-    tolk::Speak("Drzewo menu zapisane w pliku dump.",
+    tolk::Speak("Zrzut zapisany w pliku dump.",
                 tolk::Priority::System, true);
 }
 
