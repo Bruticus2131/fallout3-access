@@ -23,9 +23,10 @@ struct Hotkeys {
     uint32_t dump_menu_tree   = 0x57; // F11 — diagnostic dump to log
     uint32_t debug_start_game = 0x44; // F10 — run [Debug] StartGameCommand
     uint32_t menu_back        = 0x0E; // Backspace — click the menu Back button
-    // Object scanner + navigation (punctuation cluster, all non-extended).
-    uint32_t scan_prev        = 0x1A; // [ — previous nearby object
-    uint32_t scan_next        = 0x1B; // ] — next nearby object
+    // Object scanner + navigation. PgUp/PgDn cycle objects; Ctrl+PgUp/PgDn
+    // cycle the category (matches the author's earlier mod).
+    uint32_t scan_prev        = 0xC9; // Page Up — previous nearby object
+    uint32_t scan_next        = 0xD1; // Page Down — next nearby object
     uint32_t turn_to          = 0x28; // ' — face the selected object
     uint32_t guide_beacon     = 0x27; // ; — beacon guidance to the target
     uint32_t auto_walk        = 0x2B; // \ — auto-walk to the target

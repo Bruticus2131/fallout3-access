@@ -181,11 +181,11 @@ void AnnounceCurrent()
     tolk::Speak(line, tolk::Priority::Ui, true);
 }
 
-bool ShiftHeld()
+bool CategoryModHeld()
 {
-    // Use the poll's grace-windowed Shift state so Shift+[ / Shift+] reliably
-    // cycle categories instead of occasionally falling through to item cycle.
-    return hotkeys::ShiftActive();
+    // Ctrl (grace-windowed) is the category modifier: Ctrl+PgUp / Ctrl+PgDn
+    // cycle categories, plain PgUp/PgDn cycle objects.
+    return hotkeys::CtrlActive();
 }
 
 // Cycle the scanner category (Shift+] / Shift+[), announce it, then the first
@@ -205,7 +205,7 @@ void ScanNext()
         F3A_DEBUG("ScanNext ignored: not gameplay/HUD.");
         return;
     }
-    if (ShiftHeld()) { CategoryStep(+1); return; }
+    if (CategoryModHeld()) { CategoryStep(+1); return; }
     if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (++g_scan_index >= (int)g_scan_list.size()) {
@@ -218,7 +218,7 @@ void ScanNext()
 void ScanPrev()
 {
     if (!GameplayAndHud()) return;
-    if (ShiftHeld()) { CategoryStep(-1); return; }
+    if (CategoryModHeld()) { CategoryStep(-1); return; }
     if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (--g_scan_index < 0) {

@@ -94,8 +94,8 @@ Explore and travel without sight:
 
 | Key | Action |
 | --- | --- |
-| `[` / `]` | cycle nearby objects (reads "name, distance, clock direction, i of N") |
-| Shift + `[` / `]` | change scanner category: all / NPCs / items / doors / containers |
+| Page Up / Page Down | cycle nearby objects (reads "name, distance, clock direction, i of N") |
+| Ctrl + Page Up / Page Down | change scanner category: all / NPCs / items / doors / containers / quests |
 | `'` (apostrophe) | turn to face the selected object |
 | `;` (semicolon) | **beacon guidance**: you walk (W), the mod plays a positional sonar ping at the target — panned left/right by direction, higher-pitched when it's ahead and lower when behind, faster as you close in. Turn until the ping is centred and high, then walk toward it. Distance is called out and you're warned if the target is on another floor. Press again to stop. |
 | `\` (backslash) | **auto-walk**: the mod walks you to the target on open ground (gentle steering, stops on obstacles or a different floor). Press again to stop. |

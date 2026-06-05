@@ -169,18 +169,26 @@ void Rebind()
 }
 
 int g_shift_grace = 0;   // ticks remaining where Shift "counts" as held
+int g_ctrl_grace  = 0;   // same, for Ctrl (category cycling modifier)
 
 void Poll()
 {
     if (!IsForegroundFallout()) return;
 
-    // Track Shift with a short grace window so Shift+key combos register even
-    // if the key edge lands a tick or two before Shift is read as down.
+    // Track Shift/Ctrl with a short grace window so modifier+key combos
+    // register even if the key edge lands a tick or two before the modifier
+    // is read as down.
     bool shiftNow = (GetAsyncKeyState(VK_SHIFT)  & 0x8000) ||
                     (GetAsyncKeyState(VK_LSHIFT) & 0x8000) ||
                     (GetAsyncKeyState(VK_RSHIFT) & 0x8000);
-    if (shiftNow)             g_shift_grace = 4;   // ~320 ms at the poll rate
-    else if (g_shift_grace)   --g_shift_grace;
+    if (shiftNow)           g_shift_grace = 4;     // ~320 ms at the poll rate
+    else if (g_shift_grace) --g_shift_grace;
+
+    bool ctrlNow = (GetAsyncKeyState(VK_CONTROL)  & 0x8000) ||
+                   (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
+                   (GetAsyncKeyState(VK_RCONTROL) & 0x8000);
+    if (ctrlNow)           g_ctrl_grace = 4;
+    else if (g_ctrl_grace) --g_ctrl_grace;
 
     for (auto& b : g_bindings) {
         int vk = DikToVk(b.dik);
@@ -195,5 +203,6 @@ void Poll()
 }
 
 bool ShiftActive() { return g_shift_grace > 0; }
+bool CtrlActive()  { return g_ctrl_grace  > 0; }
 
 } // namespace f3a::hotkeys
