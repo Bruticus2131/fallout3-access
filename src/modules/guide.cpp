@@ -16,6 +16,7 @@
 
 #include "f3a/modules.h"
 #include "f3a/game_access.h"
+#include "f3a/navmesh.h"
 #include "f3a/polling_loop.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/tolk_bridge.h"
@@ -25,6 +26,7 @@
 
 #include <cmath>
 #include <string>
+#include <vector>
 
 namespace f3a::modules::guide {
 namespace {
@@ -32,6 +34,15 @@ namespace {
 bool        g_active = false;
 game::Vec3  g_target{};
 std::string g_name;
+
+// Navmesh path: beacon toward the current waypoint instead of straight at the
+// target, so the sound leads the player AROUND walls. The player still walks
+// manually (no engine yaw-driving), so there's no spinning. Empty = beacon
+// straight to the target (open ground / off-mesh).
+std::vector<game::Vec3> g_waypoints;
+size_t      g_wp_index = 0;
+bool        g_have_path = false;
+constexpr float kWaypointReach = 150.0f;   // advance when this close (~2.3 m)
 
 float g_ping_timer = 0.0f;   // positional beacon cadence
 float g_dist_timer = 0.0f;   // spoken distance cadence
@@ -63,6 +74,27 @@ bool GameplayAndHud()
     return m == menu::Id::None || m == menu::Id::HUDMain;
 }
 
+// Point the beacon currently leads toward: the active waypoint along the
+// navmesh path, or the final target if we have no path / reached the last hop.
+game::Vec3 CurrentGoal()
+{
+    if (g_have_path && g_wp_index < g_waypoints.size())
+        return g_waypoints[g_wp_index];
+    return g_target;
+}
+
+void AdvanceWaypoints()
+{
+    if (!g_have_path) return;
+    auto pp = game::GetPlayerPosition();
+    while (g_wp_index < g_waypoints.size()) {
+        const auto& w = g_waypoints[g_wp_index];
+        float dx = w.x - pp.x, dy = w.y - pp.y;
+        if (std::sqrt(dx * dx + dy * dy) > kWaypointReach) break;
+        ++g_wp_index;     // reached this waypoint; lead to the next
+    }
+}
+
 } // namespace
 
 bool IsActive() { return g_active; }
@@ -81,8 +113,19 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     float dx = pos.x - pp.x, dy = pos.y - pp.y;
     float dist = std::sqrt(dx * dx + dy * dy);
     g_prog_dist = dist;
+
+    // Compute a navmesh path so the beacon can lead around walls.
+    g_waypoints.clear();
+    g_wp_index  = 0;
+    g_have_path = navmesh::BuildPath(pp, pos, g_waypoints) &&
+                  !g_waypoints.empty();
+    F3A_INFO("guide: from(%.0f,%.0f,%.0f) to(%.0f,%.0f,%.0f) path=%d wp=%d",
+             pp.x, pp.y, pp.z, pos.x, pos.y, pos.z,
+             (int)g_have_path, (int)g_waypoints.size());
+
     tolk::Speak("Prowadzę do: " + name + ", " +
-                strings::FormatDistance(dist),
+                strings::FormatDistance(dist) +
+                (g_have_path ? ", trasa wyznaczona" : ""),
                 tolk::Priority::System, true);
 }
 
@@ -100,19 +143,23 @@ void Tick(float dt)
 
     auto pp   = game::GetPlayerPosition();
     float yaw = game::GetPlayerYaw();
-    float dx  = g_target.x - pp.x;
-    float dy  = g_target.y - pp.y;
-    float dz  = g_target.z - pp.z;
-    float dist = std::sqrt(dx * dx + dy * dy);
 
+    // Arrival is measured against the FINAL target.
+    float fdx = g_target.x - pp.x, fdy = g_target.y - pp.y;
+    float dist = std::sqrt(fdx * fdx + fdy * fdy);
     if (dist <= kArriveDist) {
         g_active = false;
         tolk::Speak("Dotarłeś: " + g_name, tolk::Priority::System, true);
         return;
     }
 
-    // Relative heading: -180..180, 0 = dead ahead.
-    auto br = game::ComputeBearing(pp, yaw, g_target);
+    // The beacon leads toward the current waypoint (or the target).
+    AdvanceWaypoints();
+    game::Vec3 goal = CurrentGoal();
+    float dz = g_target.z - pp.z;
+
+    // Relative heading to the steering goal: -180..180, 0 = dead ahead.
+    auto br = game::ComputeBearing(pp, yaw, goal);
     float rel = br.relative_yaw;
 
     // Positional beacon ping: panned by heading, pitched front/back, quieter
