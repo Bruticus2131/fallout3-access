@@ -730,6 +730,73 @@ void DumpNavmesh()
                    "— read holder bytes above");
 }
 
+// Does a pointer look like a TESObjectREFR? baseForm ptr @0x1C, world pos
+// floats @0x2C..0x34 (plausible coordinate magnitudes).
+bool LooksLikeRefr(const UInt8* p)
+{
+    if (!MemReadable(p, 0x40)) return false;
+    UInt32 baseForm = *reinterpret_cast<const UInt32*>(p + 0x1C);
+    if (baseForm < 0x00400000) return false;  // not a real form pointer
+    float x = *reinterpret_cast<const float*>(p + 0x2C);
+    float y = *reinterpret_cast<const float*>(p + 0x30);
+    float z = *reinterpret_cast<const float*>(p + 0x34);
+    auto ok = [](float f){ return f > -1e7f && f < 1e7f; };
+    return ok(x) && ok(y) && ok(z);
+}
+
+// Dump the player's current quest objective and chase its pointers one or two
+// levels, looking for the target reference (whose position the compass arrow
+// points to) so we can read a bearing to it.
+void DumpQuestObjective()
+{
+    log::DumpWrite("===== Quest objective dump =====");
+    auto* player = fose_rt::Player();
+    if (!player) { log::DumpWrite("no player"); return; }
+    UInt8* obj = *reinterpret_cast<UInt8**>(
+        reinterpret_cast<UInt8*>(player) + 0x618);   // questObjective
+    if (!MemReadable(obj, 0x40)) { log::DumpWrite("no/bad questObjective"); return; }
+    log::DumpWrite("questObjective=%p", (void*)obj);
+
+    char* txt = *reinterpret_cast<char**>(obj + 0x08);   // displayText.m_data
+    if (MemReadable(txt, 1)) log::DumpWrite("  displayText='%.100s'", txt);
+
+    DumpDwords("qo", obj, 0x00, 0x40);
+
+    for (int off = 0x10; off < 0x40; off += 4) {
+        if (!MemReadable(obj + off, 4)) continue;
+        UInt32 v = *reinterpret_cast<UInt32*>(obj + off);
+        if (v < 0x01000000 || !MemReadable(reinterpret_cast<void*>(v), 0x40))
+            continue;
+        UInt8* pe = reinterpret_cast<UInt8*>(v);
+        if (LooksLikeRefr(pe)) {
+            float x = *reinterpret_cast<float*>(pe + 0x2C);
+            float y = *reinterpret_cast<float*>(pe + 0x30);
+            float z = *reinterpret_cast<float*>(pe + 0x34);
+            log::DumpWrite("  qo+0x%X -> REFR %p pos=(%.0f,%.0f,%.0f)",
+                           off, (void*)pe, x, y, z);
+            continue;
+        }
+        log::DumpWrite("  qo+0x%X -> %p, first 0x30 bytes:", off, (void*)pe);
+        DumpDwords("  >", pe, 0x00, 0x30);
+        // Second level: treat the pointee as an array of pointers and test
+        // each for a REFR (the targets array → target ref).
+        for (int k = 0; k < 16; k += 4) {
+            if (!MemReadable(pe + k, 4)) break;
+            UInt32 w = *reinterpret_cast<UInt32*>(pe + k);
+            if (w < 0x01000000 || !MemReadable(reinterpret_cast<void*>(w), 0x40))
+                continue;
+            UInt8* pe2 = reinterpret_cast<UInt8*>(w);
+            if (LooksLikeRefr(pe2)) {
+                float x = *reinterpret_cast<float*>(pe2 + 0x2C);
+                float y = *reinterpret_cast<float*>(pe2 + 0x30);
+                float z = *reinterpret_cast<float*>(pe2 + 0x34);
+                log::DumpWrite("    [%d] -> REFR %p pos=(%.0f,%.0f,%.0f)",
+                               k, (void*)pe2, x, y, z);
+            }
+        }
+    }
+}
+
 } // namespace
 
 void DumpActiveMenuTree()
@@ -785,8 +852,10 @@ void DumpActiveMenuTree()
         log::DumpWrite("--- cursor tile ---");
         DumpTileRec(ifm->cursor, 0);
     }
-    // In gameplay, also dump the navmesh so we can decode it for pathfinding.
+    // In gameplay, also dump the navmesh + the current quest objective so we
+    // can decode them (pathfinding / quest-marker bearing).
     if (game::IsPlayerValid()) {
+        DumpQuestObjective();
         DumpNavmesh();
     }
 
