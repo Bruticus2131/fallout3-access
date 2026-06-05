@@ -109,9 +109,15 @@ QuestTarget GetCurrentQuestTarget()
     QuestTarget t{};
     auto* p = rt::Player();
     if (!p || !p->questObjective) return t;
-    // BGSQuestObjective holds an array of targets; the first valid one is
-    // what the compass arrow points at. Field layout TODO — for now flag
-    // the target as invalid so callers say "no active target".
+    // BGSQuestObjective.displayText (String @0x08) is the current objective
+    // line, e.g. "Find the Galaxy News Radio building". The target MARKER
+    // position lives in a targets array we haven't decoded yet, so for now
+    // we report the text only (no bearing). position stays {0,0,0}.
+    const char* raw = p->questObjective->displayText.m_data;
+    if (!raw || !*raw) return t;
+    t.name     = GameStrToUtf8(raw);
+    t.position = { 0.0f, 0.0f, 0.0f };
+    t.valid    = true;
     return t;
 }
 

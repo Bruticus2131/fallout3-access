@@ -62,6 +62,13 @@ void SpeakQuestTarget()
                     tolk::Priority::System, true);
         return;
     }
+    // No marker position decoded yet → read the objective text only.
+    bool has_pos = qt.position.x != 0.0f || qt.position.y != 0.0f ||
+                   qt.position.z != 0.0f;
+    if (!has_pos) {
+        tolk::Speak("Zadanie: " + qt.name, tolk::Priority::System, true);
+        return;
+    }
     auto pos = game::GetPlayerPosition();
     float yaw = game::GetPlayerYaw();
     auto br = game::ComputeBearing(pos, yaw, qt.position);
