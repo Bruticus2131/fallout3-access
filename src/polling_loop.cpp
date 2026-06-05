@@ -654,32 +654,80 @@ void DumpNavmesh()
     if (!MemReadable(cell, 0x90)) { log::DumpWrite("navmesh: no/bad cell"); return; }
     log::DumpWrite("cell=%p", cell);
 
-    // NavMeshArray lives inline at cell+0x60. Dump a window around it so we
-    // can spot the {?, data, size, alloc} layout regardless of exact offsets.
     DumpDwords("cell", cell, 0x5C, 0x88);
 
-    // Best guess: BSSimpleArray { void* vtbl@0x60, T* data@0x64, u32 size@0x68 }.
-    void** data = nullptr;
-    UInt32 size = 0;
-    if (MemReadable(cell + 0x68, 8)) {
-        data = *reinterpret_cast<void***>(cell + 0x64);
-        size = *reinterpret_cast<UInt32*>(cell + 0x68);
-    }
-    log::DumpWrite("guess BSSimpleArray: data=%p size=%u", (void*)data, size);
-    if (!data || size == 0 || size > 64 || !MemReadable(data, sizeof(void*))) {
-        log::DumpWrite("navmesh: array data/size implausible — read raw above");
+    // cell+0x60 is a POINTER to the navmesh-array holder object (confirmed by
+    // a first dump: only +0x60 held a pointer, rest zero). Follow it.
+    if (!MemReadable(cell + 0x60, 4)) { log::DumpWrite("navmesh: +0x60 bad"); return; }
+    UInt8* holder = *reinterpret_cast<UInt8**>(cell + 0x60);
+    if (!MemReadable(holder, 0x40)) {
+        log::DumpWrite("navmesh: holder %p unreadable", (void*)holder);
         return;
     }
+    log::DumpWrite("holder=%p — first 0x40 bytes (find {data ptr, size, alloc}):",
+                   (void*)holder);
+    DumpDwords("h", holder, 0x00, 0x40);
 
-    void* nav0 = data[0];
-    if (!MemReadable(nav0, 0x160)) {
-        log::DumpWrite("navmesh[0]=%p unreadable", nav0);
+    // Try a few plausible {data, size} interpretations of the holder and, for
+    // each that looks like an array of readable pointers, follow entry [0] and
+    // dump the NavMesh leading bytes.
+    static const int kDataOffsets[] = { 0x00, 0x04, 0x08 };
+    for (int doff : kDataOffsets) {
+        if (!MemReadable(holder + doff, 8)) continue;
+        void** data = *reinterpret_cast<void***>(holder + doff);
+        UInt32 size = *reinterpret_cast<UInt32*>(holder + doff + 4);
+        if (!data || size == 0 || size > 64 || !MemReadable(data, sizeof(void*)))
+            continue;
+        void* nav0 = data[0];
+        if (!MemReadable(nav0, 0x160)) continue;
+        log::DumpWrite("holder+0x%X looks like data=%p size=%u; "
+                       "navmesh[0]=%p leading 0x150 bytes:",
+                       doff, (void*)data, size, nav0);
+        DumpDwords("nm", reinterpret_cast<UInt8*>(nav0), 0x00, 0x150);
+
+        // Scan for embedded BSSimpleArrays { exe-vtbl, heap-data, size, cap }
+        // and dump the first two's CONTENTS — #1 as float triples (vertices),
+        // #2 as uint16 octets (triangles: v0 v1 v2 | n0 n1 n2 | flags...).
+        UInt8* nm = reinterpret_cast<UInt8*>(nav0);
+        int found = 0;
+        for (int off = 0x18; off <= 0x60 && found < 3; off += 4) {
+            if (!MemReadable(nm + off, 16)) continue;
+            UInt32 vtbl = *reinterpret_cast<UInt32*>(nm + off);
+            UInt32 dptr = *reinterpret_cast<UInt32*>(nm + off + 4);
+            UInt32 sz   = *reinterpret_cast<UInt32*>(nm + off + 8);
+            UInt32 cap  = *reinterpret_cast<UInt32*>(nm + off + 12);
+            bool vtblOk = vtbl >= 0x00400000 && vtbl < 0x01800000;
+            bool dataOk = dptr >= 0x01800000 &&
+                          MemReadable(reinterpret_cast<void*>(dptr), 16);
+            bool szOk   = sz >= 1 && sz < 100000 && cap >= sz && cap <= sz + 256;
+            if (!(vtblOk && dataOk && szOk)) continue;
+            ++found;
+            UInt8* d = reinterpret_cast<UInt8*>(dptr);
+            log::DumpWrite("  array@nm+0x%X: data=0x%08X size=%u cap=%u",
+                           off, dptr, sz, cap);
+            int n = sz < 6 ? (int)sz : 6;
+            if (found == 1) {            // assume vertices (NiPoint3, 12 bytes)
+                for (int i = 0; i < n; ++i) {
+                    float* v = reinterpret_cast<float*>(d + i * 12);
+                    if (!MemReadable(v, 12)) break;
+                    log::DumpWrite("    vert[%d] = %.2f, %.2f, %.2f",
+                                   i, v[0], v[1], v[2]);
+                }
+            } else if (found == 2) {     // assume triangles (16 bytes = 8 u16)
+                for (int i = 0; i < n; ++i) {
+                    UInt16* t = reinterpret_cast<UInt16*>(d + i * 16);
+                    if (!MemReadable(t, 16)) break;
+                    log::DumpWrite("    tri[%d] = %u %u %u | %u %u %u | "
+                                   "0x%04X 0x%04X", i,
+                                   t[0], t[1], t[2], t[3], t[4], t[5],
+                                   t[6], t[7]);
+                }
+            }
+        }
         return;
     }
-    log::DumpWrite("navmesh[0]=%p — leading 0x150 bytes "
-                   "(look for <ptr> followed by two small ints = a sub-array):",
-                   nav0);
-    DumpDwords("nm", reinterpret_cast<UInt8*>(nav0), 0x00, 0x150);
+    log::DumpWrite("navmesh: could not locate array data inside holder "
+                   "— read holder bytes above");
 }
 
 } // namespace

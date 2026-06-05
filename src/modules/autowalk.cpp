@@ -10,6 +10,7 @@
 
 #include "f3a/modules.h"
 #include "f3a/game_access.h"
+#include "f3a/navmesh.h"
 #include "f3a/polling_loop.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/tolk_bridge.h"
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace f3a::modules::autowalk {
 namespace {
@@ -30,6 +32,14 @@ enum class State { Idle, Walking, Avoiding };
 State        g_state = State::Idle;
 game::Vec3   g_target_pos{};
 std::string  g_target_name;
+
+// Navmesh path (waypoints from player to target). When we have one we steer
+// to the current waypoint instead of straight at the target — that's what
+// routes around walls. Empty = fall back to straight-line + bug avoidance.
+std::vector<game::Vec3> g_waypoints;
+size_t       g_wp_index = 0;
+bool         g_have_path = false;
+constexpr float kWaypointRadius = 96.0f;   // advance when this close (~1.5 m)
 
 // Stuck detection: compare position over a sliding window.
 game::Vec3   g_last_probe_pos{};
@@ -112,6 +122,29 @@ float DistanceToTarget()
     return std::sqrt(dx * dx + dy * dy);
 }
 
+// The point we currently steer toward: the active waypoint if we have a
+// navmesh path, otherwise the final target.
+game::Vec3 CurrentGoal()
+{
+    if (g_have_path && g_wp_index < g_waypoints.size())
+        return g_waypoints[g_wp_index];
+    return g_target_pos;
+}
+
+// Advance past any waypoints we've already reached. Returns true if the path
+// is exhausted (only the final target remains).
+void AdvanceWaypoints()
+{
+    if (!g_have_path) return;
+    auto pp = game::GetPlayerPosition();
+    while (g_wp_index < g_waypoints.size()) {
+        const auto& w = g_waypoints[g_wp_index];
+        float dx = w.x - pp.x, dy = w.y - pp.y;
+        if (std::sqrt(dx * dx + dy * dy) > kWaypointRadius) break;
+        ++g_wp_index;
+    }
+}
+
 void StopWalking(const char* reason_utf8)
 {
     if (g_state == State::Idle) return;
@@ -126,7 +159,7 @@ void StopWalking(const char* reason_utf8)
 void SteerAvoiding()
 {
     auto pp = game::GetPlayerPosition();
-    float goalDeg  = YawToDegrees(pp, g_target_pos);
+    float goalDeg  = YawToDegrees(pp, CurrentGoal());
     float veerDeg  = goalDeg + g_avoid_side * g_avoid_angle;
     float rad      = veerDeg * 0.01745329252f;
     game::Vec3 p{ pp.x + std::sin(rad) * 300.0f,
@@ -163,13 +196,22 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_avoid_tries    = 0;
     g_avoid_side     = 1;
 
+    // Try to compute a real path around walls. If it fails (no navmesh,
+    // endpoints off-mesh), g_have_path stays false and we walk straight with
+    // bug-avoidance like before.
+    g_waypoints.clear();
+    g_wp_index  = 0;
+    g_have_path = navmesh::BuildPath(game::GetPlayerPosition(), pos,
+                                     g_waypoints) && !g_waypoints.empty();
+
     g_state = State::Walking;
     SendForward(true);
 
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "Idę do: %s, %s",
+    std::snprintf(buf, sizeof(buf), "Idę do: %s, %s%s",
                   name.c_str(),
-                  strings::FormatDistance(DistanceToTarget()).c_str());
+                  strings::FormatDistance(DistanceToTarget()).c_str(),
+                  g_have_path ? ", trasa wyznaczona" : "");
     tolk::Speak(buf, tolk::Priority::System, true);
 }
 
@@ -208,18 +250,22 @@ void Tick(float dt)
         return;
     }
 
-    // Different floor → a straight-line walk can't get there. Bail out and
-    // point the player at the beacon instead.
-    float dz = g_target_pos.z - game::GetPlayerPosition().z;
-    if (std::fabs(dz) > kFloorDelta) {
-        StopWalking(dz > 0 ? "Cel jest wyżej. Użyj naprowadzania i schodów."
-                           : "Cel jest niżej. Użyj naprowadzania i schodów.");
-        return;
+    // Different floor → a straight-line walk can't get there. Only bail when
+    // we DON'T have a navmesh path; a real path handles stairs/height itself.
+    if (!g_have_path) {
+        float dz = g_target_pos.z - game::GetPlayerPosition().z;
+        if (std::fabs(dz) > kFloorDelta) {
+            StopWalking(dz > 0 ? "Cel jest wyżej. Użyj naprowadzania i schodów."
+                               : "Cel jest niżej. Użyj naprowadzania i schodów.");
+            return;
+        }
     }
 
     if (g_state == State::Walking) {
-        // Head straight for the goal.
-        SteerToward(g_target_pos);
+        // Follow the path: advance through reached waypoints, steer at the
+        // current one (or the target if we have no path).
+        AdvanceWaypoints();
+        SteerToward(CurrentGoal());
 
         g_probe_timer += dt;
         if (g_probe_timer >= kProbeEvery) {

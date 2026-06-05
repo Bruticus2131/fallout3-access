@@ -75,6 +75,7 @@ set(F3A_SOURCES
     src/polling_loop.cpp
     src/engine_hooks.cpp
     src/game_access.cpp
+    src/navmesh.cpp
     src/modules/pipboy.cpp
     src/modules/dialog.cpp
     src/modules/barter.cpp
