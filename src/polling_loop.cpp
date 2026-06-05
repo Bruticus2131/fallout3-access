@@ -797,6 +797,62 @@ void DumpQuestObjective()
     }
 }
 
+// Dump every 'running' quest with a name, its running byte, and each
+// objective's status word + whether it carries a live marker. Lets us pin the
+// exact status offset/bits that distinguish journal-active quests from the
+// hundreds of finished/background quests the engine keeps 'running'.
+void DumpQuestList()
+{
+    log::DumpWrite("===== Quest list dump =====");
+    auto* gp = reinterpret_cast<UInt8**>(fose_rt::g_addrs->dataHandler);
+    if (!MemReadable(gp, 4)) { log::DumpWrite("no dataHandler ptr"); return; }
+    UInt8* dh = *gp;
+    if (!MemReadable(dh, 0xD8)) { log::DumpWrite("bad dataHandler"); return; }
+
+    struct Node { UInt8* item; Node* next; };
+    Node* node = reinterpret_cast<Node*>(dh + 0xD4);   // questList @ +0xD4
+    int total = 0, named = 0;
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        if (!MemReadable(node, 8)) break;
+        UInt8* q = node->item;
+        node = node->next;
+        if (!q || !MemReadable(q, 0x54)) continue;
+        ++total;
+
+        UInt8 running = *reinterpret_cast<UInt8*>(q + 0x3C);
+        const char* nm = *reinterpret_cast<char**>(q + 0x34);
+        bool hasName = MemReadable(nm, 1) && *nm;
+        if (!hasName) continue;       // only the ones that reach the scanner
+        ++named;
+        log::DumpWrite("Quest '%.60s'  running=%u", nm, running);
+
+        Node* on = reinterpret_cast<Node*>(q + 0x4C);   // objectives @ +0x4C
+        for (int s2 = 0; on && s2 < 64; ++s2) {
+            if (!MemReadable(on, 8)) break;
+            UInt8* obj = on->item;
+            on = on->next;
+            if (!obj || !MemReadable(obj, 0x24)) continue;
+            UInt32 st14 = *reinterpret_cast<UInt32*>(obj + 0x14);
+            UInt32 st18 = *reinterpret_cast<UInt32*>(obj + 0x18);
+            UInt32 st1C = *reinterpret_cast<UInt32*>(obj + 0x1C);
+            UInt32 st20 = *reinterpret_cast<UInt32*>(obj + 0x20);
+            char* txt = *reinterpret_cast<char**>(obj + 0x08);
+            bool marker = false;
+            // +0x14 -> Target -> +0x0C -> REFR (the marker we navigate to)
+            if (st14 >= 0x01000000 && MemReadable(reinterpret_cast<void*>(st14), 0x10)) {
+                UInt8* tgt = reinterpret_cast<UInt8*>(st14);
+                UInt8* refr = *reinterpret_cast<UInt8**>(tgt + 0x0C);
+                marker = LooksLikeRefr(refr);
+            }
+            log::DumpWrite("    obj +14=0x%X +18=0x%X +1C=0x%X +20=0x%X "
+                           "marker=%d '%.50s'",
+                           st14, st18, st1C, st20, (int)marker,
+                           MemReadable(txt, 1) ? txt : "");
+        }
+    }
+    log::DumpWrite("quest list: %d total, %d named", total, named);
+}
+
 } // namespace
 
 void DumpActiveMenuTree()
@@ -856,6 +912,7 @@ void DumpActiveMenuTree()
     // can decode them (pathfinding / quest-marker bearing).
     if (game::IsPlayerValid()) {
         DumpQuestObjective();
+        DumpQuestList();
         DumpNavmesh();
     }
 

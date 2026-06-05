@@ -174,8 +174,14 @@ std::vector<WorldEntity> GetActiveQuests()
 
         if (*reinterpret_cast<UInt8*>(q + 0x3C) == 0) continue;   // running?
 
-        // Walk the quest's objectives; keep the last one with a live marker
-        // (usually the current objective).
+        // Walk the quest's objectives; keep the last DISPLAYED, not-completed
+        // one with a live marker (the current journal objective). Without the
+        // status gate, hundreds of finished/background quests that stay
+        // 'running' with stale completed markers flood the list.
+        //
+        // BGSQuestObjective status @ +0x1C: bit0 = displayed, bit1 = completed
+        // (the player's active objective dumps as 1 here). Only displayed &&
+        // !completed objectives appear on the compass / in the journal.
         Vec3 best{};
         bool have = false;
         Node* on = reinterpret_cast<Node*>(q + 0x4C);
@@ -183,7 +189,9 @@ std::vector<WorldEntity> GetActiveQuests()
             if (IsBadReadPtr(on, 8)) break;
             UInt8* obj = on->item;
             on = on->next;
-            if (!obj || IsBadReadPtr(obj, 0x18)) continue;
+            if (!obj || IsBadReadPtr(obj, 0x20)) continue;
+            UInt32 status = *reinterpret_cast<UInt32*>(obj + 0x1C);
+            if ((status & 0x1) == 0 || (status & 0x2) != 0) continue;
             Vec3 p;
             if (ObjectiveMarkerPos(obj, p)) { best = p; have = true; }
         }
