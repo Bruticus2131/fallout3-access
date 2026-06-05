@@ -189,10 +189,14 @@ std::vector<WorldEntity> GetActiveQuests()
         }
         if (!have) continue;
 
+        // Only player-facing quests have a display name. Background/system
+        // quests (script containers, dialogue, DLC controllers) are unnamed —
+        // skip them so the list matches the journal, not all ~hundreds of
+        // engine quests that happen to be 'running'.
         const char* nm = *reinterpret_cast<char**>(q + 0x34);  // fullName.name
-        std::string name = (nm && !IsBadReadPtr(nm, 1)) ? GameStrToUtf8(nm)
-                                                        : std::string("Zadanie");
-        if (name.empty()) name = "Zadanie";
+        if (!nm || IsBadReadPtr(nm, 1) || !*nm) continue;
+        std::string name = GameStrToUtf8(nm);
+        if (name.empty()) continue;
 
         WorldEntity e;
         e.kind     = WorldEntity::Kind::Quest;
