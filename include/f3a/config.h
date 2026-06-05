@@ -29,6 +29,7 @@ struct Hotkeys {
     uint32_t turn_to          = 0x28; // ' — face the selected object
     uint32_t guide_beacon     = 0x27; // ; — beacon guidance to the target
     uint32_t auto_walk        = 0x2B; // \ — auto-walk to the target
+    uint32_t guide_quest      = 0x34; // . — beacon guidance to the quest marker
 };
 
 struct Settings {

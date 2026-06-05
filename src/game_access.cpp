@@ -118,6 +118,22 @@ QuestTarget GetCurrentQuestTarget()
     t.name     = GameStrToUtf8(raw);
     t.position = { 0.0f, 0.0f, 0.0f };
     t.valid    = true;
+
+    // Target marker (decoded from live dumps): objective + 0x14 -> Target*,
+    // Target + 0x0C -> TESObjectREFR* -> world position at posX/Y/Z (0x2C).
+    // The compass arrow points to this reference. Guarded; if anything looks
+    // off we leave position {0,0,0} and the caller reads text only.
+    auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
+    if (IsBadReadPtr(obj + 0x14, 4)) return t;
+    UInt8* target = *reinterpret_cast<UInt8**>(obj + 0x14);
+    if (IsBadReadPtr(target, 0x10)) return t;
+    auto* refr = *reinterpret_cast<TESObjectREFR**>(target + 0x0C);
+    if (IsBadReadPtr(refr, 0x38)) return t;
+    if (refr->baseForm == nullptr) return t;
+    Vec3 pos = { refr->posX, refr->posY, refr->posZ };
+    if (pos.x != 0.0f || pos.y != 0.0f || pos.z != 0.0f) {
+        t.position = pos;   // have a real bearing
+    }
     return t;
 }
 

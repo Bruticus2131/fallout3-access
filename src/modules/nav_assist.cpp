@@ -80,6 +80,26 @@ void SpeakQuestTarget()
         tolk::Priority::System, true);
 }
 
+void GuideToQuest()
+{
+    if (SkipIfNotInGame()) return;
+    auto qt = game::GetCurrentQuestTarget();
+    if (!qt.valid) {
+        tolk::Speak(strings::Render(strings::Key::NoQuestTarget),
+                    tolk::Priority::System, true);
+        return;
+    }
+    bool has_pos = qt.position.x != 0.0f || qt.position.y != 0.0f ||
+                   qt.position.z != 0.0f;
+    if (!has_pos) {
+        tolk::Speak("Cel zadania bez markera na mapie: " + qt.name,
+                    tolk::Priority::System, true);
+        return;
+    }
+    modules::autowalk::Stop();
+    modules::guide::StartTo(qt.position, qt.name);
+}
+
 void SpeakCompass()
 {
     if (SkipIfNotInGame()) return;
@@ -99,6 +119,7 @@ void Init()
     hotkeys::Bind(h.player_status,    &SpeakPlayerStatus);
     hotkeys::Bind(h.quest_target,     &SpeakQuestTarget);
     hotkeys::Bind(h.describe_compass, &SpeakCompass);
+    hotkeys::Bind(h.guide_quest,      &GuideToQuest);
     F3A_INFO("Nav assist module ready.");
 }
 
