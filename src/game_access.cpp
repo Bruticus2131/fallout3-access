@@ -138,6 +138,72 @@ QuestTarget GetCurrentQuestTarget()
     return t;
 }
 
+namespace {
+// objective + 0x14 -> Target* -> + 0x0C -> TESObjectREFR* -> world pos.
+bool ObjectiveMarkerPos(UInt8* obj, Vec3& out)
+{
+    if (IsBadReadPtr(obj + 0x14, 4)) return false;
+    UInt8* target = *reinterpret_cast<UInt8**>(obj + 0x14);
+    if (IsBadReadPtr(target, 0x10)) return false;
+    auto* refr = *reinterpret_cast<TESObjectREFR**>(target + 0x0C);
+    if (IsBadReadPtr(refr, 0x38)) return false;
+    if (!refr->baseForm) return false;
+    Vec3 p = { refr->posX, refr->posY, refr->posZ };
+    if (p.x == 0.0f && p.y == 0.0f && p.z == 0.0f) return false;
+    out = p;
+    return true;
+}
+} // namespace
+
+std::vector<WorldEntity> GetActiveQuests()
+{
+    std::vector<WorldEntity> out;
+    auto* global = reinterpret_cast<UInt8**>(rt::g_addrs->dataHandler);
+    if (IsBadReadPtr(global, 4)) return out;
+    UInt8* dh = *global;
+    if (IsBadReadPtr(dh, 0xD8)) return out;
+
+    // DataHandler::questList is a tList<TESQuest> at +0xD4 ({item, next}).
+    struct Node { UInt8* item; Node* next; };
+    Node* node = reinterpret_cast<Node*>(dh + 0xD4);
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        if (IsBadReadPtr(node, 8)) break;
+        UInt8* q = node->item;
+        node = node->next;
+        if (!q || IsBadReadPtr(q, 0x54)) continue;
+
+        if (*reinterpret_cast<UInt8*>(q + 0x3C) == 0) continue;   // running?
+
+        // Walk the quest's objectives; keep the last one with a live marker
+        // (usually the current objective).
+        Vec3 best{};
+        bool have = false;
+        Node* on = reinterpret_cast<Node*>(q + 0x4C);
+        for (int s2 = 0; on && s2 < 512; ++s2) {
+            if (IsBadReadPtr(on, 8)) break;
+            UInt8* obj = on->item;
+            on = on->next;
+            if (!obj || IsBadReadPtr(obj, 0x18)) continue;
+            Vec3 p;
+            if (ObjectiveMarkerPos(obj, p)) { best = p; have = true; }
+        }
+        if (!have) continue;
+
+        const char* nm = *reinterpret_cast<char**>(q + 0x34);  // fullName.name
+        std::string name = (nm && !IsBadReadPtr(nm, 1)) ? GameStrToUtf8(nm)
+                                                        : std::string("Zadanie");
+        if (name.empty()) name = "Zadanie";
+
+        WorldEntity e;
+        e.kind     = WorldEntity::Kind::Quest;
+        e.name     = std::move(name);
+        e.position = best;
+        e.form_id  = 0;
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
 // ---- World scan -----------------------------------------------------------
 
 namespace {

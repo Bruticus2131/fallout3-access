@@ -37,15 +37,16 @@ struct RuntimeAddrs {
     UInt32 iniPrefColl;      // IniSettingCollection** (FalloutPrefs.ini)
     UInt32 iniSettingColl;   // IniSettingCollection** (Fallout.ini)
     UInt32 gameSettingColl;  // GameSettingCollection**
+    UInt32 dataHandler;      // DataHandler** (has questList)
 };
 
 inline constexpr RuntimeAddrs kAddrs_1_7 = {   // 0x01070030 standard
     0x0107A104, 0x01075B24, 0x0106A7BC, 0x011793DB,
-    0x01179578, 0x0116D6F4, 0x010701A8,
+    0x01179578, 0x0116D6F4, 0x010701A8, 0x0106CDCC,
 };
 inline constexpr RuntimeAddrs kAddrs_1_7ng = { // 0x01070031 no-gore
     0x01077104, 0x01072B24, 0x010677BC, 0x011763DB,
-    0x01176578, 0x0116A6F4, 0x0106D1A8,
+    0x01176578, 0x0116A6F4, 0x0106D1A8, 0x01069DCC,
 };
 
 // Active table; defaults to standard 1.7.0.3 until SelectRuntime() runs.

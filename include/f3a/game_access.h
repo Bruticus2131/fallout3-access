@@ -76,7 +76,7 @@ QuestTarget GetCurrentQuestTarget();
 // ---- World scan ----
 
 struct WorldEntity {
-    enum class Kind { Actor, Container, Door, Item, Note };
+    enum class Kind { Actor, Container, Door, Item, Note, Quest };
     Kind        kind;
     std::string name;
     Vec3        position;
@@ -90,6 +90,12 @@ struct WorldEntity {
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                                     bool actors_only = false,
                                     bool hostiles_only = false);
+
+// All currently-running quests that have a target marker, as WorldEntities
+// (Kind::Quest, name = quest name, position = marker). Lets the player browse
+// active quests and pick which to navigate to — instead of the game's
+// auto-selected "latest" objective (which DLCs hijack).
+std::vector<WorldEntity> GetActiveQuests();
 
 // ---- Bearings ----
 

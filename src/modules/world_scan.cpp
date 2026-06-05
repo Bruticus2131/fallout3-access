@@ -9,6 +9,7 @@
 #include "f3a/polling_loop.h"
 
 #include <windows.h>
+#include <algorithm>
 
 #include <cstdio>
 #include <string>
@@ -77,7 +78,7 @@ void ScanHostiles() { DoScan(true);  }
 // Scanner categories (cycled with Shift+[ / Shift+]). g_scan_full holds the
 // full unfiltered scan; g_scan_list is the current category's view.
 enum Category { Cat_All, Cat_Npc, Cat_Item, Cat_Door, Cat_Container,
-                Cat_COUNT };
+                Cat_Quest, Cat_COUNT };
 
 const char* CatName(int c)
 {
@@ -87,6 +88,7 @@ const char* CatName(int c)
     case Cat_Item:      return "przedmioty";
     case Cat_Door:      return "drzwi";
     case Cat_Container: return "pojemniki";
+    case Cat_Quest:     return "zadania";
     default:            return "?";
     }
 }
@@ -120,8 +122,23 @@ bool GameplayAndHud()
 void Refilter()
 {
     g_scan_list.clear();
-    for (const auto& e : g_scan_full)
-        if (PassesCategory(e.kind, g_category)) g_scan_list.push_back(e);
+    if (g_category == Cat_Quest) {
+        // Quests come from the quest list, not the physical scan, and are
+        // sorted by distance like everything else.
+        g_scan_list = game::GetActiveQuests();
+        auto pp = game::GetPlayerPosition();
+        std::sort(g_scan_list.begin(), g_scan_list.end(),
+                  [&pp](const game::WorldEntity& a, const game::WorldEntity& b){
+                      float da = (a.position.x-pp.x)*(a.position.x-pp.x) +
+                                 (a.position.y-pp.y)*(a.position.y-pp.y);
+                      float db = (b.position.x-pp.x)*(b.position.x-pp.x) +
+                                 (b.position.y-pp.y)*(b.position.y-pp.y);
+                      return da < db;
+                  });
+    } else {
+        for (const auto& e : g_scan_full)
+            if (PassesCategory(e.kind, g_category)) g_scan_list.push_back(e);
+    }
     g_scan_index = g_scan_list.empty() ? -1 : 0;
 }
 
