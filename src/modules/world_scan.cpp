@@ -188,15 +188,15 @@ bool CategoryModHeld()
     return hotkeys::CtrlActive();
 }
 
-// Cycle the scanner category (Shift+] / Shift+[), announce it, then the first
-// item in that category.
+// Cycle the scanner category (Ctrl+PgUp / Ctrl+PgDn). Announce ONLY the
+// category name — the player then uses plain PgUp/PgDn to browse objects in
+// it. (Announcing an object here made category-cycling sound like it was
+// still scrolling objects.)
 void CategoryStep(int dir)
 {
     g_category = (g_category + dir + Cat_COUNT) % Cat_COUNT;
     if (ScanListStale()) Rescan(); else Refilter();
-    tolk::Speak(std::string("Kategoria: ") + CatName(g_category),
-                tolk::Priority::Ui, true);
-    if (!g_scan_list.empty()) AnnounceCurrent();
+    tolk::Speak(CatName(g_category), tolk::Priority::Ui, true);
 }
 
 void ScanNext()

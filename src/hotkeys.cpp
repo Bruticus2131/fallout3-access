@@ -187,7 +187,9 @@ void Poll()
     bool ctrlNow = (GetAsyncKeyState(VK_CONTROL)  & 0x8000) ||
                    (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
                    (GetAsyncKeyState(VK_RCONTROL) & 0x8000);
-    if (ctrlNow)           g_ctrl_grace = 4;
+    // Short window: enough to catch Ctrl read a tick late, short enough that
+    // it doesn't linger onto a following plain PgUp/PgDn (object browse).
+    if (ctrlNow)           g_ctrl_grace = 2;
     else if (g_ctrl_grace) --g_ctrl_grace;
 
     for (auto& b : g_bindings) {
