@@ -8,6 +8,8 @@
 #include "f3a/logger.h"
 #include "f3a/polling_loop.h"
 
+#include <windows.h>
+
 #include <cstdio>
 #include <string>
 
@@ -72,9 +74,41 @@ void ScanHostiles() { DoScan(true);  }
 // step announces "name, distance, o'clock direction". Home turns the player
 // to face the current pick; End starts/stops AutoWalk toward it.
 
-std::vector<game::WorldEntity> g_scan_list;
+// Scanner categories (cycled with Shift+[ / Shift+]). g_scan_full holds the
+// full unfiltered scan; g_scan_list is the current category's view.
+enum Category { Cat_All, Cat_Npc, Cat_Item, Cat_Door, Cat_Container,
+                Cat_COUNT };
+
+const char* CatName(int c)
+{
+    switch (c) {
+    case Cat_All:       return "wszystko";
+    case Cat_Npc:       return "postacie";
+    case Cat_Item:      return "przedmioty";
+    case Cat_Door:      return "drzwi";
+    case Cat_Container: return "pojemniki";
+    default:            return "?";
+    }
+}
+
+bool PassesCategory(game::WorldEntity::Kind k, int cat)
+{
+    switch (cat) {
+    case Cat_All:       return true;
+    case Cat_Npc:       return k == game::WorldEntity::Kind::Actor;
+    case Cat_Item:      return k == game::WorldEntity::Kind::Item ||
+                               k == game::WorldEntity::Kind::Note;
+    case Cat_Door:      return k == game::WorldEntity::Kind::Door;
+    case Cat_Container: return k == game::WorldEntity::Kind::Container;
+    default:            return true;
+    }
+}
+
+std::vector<game::WorldEntity> g_scan_full;   // everything scanned
+std::vector<game::WorldEntity> g_scan_list;   // current category view
 int         g_scan_index = -1;
-const void* g_scan_cell  = nullptr;  // cell the list was built for
+int         g_category   = Cat_All;
+const void* g_scan_cell  = nullptr;  // cell the full list was built for
 
 bool GameplayAndHud()
 {
@@ -83,28 +117,36 @@ bool GameplayAndHud()
     return active == menu::Id::None || active == menu::Id::HUDMain;
 }
 
+void Refilter()
+{
+    g_scan_list.clear();
+    for (const auto& e : g_scan_full)
+        if (PassesCategory(e.kind, g_category)) g_scan_list.push_back(e);
+    g_scan_index = g_scan_list.empty() ? -1 : 0;
+}
+
 void Rescan()
 {
     const auto& cfg = config::Get();
     // A wider net than the X-key scan: cycling is how the player explores.
-    g_scan_list = game::ScanNearby(cfg.nearby_scan_radius * 2, 40,
+    g_scan_full = game::ScanNearby(cfg.nearby_scan_radius * 2, 80,
                                    false, false);
-    g_scan_index = g_scan_list.empty() ? -1 : 0;
-    g_scan_cell  = game::GetPlayerCell();
-    F3A_INFO("Scanner rescan: %d objects found.", (int)g_scan_list.size());
+    g_scan_cell = game::GetPlayerCell();
+    F3A_INFO("Scanner rescan: %d objects found.", (int)g_scan_full.size());
+    Refilter();
 }
 
-// True if the cached list belongs to a different cell than the player is in
+// True if the cached scan belongs to a different cell than the player is in
 // now (changed save, walked through a door) — then it must be rebuilt.
 bool ScanListStale()
 {
-    return g_scan_list.empty() || g_scan_cell != game::GetPlayerCell();
+    return g_scan_full.empty() || g_scan_cell != game::GetPlayerCell();
 }
 
 void AnnounceCurrent()
 {
     if (g_scan_index < 0 || g_scan_index >= (int)g_scan_list.size()) {
-        tolk::Speak(strings::Render(strings::Key::NoNearbyEntities),
+        tolk::Speak(std::string("Brak w kategorii: ") + CatName(g_category),
                     tolk::Priority::System, true);
         return;
     }
@@ -122,12 +164,29 @@ void AnnounceCurrent()
     tolk::Speak(line, tolk::Priority::Ui, true);
 }
 
+bool ShiftHeld()
+{
+    return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+}
+
+// Cycle the scanner category (Shift+] / Shift+[), announce it, then the first
+// item in that category.
+void CategoryStep(int dir)
+{
+    g_category = (g_category + dir + Cat_COUNT) % Cat_COUNT;
+    if (ScanListStale()) Rescan(); else Refilter();
+    tolk::Speak(std::string("Kategoria: ") + CatName(g_category),
+                tolk::Priority::Ui, true);
+    if (!g_scan_list.empty()) AnnounceCurrent();
+}
+
 void ScanNext()
 {
     if (!GameplayAndHud()) {
         F3A_DEBUG("ScanNext ignored: not gameplay/HUD.");
         return;
     }
+    if (ShiftHeld()) { CategoryStep(+1); return; }
     if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (++g_scan_index >= (int)g_scan_list.size()) {
@@ -140,6 +199,7 @@ void ScanNext()
 void ScanPrev()
 {
     if (!GameplayAndHud()) return;
+    if (ShiftHeld()) { CategoryStep(-1); return; }
     if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (--g_scan_index < 0) {
