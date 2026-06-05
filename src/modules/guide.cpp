@@ -46,6 +46,8 @@ constexpr float kWaypointReach = 150.0f;   // advance when this close (~2.3 m)
 
 float g_ping_timer = 0.0f;   // positional beacon cadence
 float g_dist_timer = 0.0f;   // spoken distance cadence
+float g_dir_timer  = 0.0f;   // spoken turn-cue cadence
+int   g_last_zone  = -1;     // last heading zone announced (straight/L/R/back)
 
 // No-progress ("blocked") detection: a straight-line beacon points through
 // walls, so in corridors you can walk into a wall while the target stays the
@@ -106,6 +108,8 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_active     = true;
     g_ping_timer = 0.0f;
     g_dist_timer = 0.0f;
+    g_dir_timer  = 0.0f;
+    g_last_zone  = -1;
     g_prog_timer = 0.0f;
     g_warned_blocked = false;
 
@@ -173,6 +177,26 @@ void Tick(float dt)
     if (g_ping_timer >= interval) {
         g_ping_timer = 0.0f;
         audio::Ping(rel, dist01);
+    }
+
+    // Spoken turn cue — the panned ping alone is too subtle to act on (the
+    // "it was on my right but I kept walking straight" problem). Announce a
+    // clear direction whenever the heading zone changes: straight / right /
+    // left / turn around. Hysteresis + a min interval avoid chatter.
+    float a = std::fabs(rel);
+    int zone;
+    if (a <= 20.0f)        zone = 0;   // straight
+    else if (a >= 150.0f)  zone = 3;   // behind
+    else                   zone = (rel > 0.0f) ? 1 : 2;  // right / left
+    g_dir_timer += dt;
+    if (zone != g_last_zone && g_dir_timer >= 1.0f) {
+        g_dir_timer = 0.0f;
+        g_last_zone = zone;
+        const char* msg = zone == 0 ? "prosto"
+                        : zone == 1 ? "w prawo"
+                        : zone == 2 ? "w lewo"
+                                    : "zawróć";
+        tolk::Speak(msg, tolk::Priority::Ui, true);
     }
 
     g_dist_timer += dt;
