@@ -205,6 +205,17 @@ void Poll()
 }
 
 bool ShiftActive() { return g_shift_grace > 0; }
-bool CtrlActive()  { return g_ctrl_grace  > 0; }
+
+// Ctrl is read LIVE (not via the grace window): the category modifier is held
+// down while tapping PgUp/PgDn, so the current physical state is reliable — and
+// crucially it clears the instant Ctrl is released, so the very next plain
+// PgUp/PgDn reads an object/quest immediately instead of being eaten as another
+// category step (which felt like the scanner "not refreshing right away").
+bool CtrlActive()
+{
+    return (GetAsyncKeyState(VK_CONTROL)  & 0x8000) ||
+           (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
+           (GetAsyncKeyState(VK_RCONTROL) & 0x8000);
+}
 
 } // namespace f3a::hotkeys
