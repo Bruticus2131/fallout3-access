@@ -3,10 +3,13 @@
 // State machine (mirrors the architecture of the author's earlier mod):
 //   AW_IDLE -> AW_WALKING -> (arrive | stuck | cancel) -> AW_IDLE
 //
-// Movement: we hold the game's forward key via SendInput (hardware scancode,
-// so DirectInput sees it) and steer by writing the player's yaw toward the
-// target every tick. No pathfinding — straight line with stuck detection;
-// the player hears distance callouts and a clear stop reason.
+// Movement: we DON'T rotate the player to steer (writing rotZ fights the
+// engine's own movement controller and makes the player orbit/spin). Instead
+// we drive with the four movement keys (WASD) relative to whatever way the
+// player faces — decomposing the heading-to-goal into forward/back + strafe —
+// so the player slides toward the waypoint without ever turning. Trick
+// borrowed from the "Better Autowalk" FOSE plugin. The player hears distance
+// callouts and a clear stop reason.
 
 #include "f3a/modules.h"
 #include "f3a/game_access.h"
@@ -76,42 +79,50 @@ constexpr float kArriveDist = 110.0f;
 // target is well above/below us, stop and tell the player to use the beacon.
 constexpr float kFloorDelta = 160.0f;
 
-// Gentle steering: snapping yaw straight at the target each tick makes the
-// player orbit the goal (the heading error swings 180° as you pass abeam).
-// Turn toward the desired heading by at most this many degrees per tick, and
-// don't bother correcting within a small dead zone.
-constexpr float kMaxTurnDeg  = 18.0f;
-constexpr float kDeadZoneDeg = 4.0f;
+// Movement keys as hardware scancodes (set 1). Default Fallout 3 bindings:
+// W = forward, S = back, A = strafe left, D = strafe right. DirectInput sees
+// scancode injection. (If the player rebinds movement this would need to read
+// their bindings — defaults cover the vast majority.)
+constexpr WORD kScanW = 0x11, kScanA = 0x1E, kScanS = 0x1F, kScanD = 0x20;
 
-void SteerToward(const game::Vec3& target)
+struct MoveKeys { bool w = false, a = false, s = false, d = false; };
+MoveKeys g_keys;   // currently-held movement keys
+
+void SendScan(WORD scan, bool down)
+{
+    INPUT in{};
+    in.type       = INPUT_KEYBOARD;
+    in.ki.wScan   = scan;
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    SendInput(1, &in, sizeof(in));
+}
+
+// Apply a desired key set, sending only the edges that changed (no key spam).
+void ApplyKeys(MoveKeys want)
+{
+    if (want.w != g_keys.w) SendScan(kScanW, want.w);
+    if (want.a != g_keys.a) SendScan(kScanA, want.a);
+    if (want.s != g_keys.s) SendScan(kScanS, want.s);
+    if (want.d != g_keys.d) SendScan(kScanD, want.d);
+    g_keys = want;
+}
+
+void ReleaseAllKeys() { ApplyKeys(MoveKeys{}); }
+
+// Drive toward a world point by strafing — never rotates the player. Decompose
+// the heading-to-goal (relative to current facing) into an 8-way WASD combo;
+// the bearing feedback loop corrects the residual angle as we move.
+void DriveToward(const game::Vec3& target)
 {
     auto pp = game::GetPlayerPosition();
     auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), target);
-    float rel = br.relative_yaw;            // -180..180, 0 = ahead
-    if (std::fabs(rel) <= kDeadZoneDeg) return;
-    float step = rel;
-    if (step >  kMaxTurnDeg) step =  kMaxTurnDeg;
-    if (step < -kMaxTurnDeg) step = -kMaxTurnDeg;
-    float new_yaw_deg = game::GetPlayerYaw() + step;
-    // Convert back to a world point ahead at the new heading and reuse
-    // SetPlayerYawTo, so all yaw-convention math stays in one place.
-    float rad = new_yaw_deg * 0.01745329252f;
-    game::Vec3 ahead{ pp.x + std::sin(rad) * 100.0f,
-                      pp.y + std::cos(rad) * 100.0f, pp.z };
-    game::SetPlayerYawTo(ahead);
-}
-
-// Forward key as a hardware scancode (W = 0x11). DirectInput sees scancode
-// injection; configurable later if the user rebinds movement.
-constexpr WORD kForwardScan = 0x11;
-
-void SendForward(bool down)
-{
-    INPUT in{};
-    in.type           = INPUT_KEYBOARD;
-    in.ki.wScan       = kForwardScan;
-    in.ki.dwFlags     = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &in, sizeof(in));
+    float rel = br.relative_yaw;        // -180..180, 0 = ahead, + = right
+    MoveKeys k;
+    k.w = (rel > -67.5f  && rel <  67.5f);
+    k.s = (rel >  112.5f || rel < -112.5f);
+    k.d = (rel >   22.5f && rel <  157.5f);
+    k.a = (rel <  -22.5f && rel > -157.5f);
+    ApplyKeys(k);
 }
 
 float DistanceToTarget()
@@ -148,7 +159,7 @@ void AdvanceWaypoints()
 void StopWalking(const char* reason_utf8)
 {
     if (g_state == State::Idle) return;
-    SendForward(false);
+    ReleaseAllKeys();
     g_state = State::Idle;
     if (reason_utf8 && *reason_utf8) {
         tolk::Speak(reason_utf8, tolk::Priority::System, true);
@@ -164,7 +175,7 @@ void SteerAvoiding()
     float rad      = veerDeg * 0.01745329252f;
     game::Vec3 p{ pp.x + std::sin(rad) * 300.0f,
                   pp.y + std::cos(rad) * 300.0f, pp.z };
-    SteerToward(p);
+    DriveToward(p);
 }
 
 void EnterAvoiding()
@@ -188,8 +199,6 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_target_pos  = pos;
     g_target_name = name;
 
-    game::SetPlayerYawTo(g_target_pos);
-
     g_last_probe_pos = game::GetPlayerPosition();
     g_probe_timer    = 0.0f;
     g_callout_timer  = 0.0f;
@@ -205,7 +214,7 @@ void StartTo(const game::Vec3& pos, const std::string& name)
                                      g_waypoints) && !g_waypoints.empty();
 
     g_state = State::Walking;
-    SendForward(true);
+    DriveToward(CurrentGoal());
 
     char buf[256];
     std::snprintf(buf, sizeof(buf), "Idę do: %s, %s%s",
@@ -265,7 +274,7 @@ void Tick(float dt)
         // Follow the path: advance through reached waypoints, steer at the
         // current one (or the target if we have no path).
         AdvanceWaypoints();
-        SteerToward(CurrentGoal());
+        DriveToward(CurrentGoal());
 
         g_probe_timer += dt;
         if (g_probe_timer >= kProbeEvery) {
@@ -321,8 +330,8 @@ void Init()
 
 void Shutdown()
 {
-    // Never leave the forward key stuck down.
-    if (g_state == State::Walking) SendForward(false);
+    // Never leave a movement key stuck down.
+    ReleaseAllKeys();
     g_state = State::Idle;
 }
 
