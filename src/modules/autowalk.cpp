@@ -52,7 +52,7 @@ constexpr float kMinProgress = 16.0f;  // game units per probe window
 float        g_callout_timer = 0.0f;
 constexpr float kCalloutEvery = 2.5f;
 
-constexpr float kArriveDist = 80.0f;   // ~1.25 m — close enough to activate
+constexpr float kArriveDist = 55.0f;   // ~0.85 m — right up against the target
 
 // Different-floor guard: with no navmesh path we can't climb stairs, so if the
 // target is well above/below us, stop and tell the player to use the beacon.

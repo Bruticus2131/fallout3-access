@@ -270,30 +270,43 @@ void AutoWalkToggle()
     autowalk::StartTo(e.position, e.name);
 }
 
-// Activate the selected object WITHOUT aiming the crosshair — essential for a
-// blind player who can't line up the third-person reticle. We drive the
-// console the same way you would by hand: select the reference with `prid`,
-// then `activate player` so the game runs its normal use/open/read handler.
+// Tap the game's Use/Activate key (default E = scancode 0x12) for the player.
+// FOSE in FO3 exposes no console interface (QueryInterface returns null), so we
+// can't activate a ref by id directly. Instead we rely on the fact that
+// auto-walk leaves the CAMERA aimed at the target (its mouse-turn points the
+// view there), so the activation crosshair is already on the object — tapping
+// Use then triggers the normal open/read/talk handler with no aiming by the
+// player. Best used right after `\` auto-walk parks you facing the target.
+void SendUseKey()
+{
+    INPUT in[2] = {};
+    in[0].type = INPUT_KEYBOARD;
+    in[0].ki.wScan = 0x12;                       // DIK_E
+    in[0].ki.dwFlags = KEYEVENTF_SCANCODE;
+    in[1] = in[0];
+    in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+    SendInput(2, in, sizeof(INPUT));
+}
+
 void ActivateTarget()
 {
     if (!GameplayAndHud()) return;
     if (!HaveTarget()) return;
     const auto& e = g_scan_list[g_scan_index];
-    if (e.kind == game::WorldEntity::Kind::Quest || e.form_id == 0) {
+    if (e.kind == game::WorldEntity::Kind::Quest) {
         tolk::Speak("Tego nie można aktywować.", tolk::Priority::System, true);
         return;
     }
-    if (!console::Available()) {
-        tolk::Speak("Konsola niedostępna.", tolk::Priority::System, true);
-        return;
+    // If a future/other build ever exposes the console, prefer the precise
+    // by-id activation; otherwise tap Use against the aimed crosshair.
+    if (console::Available() && e.form_id != 0) {
+        char cmd[80];
+        std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
+        console::Run(cmd);
+    } else {
+        SendUseKey();
     }
-    // Single dotted command names the target ref explicitly: "<refID>.activate
-    // player 1". More reliable than prid+activate as two RunScriptLine calls,
-    // which don't reliably carry the console's selected reference between them.
-    char cmd[80];
-    std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
-    console::Run(cmd);
-    tolk::Speak("Aktywowano: " + e.name, tolk::Priority::Ui, true);
+    tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
 }
 
 } // namespace
