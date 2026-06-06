@@ -18,7 +18,7 @@ struct Hotkeys {
     uint32_t quest_target     = 0x25; // K — quest target direction
     uint32_t scan_nearby      = 0x2D; // X
     uint32_t scan_hostiles    = 0x2E; // C
-    uint32_t describe_compass = 0x21; // F
+    uint32_t describe_compass = 0x24; // J (F is the game's view-toggle)
     uint32_t toggle_mod       = 0x58; // F12
     uint32_t dump_menu_tree   = 0x57; // F11 — diagnostic dump to log
     uint32_t debug_start_game = 0x44; // F10 — run [Debug] StartGameCommand

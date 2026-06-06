@@ -80,7 +80,7 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 | Key | Action | Status |
 | --- | --- | --- |
 | L | where am I — location and facing direction | works |
-| F | compass direction | works |
+| J | compass direction | works |
 | X | read nearby objects | works |
 | C | read nearby hostiles | works |
 | H | player status (HP, AP, rads, caps) | work in progress |

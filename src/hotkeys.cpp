@@ -33,6 +33,7 @@ int DikToVk(uint32_t dik)
     case 0x14: return 'T';
     case 0x21: return 'F';
     case 0x23: return 'H';
+    case 0x24: return 'J';
     case 0x25: return 'K';
     case 0x26: return 'L';
     case 0x2D: return 'X';
