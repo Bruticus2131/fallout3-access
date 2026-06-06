@@ -32,6 +32,7 @@ struct Hotkeys {
     uint32_t auto_walk        = 0x2B; // \ — auto-walk to the target
     uint32_t guide_quest      = 0x34; // . — beacon guidance to the quest marker
     uint32_t activate_target  = 0xCF; // End — activate the selected object (no aiming)
+    uint32_t crosshair_info   = 0x22; // G — say what's under the crosshair
 };
 
 struct Settings {

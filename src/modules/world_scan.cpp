@@ -381,6 +381,20 @@ void ActivateTarget()
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
 }
 
+// Debug / awareness: announce the reference under the crosshair — exactly what
+// the game would activate with Use. Tells us whether we're aimed at the book or
+// at e.g. a table/floor when activation fails.
+void CrosshairInfo()
+{
+    if (!GameplayAndHud()) return;
+    uint32_t id = 0;
+    std::string nm = game::GetCrosshairRefName(&id);
+    if (nm.empty())
+        tolk::Speak("Nic pod celownikiem.", tolk::Priority::System, true);
+    else
+        tolk::Speak("Pod celownikiem: " + nm, tolk::Priority::Ui, true);
+}
+
 } // namespace
 
 // Drives the deferred Use-key release (single-press path) and the pitch sweep
@@ -421,6 +435,7 @@ void Init()
     hotkeys::Bind(h.guide_beacon,  &GuideToggle);
     hotkeys::Bind(h.auto_walk,     &AutoWalkToggle);
     hotkeys::Bind(h.activate_target, &ActivateTarget);
+    hotkeys::Bind(h.crosshair_info,  &CrosshairInfo);
     F3A_INFO("World scan module ready.");
 }
 void Shutdown() {}

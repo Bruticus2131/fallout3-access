@@ -408,6 +408,29 @@ const void* GetPlayerCell()
     return p ? (const void*)p->parentCell : nullptr;
 }
 
+std::string GetCrosshairRefName(uint32_t* out_form_id)
+{
+    if (out_form_id) *out_form_id = 0;
+    auto* ifm = rt::IFM();
+    if (!ifm) return {};
+    UInt8* base = reinterpret_cast<UInt8*>(ifm);
+    if (IsBadReadPtr(base + 0xFC, 4)) return {};
+    auto* refr = *reinterpret_cast<TESObjectREFR**>(base + 0xFC);  // crosshairRef
+    if (!refr || IsBadReadPtr(refr, 0x40)) return {};
+    if (out_form_id) *out_form_id = refr->refID;
+
+    TESForm* bf = refr->baseForm;
+    if (!Readable(bf, 0x08)) return std::string("obiekt");
+    const char* nm = BaseFormName(bf);
+    if (nm) return GameStrToUtf8(nm);
+    switch (KindOf(bf->typeID)) {
+        case WorldEntity::Kind::Door:      return "drzwi";
+        case WorldEntity::Kind::Container: return "pojemnik";
+        case WorldEntity::Kind::Actor:     return "postać";
+        default:                           return "obiekt";
+    }
+}
+
 void SetPlayerYawTo(const Vec3& target)
 {
     auto* p = rt::Player();
