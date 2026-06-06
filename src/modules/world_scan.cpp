@@ -305,11 +305,14 @@ enum class Sweep { Idle, Running };
 Sweep      g_sweep      = Sweep::Idle;
 game::Vec3 g_sweep_tgt{};
 int        g_sweep_frame = 0;
-int        g_sweep_dir   = 1;     // +1 look down, -1 look up
-int        g_sweep_applied = 0;   // total pitch counts applied (to undo)
+int        g_sweep_dir   = 1;     // initial guess: +1 = look "down"
+int        g_sweep_applied = 0;   // net pitch counts applied (to undo on stop)
 constexpr int kSweepStepFrames = 5;    // frames per E-tap+pitch step
-constexpr int kSweepSteps      = 12;   // arc resolution
-constexpr long kSweepPitchStep = 40;   // mouse counts of pitch per step
+constexpr int kSweepSteps      = 8;    // steps per direction
+constexpr long kSweepPitchStep = 50;   // mouse counts of pitch per step
+// Total = one pass in the guessed direction, then two passes back the other way
+// so the whole vertical arc is covered regardless of the mouse-pitch sign.
+constexpr int kSweepTotal      = kSweepSteps * 3;
 
 void StartSweep(const game::Vec3& tgt)
 {
@@ -402,18 +405,21 @@ void Tick(float)
     if (dx < -150) dx = -150;
     SendMouse(dx, 0);
 
-    // Per-step: press Use, hold, release, then nudge the pitch and advance.
     int step  = g_sweep_frame / kSweepStepFrames;
     int phase = g_sweep_frame % kSweepStepFrames;
+    if (step >= kSweepTotal) { StopSweep(true); return; }  // whole arc, no hit
+
+    // Per-step: press Use, hold ~3 frames, release, then nudge the pitch. First
+    // `kSweepSteps` steps go the guessed direction; the rest reverse, so the
+    // crosshair traverses the entire vertical range either way.
+    int dir = (step < kSweepSteps) ? g_sweep_dir : -g_sweep_dir;
     if      (phase == 0) SendUse(true);
-    else if (phase == 2) SendUse(false);
-    else if (phase == 4 && step < kSweepSteps - 1) {
-        SendMouse(0, g_sweep_dir * kSweepPitchStep);
-        g_sweep_applied += g_sweep_dir * kSweepPitchStep;
+    else if (phase == 3) SendUse(false);
+    else if (phase == 4) {
+        SendMouse(0, dir * kSweepPitchStep);
+        g_sweep_applied += dir * kSweepPitchStep;
     }
     ++g_sweep_frame;
-
-    if (step >= kSweepSteps) StopSweep(true);   // arc exhausted: give up, level out
 }
 
 void Init()
