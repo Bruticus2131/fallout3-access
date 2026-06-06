@@ -274,7 +274,7 @@ void AutoWalkToggle()
 // polls the keyboard once per frame in DirectInput immediate mode, so a down+up
 // fired in the same instant falls between polls and is seen as "never pressed"
 // (that's why held movement works but a tap didn't activate anything). So we
-// hold the key DOWN for a few frames and release it from Tick().
+// hold the key DOWN for a few frames and release it.
 void SendUse(bool down)
 {
     INPUT in = {};
@@ -284,7 +284,51 @@ void SendUse(bool down)
     SendInput(1, &in, sizeof(INPUT));
 }
 
-int g_use_hold_ticks = 0;   // frames left to keep Use held, then release
+void SendMouse(long dx, long dy)
+{
+    if (!dx && !dy) return;
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dx = dx; in.mi.dy = dy;
+    in.mi.dwFlags = MOUSEEVENTF_MOVE;            // relative
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+int g_use_hold_ticks = 0;   // single-press path: frames to keep Use held
+
+// Pitch-sweep path for floor/low objects (items, containers): the crosshair
+// sits too high to hit something on the ground, so we aim yaw at it and tap Use
+// while sweeping the view down (or up) across an arc. When the crosshair
+// crosses the object it activates; we stop as soon as a menu opens. Doors / NPCs
+// don't need this — they use the single-press path.
+enum class Sweep { Idle, Running };
+Sweep      g_sweep      = Sweep::Idle;
+game::Vec3 g_sweep_tgt{};
+int        g_sweep_frame = 0;
+int        g_sweep_dir   = 1;     // +1 look down, -1 look up
+int        g_sweep_applied = 0;   // total pitch counts applied (to undo)
+constexpr int kSweepStepFrames = 5;    // frames per E-tap+pitch step
+constexpr int kSweepSteps      = 12;   // arc resolution
+constexpr long kSweepPitchStep = 40;   // mouse counts of pitch per step
+
+void StartSweep(const game::Vec3& tgt)
+{
+    g_sweep       = Sweep::Running;
+    g_sweep_tgt   = tgt;
+    g_sweep_frame = 0;
+    g_sweep_applied = 0;
+    auto pp = game::GetPlayerPosition();
+    g_sweep_dir = (tgt.z < pp.z + 100.0f) ? 1 : -1;   // below eye -> look down
+}
+
+void StopSweep(bool restorePitch)
+{
+    SendUse(false);
+    if (restorePitch && g_sweep_applied)
+        SendMouse(0, -g_sweep_applied);   // return the view roughly to level
+    g_sweep = Sweep::Idle;
+    g_sweep_applied = 0;
+}
 
 void ActivateTarget()
 {
@@ -296,9 +340,9 @@ void ActivateTarget()
         return;
     }
     // If a future/other build ever exposes the console, prefer precise by-id
-    // activation. Otherwise hold Use against the aimed crosshair — first widen
-    // the activation pick sphere so it forgives imperfect (esp. vertical) aim.
-    // Use auto-walk (\) to park facing the target before pressing this.
+    // activation. Otherwise drive the Use key against the crosshair — first
+    // widen the activation pick sphere so it forgives imperfect aim. Park facing
+    // the target with auto-walk (\) first for best results.
     if (console::Available() && e.form_id != 0) {
         char cmd[80];
         std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
@@ -307,20 +351,56 @@ void ActivateTarget()
         int r = config::Get().activate_pick_radius;
         if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius",
                                             (float)r);
-        SendUse(true);            // press and hold; Tick() releases it
-        g_use_hold_ticks = 5;
+        bool lowObject = e.kind == game::WorldEntity::Kind::Item ||
+                         e.kind == game::WorldEntity::Kind::Note ||
+                         e.kind == game::WorldEntity::Kind::Container;
+        if (lowObject) {
+            StartSweep(e.position);   // sweep the view to catch floor objects
+        } else {
+            SendUse(true);            // doors / NPCs: single hold-release
+            g_use_hold_ticks = 5;
+        }
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
 }
 
 } // namespace
 
-// Release the Use key a few frames after ActivateTarget pressed it, so FO3's
-// once-per-frame input poll actually sees the press.
+// Drives the deferred Use-key release (single-press path) and the pitch sweep
+// (floor-object path). Called every frame.
 void Tick(float)
 {
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
+
+    if (g_sweep != Sweep::Running) return;
+
+    // Leaving gameplay / a menu other than the HUD: if a menu opened we likely
+    // activated something — success; stop without restoring pitch.
+    if (!poll::IsGameplayActive()) { StopSweep(false); return; }
+    auto m = menu::ActiveMenu();
+    if (m != menu::Id::None && m != menu::Id::HUDMain) { StopSweep(false); return; }
+
+    // Keep yaw locked on the target (camera mouse-turn, like auto-walk).
+    auto pp = game::GetPlayerPosition();
+    auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), g_sweep_tgt);
+    long dx = (long)(br.relative_yaw * 4.0f);
+    if (dx >  150) dx =  150;
+    if (dx < -150) dx = -150;
+    SendMouse(dx, 0);
+
+    // Per-step: press Use, hold, release, then nudge the pitch and advance.
+    int step  = g_sweep_frame / kSweepStepFrames;
+    int phase = g_sweep_frame % kSweepStepFrames;
+    if      (phase == 0) SendUse(true);
+    else if (phase == 2) SendUse(false);
+    else if (phase == 4 && step < kSweepSteps - 1) {
+        SendMouse(0, g_sweep_dir * kSweepPitchStep);
+        g_sweep_applied += g_sweep_dir * kSweepPitchStep;
+    }
+    ++g_sweep_frame;
+
+    if (step >= kSweepSteps) StopSweep(true);   // arc exhausted: give up, level out
 }
 
 void Init()
