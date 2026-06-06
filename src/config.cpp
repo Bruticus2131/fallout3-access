@@ -81,6 +81,7 @@ bool Load(const wchar_t* ini_path)
     s.nearby_scan_radius    = ReadInt (L"Voice", L"NearbyScanRadius",   1200, ini_path);
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
     s.compass_units         = ReadInt (L"Voice", L"CompassUnits",       0, ini_path);
+    s.autowalk_turn_gain    = ReadInt (L"Voice", L"AutoWalkTurnGain",   4, ini_path);
 
     s.language    = ReadStr(L"General", L"Language",   "pl",   ini_path);
     s.prefer_sapi = ReadBool(L"General", L"PreferSAPI", false, ini_path);

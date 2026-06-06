@@ -53,6 +53,10 @@ struct Settings {
     int    nearby_scan_radius   = 1200; // game units (~ 1 meter = 64 units)
     int    nearby_scan_max_items = 8;
     int    compass_units = 0;           // 0 = clock face ("godzina trzecia"), 1 = degrees
+    // AutoWalk mouse-turn gain: mouse counts injected per degree of heading
+    // error. Higher = turns faster (may overshoot/spin), lower = gentler/slower.
+    // Tune live in the INI if auto-walk turns too hard or too softly.
+    int    autowalk_turn_gain = 4;
 
     // Debug
     // Console command run by the debug_start_game hotkey. From the main menu

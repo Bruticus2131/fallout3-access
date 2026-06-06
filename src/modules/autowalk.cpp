@@ -60,20 +60,24 @@ constexpr float kFloorDelta = 160.0f;
 
 // --- Turning via mouse-look ------------------------------------------------
 // Relative bearing (deg, + = goal is to the right) -> horizontal mouse motion.
-// The per-tick feedback loop converges, so the gain only needs to be roughly
-// right. Dead zone avoids jitter when already aligned; the cap stops us from
-// whipping around on a big error.
-constexpr float kTurnGain   = 9.0f;    // mouse counts per degree of error
-constexpr long  kTurnMax    = 500;     // max counts per tick
-constexpr float kTurnDead   = 3.0f;    // deg — don't bother turning inside this
-// Only walk forward once we're roughly facing the goal, so we never stride away
-// from it while still turning around.
-constexpr float kForwardCone = 50.0f;  // deg
+// CRUCIAL for third person: mouse-look there spins the CAMERA, not the body.
+// The body only turns when it MOVES (and FO3 moves you in the camera direction
+// in BOTH views, with rotZ snapping to the movement heading). So we must keep
+// walking forward WHILE turning — then rotZ tracks the camera and this feedback
+// loop converges. Gating forward on "already facing" deadlocked: body never
+// moved, rotZ never updated, camera just spun around it forever.
+//
+// Gain is INI-tunable (Voice/AutoWalkTurnGain) because the right value depends
+// on the player's mouse sensitivity. Dead zone avoids jitter; cap stops a whip.
+constexpr long  kTurnMax  = 220;     // max counts per tick
+constexpr float kTurnDead = 4.0f;    // deg — don't turn inside this
 
 void TurnMouse(float relDeg)
 {
     if (std::fabs(relDeg) <= kTurnDead) return;
-    long dx = (long)(relDeg * kTurnGain);
+    long gain = config::Get().autowalk_turn_gain;
+    if (gain < 1) gain = 1;
+    long dx = (long)(relDeg * (float)gain);
     if (dx >  kTurnMax) dx =  kTurnMax;
     if (dx < -kTurnMax) dx = -kTurnMax;
     INPUT in{};
@@ -128,14 +132,15 @@ void AdvanceWaypoints()
     }
 }
 
-// Turn toward the goal; walk forward once roughly aligned. Returns the |error|.
+// Turn toward the goal AND keep walking forward (see TurnMouse note: forward
+// motion is what makes the body — and rotZ — actually rotate). Returns |error|.
 float Steer(const game::Vec3& goal)
 {
     auto  pp  = game::GetPlayerPosition();
     auto  br  = game::ComputeBearing(pp, game::GetPlayerYaw(), goal);
     float rel = br.relative_yaw;          // -180..180, 0 = ahead, + = right
     TurnMouse(rel);
-    Forward(std::fabs(rel) < kForwardCone);
+    Forward(true);
     return std::fabs(rel);
 }
 
