@@ -9,9 +9,10 @@ third_party/tolk/include/Tolk.h
 third_party/fose/
 xFOSE-main/
 xFOSE-main.zip
-# Third-party reference repos — kept locally only, not redistributed here
+# Third-party reference repos / mods — kept locally only, not redistributed here
 Sku/
 SkuCustomBeaconsEssential/
 SkuCustomBeaconsAdditional/
 SkyrimAccessMod/
+Better Autowalk*
 *.log
