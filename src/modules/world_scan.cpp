@@ -384,17 +384,19 @@ void ActivateTarget()
 // Debug / awareness: announce the reference under the crosshair — exactly what
 // the game would activate with Use. Tells us whether we're aimed at the book or
 // at e.g. a table/floor when activation fails.
-// View announce, event-driven (no polling — that flickered on load and missed
-// in-game toggles). Pressing the game's view key (F) schedules a read a few
-// frames later, once the toggle has settled, then announces it. Silent on load
-// because nothing schedules it there.
-int g_view_announce_ticks = 0;
-constexpr int kViewAnnounceDelay = 6;   // ~150 ms after F, settled but prompt
+// View announce. The real first/third-person state lives in the camera object
+// (not PlayerCharacter — a memory scan showed only position jitter change on
+// the toggle), and we don't have its address, so we TRACK it in software:
+// assume first person at load and flip on each view-key press. Correct as long
+// as the player only toggles with this key (F) and starts in first person.
+bool g_assumed_third = false;
 
 void OnViewToggle()
 {
     if (!GameplayAndHud()) return;
-    g_view_announce_ticks = kViewAnnounceDelay;
+    g_assumed_third = !g_assumed_third;
+    tolk::Speak(g_assumed_third ? "Trzecia osoba" : "Pierwsza osoba",
+                tolk::Priority::Ui, true);
 }
 
 void CrosshairInfo()
@@ -426,12 +428,6 @@ void Tick(float)
 {
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
-
-    if (g_view_announce_ticks > 0 && --g_view_announce_ticks == 0 &&
-        poll::IsGameplayActive()) {
-        tolk::Speak(game::IsThirdPerson() ? "Trzecia osoba" : "Pierwsza osoba",
-                    tolk::Priority::Ui, true);
-    }
 
     if (g_sweep != Sweep::Running) return;
 
