@@ -332,6 +332,7 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         e.name     = std::move(label);
         e.position = { r->posX, r->posY, r->posZ };
         e.form_id  = r->refID;
+        e.refr     = r;            // for crosshair-forced activation
         out.push_back(std::move(e));
     }
 }
@@ -422,6 +423,19 @@ uint32_t GetCrosshairRefID(uint32_t* out_type)
         if (Readable(bf, 0x08)) *out_type = bf->typeID;
     }
     return refr->refID;
+}
+
+bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID)
+{
+    if (!refr || IsBadReadPtr(refr, 0x40)) return false;
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (r->refID != expectedRefID) return false;   // stale / reused pointer
+    auto* ifm = rt::IFM();
+    if (!ifm) return false;
+    UInt8* b = reinterpret_cast<UInt8*>(ifm);
+    if (IsBadReadPtr(b + 0xFC, 4)) return false;
+    *reinterpret_cast<const void**>(b + 0xFC) = refr;   // crosshairRef
+    return true;
 }
 
 std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id)

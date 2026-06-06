@@ -284,59 +284,16 @@ void SendUse(bool down)
     SendInput(1, &in, sizeof(INPUT));
 }
 
-int g_use_hold_ticks = 0;   // single-press path: frames to keep Use held
+int g_use_hold_ticks = 0;   // fallback path: frames to keep Use held
 
-void SendMouse(long dx, long dy)
-{
-    if (!dx && !dy) return;
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dx = dx; in.mi.dy = dy;
-    in.mi.dwFlags = MOUSEEVENTF_MOVE;        // relative
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-// Floor/low-object activation via crosshair FEEDBACK. The game exposes what's
-// under the crosshair (crosshairRef), so instead of guessing the pitch we sweep
-// the view (mouse pitch + a gentle yaw correction toward the target) until the
-// SELECTED object's refID actually appears under the crosshair, then hold Use to
-// activate it exactly then. First person; Gamebryo (crosshair) pick on for the
-// duration. Doors/NPCs use the single-press path.
-enum class Sweep { Idle, Searching, Activating };
-Sweep      g_sweep        = Sweep::Idle;
-game::Vec3 g_sweep_tgt{};
-uint32_t   g_sweep_target = 0;     // refID we want under the crosshair
-int        g_sweep_frame  = 0;
-int        g_sweep_applied = 0;    // net mouse-dy applied (to undo on stop)
-int        g_act_hold      = 0;    // frames to hold Use once locked on target
-uint32_t   g_sweep_cross0  = 0;    // crosshair refID at start (motion check)
-bool       g_sweep_moved   = false;
-constexpr int  kSweepFrames     = 120;  // ~3s budget to find the object
-constexpr long kPitchPerFrame   = 11;   // mouse counts of pitch per frame
-constexpr int  kSweepHalf       = 40;   // sweep one way this many frames, then back
-
-void StartSweep(const game::Vec3& tgt, uint32_t targetID)
-{
-    g_sweep         = Sweep::Searching;
-    g_sweep_tgt     = tgt;
-    g_sweep_target  = targetID;
-    g_sweep_frame   = 0;
-    g_sweep_applied = 0;
-    g_act_hold      = 0;
-    g_sweep_cross0  = game::GetCrosshairRefID();
-    g_sweep_moved   = false;
-    game::SetIniSettingInt("bActivatePickUseGamebryoPick", 1);
-}
-
-void StopSweep(const char* msg, bool restoreView)
-{
-    SendUse(false);
-    game::SetIniSettingInt("bActivatePickUseGamebryoPick", 0);  // restore default
-    if (restoreView && g_sweep_applied) SendMouse(0, -g_sweep_applied);
-    if (msg && *msg) tolk::Speak(msg, tolk::Priority::System, true);
-    g_sweep = Sweep::Idle;
-    g_sweep_applied = 0;
-}
+// Crosshair-forced activation: write the game's crosshairRef to point at the
+// EXACT selected reference, then hold Use a few frames — re-asserting
+// crosshairRef each frame so the per-frame pick can't steal it back. The game
+// activates whatever crosshairRef points to, so this reaches objects the
+// crosshair physically can't (a book occluded by a table) with no aiming.
+const void* g_force_refr  = nullptr;
+uint32_t    g_force_id    = 0;
+int         g_force_ticks = 0;
 
 void ActivateTarget()
 {
@@ -347,37 +304,26 @@ void ActivateTarget()
         tolk::Speak("Tego nie można aktywować.", tolk::Priority::System, true);
         return;
     }
-    // If a future/other build ever exposes the console, prefer precise by-id
-    // activation. Otherwise drive the Use key against the crosshair — first
-    // widen the activation pick sphere so it forgives imperfect aim. Park facing
-    // the target with auto-walk (\) first for best results.
+    // Prefer the console (never available in FO3, but harmless to try).
     if (console::Available() && e.form_id != 0) {
         char cmd[80];
         std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
         console::Run(cmd);
+        tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
+        return;
+    }
+    // Widen the pick sphere (helps the natural pick for in-view objects).
+    int r = config::Get().activate_pick_radius;
+    if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius", (float)r);
+
+    // Force the crosshair onto our exact reference, then hold Use.
+    if (e.refr && e.form_id && game::ForceCrosshairRef(e.refr, e.form_id)) {
+        g_force_refr  = e.refr;
+        g_force_id    = e.form_id;
+        g_force_ticks = 10;
+        SendUse(true);
     } else {
-        int r = config::Get().activate_pick_radius;
-        if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius",
-                                            (float)r);
-        bool lowObject = e.kind == game::WorldEntity::Kind::Item ||
-                         e.kind == game::WorldEntity::Kind::Note ||
-                         e.kind == game::WorldEntity::Kind::Container;
-        if (lowObject) {
-            // Diagnostic: report geometry so we can see whether auto-walk got
-            // close and how far below eye level the object sits.
-            auto pp = game::GetPlayerPosition();
-            float dh = std::sqrt((e.position.x - pp.x) * (e.position.x - pp.x) +
-                                 (e.position.y - pp.y) * (e.position.y - pp.y));
-            float dz = e.position.z - (pp.z + 100.0f);
-            char dbg[128];
-            std::snprintf(dbg, sizeof(dbg),
-                          "Szukam: %s, odległość %.0f, wysokość %.0f",
-                          e.name.c_str(), dh, dz);
-            tolk::Speak(dbg, tolk::Priority::Ui, true);
-            StartSweep(e.position, e.form_id);   // crosshair-guided aim+activate
-            return;
-        }
-        SendUse(true);                // doors / NPCs: single hold-release
+        SendUse(true);              // fallback: plain Use against the crosshair
         g_use_hold_ticks = 5;
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
@@ -431,55 +377,12 @@ void Tick(float)
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
 
-    if (g_sweep == Sweep::Idle) return;
-
-    if (!poll::IsGameplayActive()) { StopSweep(nullptr, false); return; }
-    auto m = menu::ActiveMenu();
-    if (m != menu::Id::None && m != menu::Id::HUDMain) {   // a menu opened = done
-        StopSweep(nullptr, false);
-        return;
+    if (g_force_ticks > 0) {
+        // Keep crosshairRef pinned to our target each frame (the game's pick
+        // would otherwise reset it), then release Use when the hold ends.
+        game::ForceCrosshairRef(g_force_refr, g_force_id);
+        if (--g_force_ticks == 0) SendUse(false);
     }
-
-    if (g_sweep == Sweep::Activating) {
-        // Crosshair is on the target: stay still and hold Use a few frames.
-        if (--g_act_hold <= 0) StopSweep(nullptr, true);
-        return;
-    }
-
-    // Searching: what's under the crosshair now? Lock on either the exact
-    // selected refID OR any activatable object (the book is an activator/book
-    // type while the table is a Static — so the first non-static, non-furniture
-    // thing the crosshair crosses is almost certainly our target).
-    uint32_t type = 0;
-    uint32_t cross = game::GetCrosshairRefID(&type);
-    if (cross != g_sweep_cross0) g_sweep_moved = true;
-    bool exact = (cross != 0 && cross == g_sweep_target);
-    // Activatable = a real object form that isn't world geometry/furniture
-    // (Static 32, StaticCollection 33, MoveableStatic 34, Water 35, Grass 36,
-    // Tree 37, Flora 38, Furniture 39).
-    bool activatable = (cross != 0 && type >= 21 && !(type >= 32 && type <= 39));
-    if (exact || activatable) {
-        SendUse(true);                       // lock on and activate
-        g_act_hold = 6;
-        g_sweep    = Sweep::Activating;
-        tolk::Speak("Cel pod celownikiem, używam.", tolk::Priority::Ui, true);
-        return;
-    }
-
-    // Not yet: gentle yaw correction toward the target + a pitch sweep that goes
-    // one way then back, so the crosshair traverses the whole vertical arc.
-    auto pp = game::GetPlayerPosition();
-    auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), g_sweep_tgt);
-    long dx = (long)(br.relative_yaw * 4.0f);
-    if (dx >  120) dx =  120;
-    if (dx < -120) dx = -120;
-    long dy = (g_sweep_frame < kSweepHalf) ? kPitchPerFrame : -kPitchPerFrame;
-    SendMouse(dx, dy);
-    g_sweep_applied += dy;
-    if (++g_sweep_frame >= kSweepFrames)
-        StopSweep(g_sweep_moved
-                      ? "Nie znalazłem obiektu, tylko przeszkody. Podejdź bliżej."
-                      : "Celownik się nie rusza.", true);
 }
 
 void Init()

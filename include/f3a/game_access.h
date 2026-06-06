@@ -84,6 +84,7 @@ struct WorldEntity {
     bool        owned    = false;
     bool        locked   = false;
     uint32_t    form_id  = 0;
+    const void* refr     = nullptr;   // live TESObjectREFR* (stale after cell change)
 };
 
 // Within `radius` game units of the player; up to `max_results` closest.
@@ -123,6 +124,12 @@ std::string GetCrosshairRefName(uint32_t* out_form_id = nullptr,
 // refID of the reference under the crosshair (0 if none); out_type (optional)
 // gets its base form type. Cheap enough to poll every frame — feedback for aim.
 uint32_t GetCrosshairRefID(uint32_t* out_type = nullptr);
+
+// Force the game's crosshair reference (InterfaceManager+0xFC) to `refr` so a
+// Use press activates THAT object regardless of aim/occlusion. Validates the
+// pointer is readable and its refID still matches expectedRefID (guards against
+// a stale/reused pointer). Returns false if it refused to write.
+bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID);
 
 // Aim the player's view: write yaw (rotZ) and pitch (rotX) directly, the way
 // SkyrimAccessMod's SetHeading/SetLooking aim the crosshair at a target. Angles
