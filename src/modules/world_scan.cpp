@@ -387,12 +387,22 @@ void ActivateTarget()
 void CrosshairInfo()
 {
     if (!GameplayAndHud()) return;
-    uint32_t id = 0;
-    std::string nm = game::GetCrosshairRefName(&id);
-    if (nm.empty())
+    uint32_t id = 0, type = 0;
+    std::string nm = game::GetCrosshairRefName(&id, &type);
+    if (nm.empty()) {
         tolk::Speak("Nic pod celownikiem.", tolk::Priority::System, true);
-    else
-        tolk::Speak("Pod celownikiem: " + nm, tolk::Priority::Ui, true);
+        return;
+    }
+    std::string msg = "Pod celownikiem: " + nm;
+    // Is it the object currently selected in the scanner?
+    if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size()) {
+        uint32_t sel = g_scan_list[g_scan_index].form_id;
+        msg += (sel && sel == id) ? ", to wybrany cel" : ", inny obiekt";
+    }
+    char t[32];
+    std::snprintf(t, sizeof(t), ", typ %u", type);
+    msg += t;
+    tolk::Speak(msg, tolk::Priority::Ui, true);
 }
 
 } // namespace

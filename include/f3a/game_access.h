@@ -114,10 +114,11 @@ void SetPlayerYawTo(const Vec3& target);
 bool IsThirdPerson();
 
 // Name of the reference currently under the crosshair (InterfaceManager+0xFC),
-// "" if none. out_form_id (optional) receives its refID (0 if none). This is
-// exactly what the game would activate with Use — invaluable for debugging
-// whether we're aimed at the right object.
-std::string GetCrosshairRefName(uint32_t* out_form_id = nullptr);
+// "" if none. out_form_id receives its refID, out_type_id its base form type
+// (both 0 if none). This is exactly what the game would activate with Use —
+// invaluable for debugging whether we're aimed at the right object.
+std::string GetCrosshairRefName(uint32_t* out_form_id = nullptr,
+                                uint32_t* out_type_id = nullptr);
 
 // Aim the player's view: write yaw (rotZ) and pitch (rotX) directly, the way
 // SkyrimAccessMod's SetHeading/SetLooking aim the crosshair at a target. Angles

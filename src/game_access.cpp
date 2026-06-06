@@ -408,9 +408,10 @@ const void* GetPlayerCell()
     return p ? (const void*)p->parentCell : nullptr;
 }
 
-std::string GetCrosshairRefName(uint32_t* out_form_id)
+std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id)
 {
     if (out_form_id) *out_form_id = 0;
+    if (out_type_id) *out_type_id = 0;
     auto* ifm = rt::IFM();
     if (!ifm) return {};
     UInt8* base = reinterpret_cast<UInt8*>(ifm);
@@ -421,6 +422,7 @@ std::string GetCrosshairRefName(uint32_t* out_form_id)
 
     TESForm* bf = refr->baseForm;
     if (!Readable(bf, 0x08)) return std::string("obiekt");
+    if (out_type_id) *out_type_id = bf->typeID;
     const char* nm = BaseFormName(bf);
     if (nm) return GameStrToUtf8(nm);
     switch (KindOf(bf->typeID)) {
