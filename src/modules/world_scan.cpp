@@ -326,6 +326,8 @@ void StopSweep(bool restorePitch)
     SendUse(false);
     if (restorePitch && g_sweep_applied)
         SendMouse(0, -g_sweep_applied);   // return the view roughly to level
+    if (restorePitch)   // exhausted the arc without a menu opening
+        tolk::Speak("Nie trafiłem w obiekt.", tolk::Priority::Background, false);
     g_sweep = Sweep::Idle;
     g_sweep_applied = 0;
 }
@@ -355,11 +357,22 @@ void ActivateTarget()
                          e.kind == game::WorldEntity::Kind::Note ||
                          e.kind == game::WorldEntity::Kind::Container;
         if (lowObject) {
+            // Diagnostic: report geometry so we can see whether auto-walk got
+            // close and how far below eye level the object sits.
+            auto pp = game::GetPlayerPosition();
+            float dh = std::sqrt((e.position.x - pp.x) * (e.position.x - pp.x) +
+                                 (e.position.y - pp.y) * (e.position.y - pp.y));
+            float dz = e.position.z - (pp.z + 100.0f);
+            char dbg[128];
+            std::snprintf(dbg, sizeof(dbg),
+                          "Szukam: %s, odległość %.0f, wysokość %.0f",
+                          e.name.c_str(), dh, dz);
+            tolk::Speak(dbg, tolk::Priority::Ui, true);
             StartSweep(e.position);   // sweep the view to catch floor objects
-        } else {
-            SendUse(true);            // doors / NPCs: single hold-release
-            g_use_hold_ticks = 5;
+            return;
         }
+        SendUse(true);                // doors / NPCs: single hold-release
+        g_use_hold_ticks = 5;
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
 }
