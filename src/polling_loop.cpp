@@ -333,29 +333,31 @@ void PollQuestChange()
 }
 
 // Announce first/third-person changes (the player toggles view with F by
-// default). The bThirdPerson flag blips during the camera transition (and
-// flickers while the game initialises the camera on load), so we debounce:
-// announce only once the value has held steady for a few ticks and differs
-// from what we last said.
+// default), with NO perceptible delay: speak immediately on the first edge,
+// then suppress re-announcing for a short window so the blip the bThirdPerson
+// flag makes during the camera transition doesn't speak a second time. After
+// the window we re-baseline silently to whatever the flag settled on.
 int g_last_pov = -1;        // last announced view: -1 unknown, 0 first, 1 third
-int g_pov_cand = -1;        // value currently being debounced
-int g_pov_cand_ticks = 0;   // ticks the candidate has held
-constexpr int kPovStableTicks = 5;
+int g_pov_suppress = 0;     // ticks left ignoring further changes
+constexpr int kPovSuppress = 8;   // ~200 ms at 40 ticks/s
 
 void PollViewChange()
 {
-    if (!IsGameplayActive()) { g_last_pov = g_pov_cand = -1; return; }
+    if (!IsGameplayActive()) { g_last_pov = -1; g_pov_suppress = 0; return; }
     int pov = game::IsThirdPerson() ? 1 : 0;
     // During the post-load cooldown just track the value silently.
-    if (g_postload_cooldown > 0) { g_last_pov = g_pov_cand = pov; return; }
-    if (g_last_pov == -1) { g_last_pov = g_pov_cand = pov; return; }
+    if (g_postload_cooldown > 0) { g_last_pov = pov; g_pov_suppress = 0; return; }
+    if (g_last_pov == -1) { g_last_pov = pov; return; }
 
-    if (pov != g_pov_cand) { g_pov_cand = pov; g_pov_cand_ticks = 0; return; }
-    if (++g_pov_cand_ticks < kPovStableTicks) return;   // not settled yet
-    if (pov == g_last_pov) return;                       // net change is nothing
-    g_last_pov = pov;
+    if (g_pov_suppress > 0) {            // swallow the transition blip
+        if (--g_pov_suppress == 0) g_last_pov = pov;   // re-baseline, silent
+        return;
+    }
+    if (pov == g_last_pov) return;
+    g_last_pov = pov;                    // announce the first edge at once
     tolk::Speak(pov ? "Trzecia osoba" : "Pierwsza osoba",
                 tolk::Priority::Ui, true);
+    g_pov_suppress = kPovSuppress;
 }
 
 void Tick(float dt)
