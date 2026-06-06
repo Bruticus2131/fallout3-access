@@ -446,10 +446,19 @@ void Tick(float)
         return;
     }
 
-    // Searching: is the selected object now under the crosshair?
-    uint32_t cross = game::GetCrosshairRefID();
+    // Searching: what's under the crosshair now? Lock on either the exact
+    // selected refID OR any activatable object (the book is an activator/book
+    // type while the table is a Static — so the first non-static, non-furniture
+    // thing the crosshair crosses is almost certainly our target).
+    uint32_t type = 0;
+    uint32_t cross = game::GetCrosshairRefID(&type);
     if (cross != g_sweep_cross0) g_sweep_moved = true;
-    if (cross != 0 && cross == g_sweep_target) {
+    bool exact = (cross != 0 && cross == g_sweep_target);
+    // Activatable = a real object form that isn't world geometry/furniture
+    // (Static 32, StaticCollection 33, MoveableStatic 34, Water 35, Grass 36,
+    // Tree 37, Flora 38, Furniture 39).
+    bool activatable = (cross != 0 && type >= 21 && !(type >= 32 && type <= 39));
+    if (exact || activatable) {
         SendUse(true);                       // lock on and activate
         g_act_hold = 6;
         g_sweep    = Sweep::Activating;
@@ -468,8 +477,9 @@ void Tick(float)
     SendMouse(dx, dy);
     g_sweep_applied += dy;
     if (++g_sweep_frame >= kSweepFrames)
-        StopSweep(g_sweep_moved ? "Nie znalazłem celu pod celownikiem."
-                                : "Celownik się nie rusza.", true);
+        StopSweep(g_sweep_moved
+                      ? "Nie znalazłem obiektu, tylko przeszkody. Podejdź bliżej."
+                      : "Celownik się nie rusza.", true);
 }
 
 void Init()
