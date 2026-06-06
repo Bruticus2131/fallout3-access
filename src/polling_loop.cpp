@@ -340,7 +340,10 @@ void PollViewChange()
 {
     if (!IsGameplayActive()) { g_last_pov = -1; return; }
     int pov = game::IsThirdPerson() ? 1 : 0;
-    if (g_last_pov == -1) { g_last_pov = pov; return; }  // first read: silent
+    // First read, or still within the post-load cooldown: the camera flag
+    // flickers between first/third while the game initialises it on load, so
+    // absorb those changes silently and only announce genuine toggles after.
+    if (g_last_pov == -1 || g_postload_cooldown > 0) { g_last_pov = pov; return; }
     if (pov == g_last_pov) return;
     g_last_pov = pov;
     tolk::Speak(pov ? "Trzecia osoba" : "Pierwsza osoba",
