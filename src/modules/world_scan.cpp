@@ -298,12 +298,17 @@ void ActivateTarget()
         return;
     }
     // If a future/other build ever exposes the console, prefer the precise
-    // by-id activation; otherwise tap Use against the aimed crosshair.
+    // by-id activation; otherwise tap Use against the aimed crosshair — but
+    // first widen the game's activation pick sphere so the Use key forgives
+    // imperfect (especially vertical) aim and grabs the nearby object anyway.
     if (console::Available() && e.form_id != 0) {
         char cmd[80];
         std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
         console::Run(cmd);
     } else {
+        int r = config::Get().activate_pick_radius;
+        if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius",
+                                            (float)r);
         SendUseKey();
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);

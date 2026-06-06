@@ -397,6 +397,43 @@ void SetPlayerYawTo(const Vec3& target)
     p->rotZ = std::atan2(dx, dy);
 }
 
+bool SetIniSettingFloat(const char* name, float value)
+{
+    if (!name || !*name) return false;
+    const size_t nlen = std::strlen(name);
+    // IniSettingCollection: vtbl@0, iniPath[0x100]@4, +0x104, +0x108,
+    // tList<Setting> settings @ +0x10C. Setting: vtbl@0, Info data@0x04 (float
+    // f at +0x04), char* name @0x08. Setting names may carry a ":Section"
+    // suffix (e.g. "fActivatePickSphereRadius:Controls"), so match the prefix.
+    const UInt32 colls[2] = { rt::g_addrs->iniSettingColl,
+                              rt::g_addrs->iniPrefColl };
+    bool any = false;
+    for (UInt32 caddr : colls) {
+        if (!caddr) continue;
+        auto** pp = reinterpret_cast<UInt8**>(caddr);
+        if (IsBadReadPtr(pp, 4)) continue;
+        UInt8* coll = *pp;
+        if (IsBadReadPtr(coll, 0x114)) continue;
+        struct Node { UInt8* item; Node* next; };
+        Node* node = reinterpret_cast<Node*>(coll + 0x10C);
+        for (int s = 0; node && s < 40000; ++s) {
+            if (IsBadReadPtr(node, 8)) break;
+            UInt8* set = node->item;
+            node = node->next;
+            if (!set || IsBadReadPtr(set, 0x0C)) continue;
+            char* nm = *reinterpret_cast<char**>(set + 0x08);
+            if (!nm || IsBadReadPtr(nm, nlen + 1)) continue;
+            if (_strnicmp(nm, name, nlen) == 0 &&
+                (nm[nlen] == '\0' || nm[nlen] == ':')) {
+                *reinterpret_cast<float*>(set + 0x04) = value;
+                any = true;
+                break;   // one match per collection is enough
+            }
+        }
+    }
+    return any;
+}
+
 Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to)
 {
     float dx = to.x - from.x;

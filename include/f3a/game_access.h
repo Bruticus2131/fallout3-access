@@ -104,6 +104,12 @@ Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to);
 // Rotate the player to face `target` (writes the player's yaw directly).
 void SetPlayerYawTo(const Vec3& target);
 
+// Set a float INI setting's in-memory value by name (e.g.
+// "fActivatePickSphereRadius"). Searches both Fallout.ini and FalloutPrefs.ini
+// collections; matches the name up to an optional ":Section" suffix. Returns
+// true if a setting was found and written.
+bool SetIniSettingFloat(const char* name, float value);
+
 // Opaque token identifying the player's current cell — changes when the
 // player moves to another cell or a different save is loaded. Used to drop a
 // stale scan list. nullptr if there is no player.

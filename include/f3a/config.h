@@ -58,6 +58,11 @@ struct Settings {
     // error. Higher = turns faster (may overshoot/spin), lower = gentler/slower.
     // Tune live in the INI if auto-walk turns too hard or too softly.
     int    autowalk_turn_gain = 4;
+    // Activation tolerance: the game's fActivatePickSphereRadius (default 16) is
+    // enlarged to this on Activate so the Use key grabs the nearby object
+    // without precise crosshair aim. Bigger = more forgiving (may grab a wrong
+    // neighbour); smaller = stricter. 0 = leave the game's value untouched.
+    int    activate_pick_radius = 150;
 
     // Debug
     // Console command run by the debug_start_game hotkey. From the main menu
