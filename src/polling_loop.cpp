@@ -755,6 +755,41 @@ void DumpNavmesh()
                    "— read holder bytes above");
 }
 
+// Find the real first/third-person flag for this runtime: snapshot a byte range
+// of PlayerCharacter on the first F11, then on the next F11 (after toggling view
+// with F) log every BOOL-like byte that flipped 0<->1. The flipping offset is
+// bThirdPerson (the FOSE SDK's 0x5A8 is wrong for GOTY 1.7.0.3). Stand still
+// between the two dumps so unrelated fields don't add noise.
+void DumpViewOffsets()
+{
+    log::DumpWrite("===== View-flag finder =====");
+    auto* player = fose_rt::Player();
+    if (!player) { log::DumpWrite("no player"); return; }
+    UInt8* base = reinterpret_cast<UInt8*>(player);
+    const int from = 0x540, to = 0x680;
+    static UInt8 snap[0x140];
+    static bool have = false;
+    if (!have) {
+        for (int i = from; i < to; ++i)
+            snap[i - from] = MemReadable(base + i, 1) ? base[i] : 0xFF;
+        have = true;
+        log::DumpWrite("baseline captured 0x%X..0x%X — toggle view (F), F11 again",
+                       from, to);
+        return;
+    }
+    int diffs = 0;
+    for (int i = from; i < to; ++i) {
+        if (!MemReadable(base + i, 1)) continue;
+        UInt8 now = base[i], was = snap[i - from];
+        if (now != was && (was == 0 || was == 1) && (now == 0 || now == 1)) {
+            log::DumpWrite("  +0x%03X: %u -> %u  <-- view flag candidate", i, was, now);
+            ++diffs;
+        }
+        snap[i - from] = now;
+    }
+    if (!diffs) log::DumpWrite("  (no bool flips in range)");
+}
+
 // Does a pointer look like a TESObjectREFR? baseForm ptr @0x1C, world pos
 // floats @0x2C..0x34 (plausible coordinate magnitudes).
 bool LooksLikeRefr(const UInt8* p)
@@ -936,6 +971,7 @@ void DumpActiveMenuTree()
     // In gameplay, also dump the navmesh + the current quest objective so we
     // can decode them (pathfinding / quest-marker bearing).
     if (game::IsPlayerValid()) {
+        DumpViewOffsets();
         DumpQuestObjective();
         DumpQuestList();
         DumpNavmesh();
