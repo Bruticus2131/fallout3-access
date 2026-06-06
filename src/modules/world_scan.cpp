@@ -270,23 +270,21 @@ void AutoWalkToggle()
     autowalk::StartTo(e.position, e.name);
 }
 
-// Tap the game's Use/Activate key (default E = scancode 0x12) for the player.
-// FOSE in FO3 exposes no console interface (QueryInterface returns null), so we
-// can't activate a ref by id directly. Instead we rely on the fact that
-// auto-walk leaves the CAMERA aimed at the target (its mouse-turn points the
-// view there), so the activation crosshair is already on the object — tapping
-// Use then triggers the normal open/read/talk handler with no aiming by the
-// player. Best used right after `\` auto-walk parks you facing the target.
-void SendUseKey()
+// Press/release the game's Use/Activate key (default E = scancode 0x12). FO3
+// polls the keyboard once per frame in DirectInput immediate mode, so a down+up
+// fired in the same instant falls between polls and is seen as "never pressed"
+// (that's why held movement works but a tap didn't activate anything). So we
+// hold the key DOWN for a few frames and release it from Tick().
+void SendUse(bool down)
 {
-    INPUT in[2] = {};
-    in[0].type = INPUT_KEYBOARD;
-    in[0].ki.wScan = 0x12;                       // DIK_E
-    in[0].ki.dwFlags = KEYEVENTF_SCANCODE;
-    in[1] = in[0];
-    in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
-    SendInput(2, in, sizeof(INPUT));
+    INPUT in = {};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wScan = 0x12;                          // DIK_E
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    SendInput(1, &in, sizeof(INPUT));
 }
+
+int g_use_hold_ticks = 0;   // frames left to keep Use held, then release
 
 void ActivateTarget()
 {
@@ -297,34 +295,33 @@ void ActivateTarget()
         tolk::Speak("Tego nie można aktywować.", tolk::Priority::System, true);
         return;
     }
-    // If a future/other build ever exposes the console, prefer the precise
-    // by-id activation; otherwise tap Use against the aimed crosshair — but
-    // first widen the game's activation pick sphere so the Use key forgives
-    // imperfect (especially vertical) aim and grabs the nearby object anyway.
+    // If a future/other build ever exposes the console, prefer precise by-id
+    // activation. Otherwise hold Use against the aimed crosshair — first widen
+    // the activation pick sphere so it forgives imperfect (esp. vertical) aim.
+    // Use auto-walk (\) to park facing the target before pressing this.
     if (console::Available() && e.form_id != 0) {
         char cmd[80];
         std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
         console::Run(cmd);
     } else {
         int r = config::Get().activate_pick_radius;
-        bool ok = false;
-        if (r > 0) ok = game::SetIniSettingFloat("fActivatePickSphereRadius",
-                                                 (float)r);
-        // Diagnostic: read the value back so we can tell if the write landed
-        // (i.e. whether the INI-collection address is correct).
-        float rb = -1.0f;
-        game::GetIniSettingFloat("fActivatePickSphereRadius", rb);
-        SendUseKey();
-        char dbg[96];
-        std::snprintf(dbg, sizeof(dbg), "Używam: %s, promień %s %.0f",
-                      e.name.c_str(), ok ? "ok" : "BRAK", rb);
-        tolk::Speak(dbg, tolk::Priority::Ui, true);
-        return;
+        if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius",
+                                            (float)r);
+        SendUse(true);            // press and hold; Tick() releases it
+        g_use_hold_ticks = 5;
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
 }
 
 } // namespace
+
+// Release the Use key a few frames after ActivateTarget pressed it, so FO3's
+// once-per-frame input poll actually sees the press.
+void Tick(float)
+{
+    if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
+        SendUse(false);
+}
 
 void Init()
 {

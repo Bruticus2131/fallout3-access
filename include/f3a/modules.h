@@ -17,7 +17,7 @@ namespace vats     { void Init(); void Shutdown(); }
 namespace container{ void Init(); void Shutdown(); }
 namespace message  { void Init(); void Shutdown(); }
 namespace nav      { void Init(); void Shutdown(); void Tick(float dt); }
-namespace worldscan{ void Init(); void Shutdown(); }
+namespace worldscan{ void Init(); void Shutdown(); void Tick(float dt); }
 
 // AutoWalk: walks the player to a scanner-selected target. Ticked from the
 // polling loop while in gameplay.

@@ -471,6 +471,7 @@ void Tick(float dt)
         hotkeys::Poll();
         modules::autowalk::Tick(dt);
         modules::guide::Tick(dt);
+        modules::worldscan::Tick(dt);
         PollQuestChange();
     }
 }
