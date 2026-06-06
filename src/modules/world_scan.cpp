@@ -207,6 +207,10 @@ void ScanNext()
         return;
     }
     if (CategoryModHeld()) { CategoryStep(+1); return; }
+    // Quests aren't tied to the physical cell scan and the tracked quest can
+    // change in the Pip-Boy any time — re-read it on every press so it never
+    // goes stale.
+    if (g_category == Cat_Quest) { Refilter(); AnnounceCurrent(); return; }
     if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (++g_scan_index >= (int)g_scan_list.size()) {
@@ -220,6 +224,7 @@ void ScanPrev()
 {
     if (!GameplayAndHud()) return;
     if (CategoryModHeld()) { CategoryStep(-1); return; }
+    if (g_category == Cat_Quest) { Refilter(); AnnounceCurrent(); return; }
     if (ScanListStale() || g_scan_index < 0) {
         Rescan();
     } else if (--g_scan_index < 0) {
@@ -282,10 +287,12 @@ void ActivateTarget()
         tolk::Speak("Konsola niedostępna.", tolk::Priority::System, true);
         return;
     }
-    char cmd[64];
-    std::snprintf(cmd, sizeof(cmd), "prid %08X", e.form_id);
+    // Single dotted command names the target ref explicitly: "<refID>.activate
+    // player 1". More reliable than prid+activate as two RunScriptLine calls,
+    // which don't reliably carry the console's selected reference between them.
+    char cmd[80];
+    std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
     console::Run(cmd);
-    console::Run("activate player 1");
     tolk::Speak("Aktywowano: " + e.name, tolk::Priority::Ui, true);
 }
 
