@@ -113,6 +113,12 @@ void SetPlayerYawTo(const Vec3& target);
 // True if the player is in third-person view (PlayerCharacter+0x5A8).
 bool IsThirdPerson();
 
+// Aim the player's view: write yaw (rotZ) and pitch (rotX) directly, the way
+// SkyrimAccessMod's SetHeading/SetLooking aim the crosshair at a target. Angles
+// in radians; yaw 0 = +Y (north), clockwise. Used to point the crosshair at an
+// object for activation (first person).
+void SetPlayerLook(float yawRad, float pitchRad);
+
 // Set a float INI setting's in-memory value by name (e.g.
 // "fActivatePickSphereRadius"). Searches both Fallout.ini and FalloutPrefs.ini
 // collections; matches the name up to an optional ":Section" suffix. Returns

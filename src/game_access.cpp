@@ -464,6 +464,14 @@ bool IsThirdPerson()
     return *(base + 0x5A8) != 0;   // PlayerCharacter::bThirdPerson
 }
 
+void SetPlayerLook(float yawRad, float pitchRad)
+{
+    auto* p = rt::Player();
+    if (!p) return;
+    p->rotZ = yawRad;     // heading (same field SetPlayerYawTo writes)
+    p->rotX = pitchRad;   // look pitch (SkyrimAccessMod's SetLooking equiv.)
+}
+
 bool SetIniSettingFloat(const char* name, float value)
 {
     UInt8* set = FindIniSetting(name);

@@ -284,60 +284,56 @@ void SendUse(bool down)
     SendInput(1, &in, sizeof(INPUT));
 }
 
-void SendMouse(long dx, long dy)
-{
-    if (!dx && !dy) return;
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dx = dx; in.mi.dy = dy;
-    in.mi.dwFlags = MOUSEEVENTF_MOVE;            // relative
-    SendInput(1, &in, sizeof(INPUT));
-}
-
 int g_use_hold_ticks = 0;   // single-press path: frames to keep Use held
 
 // Pitch-sweep path for floor/low objects (items, containers): the crosshair
-// sits too high to hit something on the ground, so we aim yaw at it and tap Use
-// while sweeping the view down (or up) across an arc. When the crosshair
-// crosses the object it activates; we stop as soon as a menu opens. Doors / NPCs
-// don't need this — they use the single-press path.
+// sits too high to hit something on the ground. Like SkyrimAccessMod's
+// SetHeading/SetLooking, we aim by WRITING the player's angles directly (yaw =
+// rotZ at the target, pitch = rotX swept across the full vertical range) and tap
+// Use at each step. Writing rotX is what mouse-injection failed to do. We stop
+// the instant a menu opens (activation succeeded). First-person only — in third
+// person the camera has its own pitch. Doors/NPCs use the single-press path.
 enum class Sweep { Idle, Running };
 Sweep      g_sweep      = Sweep::Idle;
 game::Vec3 g_sweep_tgt{};
 int        g_sweep_frame = 0;
-int        g_sweep_dir   = 1;     // initial guess: +1 = look "down"
-int        g_sweep_applied = 0;   // net pitch counts applied (to undo on stop)
-constexpr int kSweepStepFrames = 5;    // frames per E-tap+pitch step
-constexpr int kSweepSteps      = 8;    // steps per direction
-constexpr long kSweepPitchStep = 50;   // mouse counts of pitch per step
-// Total = one pass in the guessed direction, then two passes back the other way
-// so the whole vertical arc is covered regardless of the mouse-pitch sign.
-constexpr int kSweepTotal      = kSweepSteps * 3;
+constexpr int kSweepStepFrames = 5;     // frames per pitch step (E held ~3)
+constexpr int kSweepSteps      = 14;    // pitch samples across the arc
+constexpr float kPitchMax      = 1.40f; // radians (~80 deg) up and down
+
+// Aim yaw at the target and pitch to this step's angle (re-asserted each frame
+// so the camera controller can't drift it before the Use tap registers).
+void ApplySweepAim(int step)
+{
+    auto pp = game::GetPlayerPosition();
+    float dx = g_sweep_tgt.x - pp.x, dy = g_sweep_tgt.y - pp.y;
+    float yaw = std::atan2(dx, dy);
+    float frac = kSweepSteps > 1 ? (float)step / (kSweepSteps - 1) : 0.5f;
+    float pitch = -kPitchMax + frac * (2.0f * kPitchMax);   // -max .. +max
+    game::SetPlayerLook(yaw, pitch);
+}
 
 void StartSweep(const game::Vec3& tgt)
 {
     g_sweep       = Sweep::Running;
     g_sweep_tgt   = tgt;
     g_sweep_frame = 0;
-    g_sweep_applied = 0;
-    auto pp = game::GetPlayerPosition();
-    g_sweep_dir = (tgt.z < pp.z + 100.0f) ? 1 : -1;   // below eye -> look down
-    // Use the crosshair/camera-following pick so vertical aim actually matters
-    // (the default Havok pick fires roughly horizontally from the body and
-    // ignores camera pitch — which is why sweeping down never hit the book).
+    // Crosshair/camera-following pick so vertical aim actually matters (the
+    // default Havok pick fires roughly horizontally and ignores camera pitch).
     game::SetIniSettingInt("bActivatePickUseGamebryoPick", 1);
 }
 
 void StopSweep(bool restorePitch)
 {
     SendUse(false);
-    if (restorePitch && g_sweep_applied)
-        SendMouse(0, -g_sweep_applied);   // return the view roughly to level
     game::SetIniSettingInt("bActivatePickUseGamebryoPick", 0);  // restore default
-    if (restorePitch)   // exhausted the arc without a menu opening
+    if (restorePitch) {                 // exhausted the arc without a menu
+        auto pp = game::GetPlayerPosition();
+        float dx = g_sweep_tgt.x - pp.x, dy = g_sweep_tgt.y - pp.y;
+        game::SetPlayerLook(std::atan2(dx, dy), 0.0f);   // level the view
         tolk::Speak("Nie trafiłem w obiekt.", tolk::Priority::Background, false);
+    }
     g_sweep = Sweep::Idle;
-    g_sweep_applied = 0;
 }
 
 void ActivateTarget()
@@ -402,28 +398,15 @@ void Tick(float)
     auto m = menu::ActiveMenu();
     if (m != menu::Id::None && m != menu::Id::HUDMain) { StopSweep(false); return; }
 
-    // Keep yaw locked on the target (camera mouse-turn, like auto-walk).
-    auto pp = game::GetPlayerPosition();
-    auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), g_sweep_tgt);
-    long dx = (long)(br.relative_yaw * 4.0f);
-    if (dx >  150) dx =  150;
-    if (dx < -150) dx = -150;
-    SendMouse(dx, 0);
-
     int step  = g_sweep_frame / kSweepStepFrames;
     int phase = g_sweep_frame % kSweepStepFrames;
-    if (step >= kSweepTotal) { StopSweep(true); return; }  // whole arc, no hit
+    if (step >= kSweepSteps) { StopSweep(true); return; }  // whole arc, no hit
 
-    // Per-step: press Use, hold ~3 frames, release, then nudge the pitch. First
-    // `kSweepSteps` steps go the guessed direction; the rest reverse, so the
-    // crosshair traverses the entire vertical range either way.
-    int dir = (step < kSweepSteps) ? g_sweep_dir : -g_sweep_dir;
+    // Re-assert the aim every frame (write yaw+pitch), and tap Use within the
+    // step: press, hold ~3 frames, release.
+    ApplySweepAim(step);
     if      (phase == 0) SendUse(true);
     else if (phase == 3) SendUse(false);
-    else if (phase == 4) {
-        SendMouse(0, dir * kSweepPitchStep);
-        g_sweep_applied += dir * kSweepPitchStep;
-    }
     ++g_sweep_frame;
 }
 
