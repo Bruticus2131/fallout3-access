@@ -333,36 +333,31 @@ void PollQuestChange()
 }
 
 // Announce first/third-person changes (the player toggles view with F by
-// default). The bThirdPerson flag blips during the camera transition, so we
-// confirm a new value held for a couple of ticks (~75 ms, imperceptible) before
-// announcing it once. This tracks the real settled value, so it never desyncs
-// (no "press F several times") and never says both at once.
+// default). The bThirdPerson flag oscillates while the camera animates the
+// transition, so: announce IMMEDIATELY on the first edge (the first change from
+// a stable state always heads to the real target), then lock out re-evaluation
+// for a short window to ignore the oscillation. We do NOT re-baseline during the
+// lock — g_last_pov keeps the announced value, which is what the flag settles
+// on, so there's no desync (every press announces) and no double.
 int g_last_pov = -1;        // last announced view: -1 unknown, 0 first, 1 third
-int g_pov_pending = -1;     // value awaiting confirmation
-int g_pov_pending_ticks = 0;
-constexpr int kPovConfirm = 3;
+int g_pov_lock  = 0;        // ticks left ignoring changes after an announce
+constexpr int kPovLock = 12;   // ~300 ms at 40 ticks/s — covers the transition
 
 void PollViewChange()
 {
-    if (!IsGameplayActive()) { g_last_pov = g_pov_pending = -1; return; }
+    if (!IsGameplayActive()) { g_last_pov = -1; g_pov_lock = 0; return; }
     int pov = game::IsThirdPerson() ? 1 : 0;
     // First read or post-load camera init: track silently (load flickers).
     if (g_last_pov == -1 || g_postload_cooldown > 0) {
-        g_last_pov = g_pov_pending = pov;
+        g_last_pov = pov; g_pov_lock = 0;
         return;
     }
-    if (pov == g_last_pov) {             // back at (or never left) announced value
-        g_pov_pending = pov; g_pov_pending_ticks = 0;
-        return;
-    }
-    if (pov != g_pov_pending) {          // new candidate, start confirming
-        g_pov_pending = pov; g_pov_pending_ticks = 1;
-        return;
-    }
-    if (++g_pov_pending_ticks < kPovConfirm) return;   // not held long enough yet
+    if (g_pov_lock > 0) { --g_pov_lock; return; }   // ignore transition oscillation
+    if (pov == g_last_pov) return;
     g_last_pov = pov;
     tolk::Speak(pov ? "Trzecia osoba" : "Pierwsza osoba",
                 tolk::Priority::Ui, true);
+    g_pov_lock = kPovLock;
 }
 
 void Tick(float dt)
