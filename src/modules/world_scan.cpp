@@ -384,6 +384,19 @@ void ActivateTarget()
 // Debug / awareness: announce the reference under the crosshair — exactly what
 // the game would activate with Use. Tells us whether we're aimed at the book or
 // at e.g. a table/floor when activation fails.
+// View announce, event-driven (no polling — that flickered on load and missed
+// in-game toggles). Pressing the game's view key (F) schedules a read a few
+// frames later, once the toggle has settled, then announces it. Silent on load
+// because nothing schedules it there.
+int g_view_announce_ticks = 0;
+constexpr int kViewAnnounceDelay = 6;   // ~150 ms after F, settled but prompt
+
+void OnViewToggle()
+{
+    if (!GameplayAndHud()) return;
+    g_view_announce_ticks = kViewAnnounceDelay;
+}
+
 void CrosshairInfo()
 {
     if (!GameplayAndHud()) return;
@@ -413,6 +426,12 @@ void Tick(float)
 {
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
+
+    if (g_view_announce_ticks > 0 && --g_view_announce_ticks == 0 &&
+        poll::IsGameplayActive()) {
+        tolk::Speak(game::IsThirdPerson() ? "Trzecia osoba" : "Pierwsza osoba",
+                    tolk::Priority::Ui, true);
+    }
 
     if (g_sweep != Sweep::Running) return;
 
@@ -446,6 +465,7 @@ void Init()
     hotkeys::Bind(h.auto_walk,     &AutoWalkToggle);
     hotkeys::Bind(h.activate_target, &ActivateTarget);
     hotkeys::Bind(h.crosshair_info,  &CrosshairInfo);
+    hotkeys::Bind(h.view_toggle,     &OnViewToggle);
     F3A_INFO("World scan module ready.");
 }
 void Shutdown() {}

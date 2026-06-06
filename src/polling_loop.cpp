@@ -332,34 +332,6 @@ void PollQuestChange()
         tolk::Speak("Zadanie: " + name, tolk::Priority::Background, false);
 }
 
-// Announce first/third-person changes (the player toggles view with F by
-// default). The bThirdPerson flag oscillates while the camera animates the
-// transition, so: announce IMMEDIATELY on the first edge (the first change from
-// a stable state always heads to the real target), then lock out re-evaluation
-// for a short window to ignore the oscillation. We do NOT re-baseline during the
-// lock — g_last_pov keeps the announced value, which is what the flag settles
-// on, so there's no desync (every press announces) and no double.
-int g_last_pov = -1;        // last announced view: -1 unknown, 0 first, 1 third
-int g_pov_lock  = 0;        // ticks left ignoring changes after an announce
-constexpr int kPovLock = 12;   // ~300 ms at 40 ticks/s — covers the transition
-
-void PollViewChange()
-{
-    if (!IsGameplayActive()) { g_last_pov = -1; g_pov_lock = 0; return; }
-    int pov = game::IsThirdPerson() ? 1 : 0;
-    // First read or post-load camera init: track silently (load flickers).
-    if (g_last_pov == -1 || g_postload_cooldown > 0) {
-        g_last_pov = pov; g_pov_lock = 0;
-        return;
-    }
-    if (g_pov_lock > 0) { --g_pov_lock; return; }   // ignore transition oscillation
-    if (pov == g_last_pov) return;
-    g_last_pov = pov;
-    tolk::Speak(pov ? "Trzecia osoba" : "Pierwsza osoba",
-                tolk::Priority::Ui, true);
-    g_pov_lock = kPovLock;
-}
-
 void Tick(float dt)
 {
     // Don't touch anything until the InterfaceManager has been created.
@@ -501,7 +473,6 @@ void Tick(float dt)
         modules::guide::Tick(dt);
         modules::worldscan::Tick(dt);
         PollQuestChange();
-        PollViewChange();
     }
 }
 
