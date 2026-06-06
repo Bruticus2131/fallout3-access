@@ -309,6 +309,29 @@ void LogSet(const char* tag, const std::unordered_set<UInt32>& s)
     F3A_INFO("%s [%s]", tag, len ? buf : "<empty>");
 }
 
+// Announce when the player's ACTIVE QUEST changes (quest-level only, not every
+// sub-objective). We compare the TESQuest pointer behind the tracked objective;
+// it stays constant across a quest's sub-objectives, so this stays quiet until
+// you actually move to a different quest. Skipped while a menu is up so a Pip-
+// Boy quest-switch is announced once, on close, not mid-browse.
+const void* g_last_quest = nullptr;
+bool        g_quest_seen = false;
+
+void PollQuestChange()
+{
+    if (!IsGameplayActive()) { g_quest_seen = false; return; }
+    auto m = menu::ActiveMenu();
+    if (m != menu::Id::None && m != menu::Id::HUDMain) return;  // menu up: hold
+    const void* q = game::GetTrackedQuestPtr();
+    if (!q) return;
+    if (!g_quest_seen) { g_last_quest = q; g_quest_seen = true; return; } // load: silent
+    if (q == g_last_quest) return;
+    g_last_quest = q;
+    std::string name = game::GetTrackedQuestName();
+    if (!name.empty())
+        tolk::Speak("Zadanie: " + name, tolk::Priority::Background, false);
+}
+
 void Tick(float dt)
 {
     // Don't touch anything until the InterfaceManager has been created.
@@ -448,6 +471,7 @@ void Tick(float dt)
         hotkeys::Poll();
         modules::autowalk::Tick(dt);
         modules::guide::Tick(dt);
+        PollQuestChange();
     }
 }
 

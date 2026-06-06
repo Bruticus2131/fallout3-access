@@ -91,6 +91,12 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                                     bool actors_only = false,
                                     bool hostiles_only = false);
 
+// The TESQuest that the player's currently tracked objective belongs to, as an
+// opaque pointer (BGSQuestObjective+0x10), plus its display name. ptr is null
+// when there is no tracked objective. Used to announce quest changes.
+const void* GetTrackedQuestPtr();
+std::string GetTrackedQuestName();
+
 // All currently-running quests that have a target marker, as WorldEntities
 // (Kind::Quest, name = quest name, position = marker). Lets the player browse
 // active quests and pick which to navigate to — instead of the game's

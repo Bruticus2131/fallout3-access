@@ -155,6 +155,28 @@ bool ObjectiveMarkerPos(UInt8* obj, Vec3& out)
 }
 } // namespace
 
+const void* GetTrackedQuestPtr()
+{
+    auto* p = rt::Player();
+    if (!p || !p->questObjective) return nullptr;
+    auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
+    if (IsBadReadPtr(obj, 0x14)) return nullptr;
+    // BGSQuestObjective+0x10 = TESQuest* (after displayText String @0x08, before
+    // the targets tList @0x14). Verified from an F11 objective dump.
+    UInt8* q = *reinterpret_cast<UInt8**>(obj + 0x10);
+    if (IsBadReadPtr(q, 0x38)) return nullptr;
+    return q;
+}
+
+std::string GetTrackedQuestName()
+{
+    auto* q = reinterpret_cast<const UInt8*>(GetTrackedQuestPtr());
+    if (!q) return {};
+    const char* nm = *reinterpret_cast<char* const*>(q + 0x34);  // fullName.name
+    if (!nm || IsBadReadPtr(nm, 1) || !*nm) return {};
+    return GameStrToUtf8(nm);
+}
+
 std::vector<WorldEntity> GetActiveQuests()
 {
     // Why only the TRACKED quest, not the whole quest list:
