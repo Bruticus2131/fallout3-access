@@ -157,62 +157,41 @@ bool ObjectiveMarkerPos(UInt8* obj, Vec3& out)
 
 std::vector<WorldEntity> GetActiveQuests()
 {
+    // Why only the TRACKED quest, not the whole quest list:
+    //
+    // Iterating DataHandler::questList returns ~43 quests because EVERY quest
+    // definition (all DLC included) is loaded in memory. The runtime
+    // "displayed / completed / not-started" state that the Pip-Boy journal
+    // uses is NOT stored in TESQuest / BGSQuestObjective — those only carry
+    // the GECK-baked flags (verified by an F11 quest dump: BGSQuestObjective
+    // +0x1C is 0x1 even for never-started Point Lookout / Zeta quests). So we
+    // can't tell active from completed from the structs.
+    //
+    // What we CAN read reliably is the player's currently TRACKED objective
+    // (PlayerCharacter+0x618) — exactly the quest the compass points to and
+    // the one shown in the active-quest slot. The player chooses it in the
+    // Pip-Boy (Data -> Quests), just like vanilla; the scanner + beacon then
+    // follow that single quest.
     std::vector<WorldEntity> out;
-    auto* global = reinterpret_cast<UInt8**>(rt::g_addrs->dataHandler);
-    if (IsBadReadPtr(global, 4)) return out;
-    UInt8* dh = *global;
-    if (IsBadReadPtr(dh, 0xD8)) return out;
+    auto* p = rt::Player();
+    if (!p || !p->questObjective) return out;
+    auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
+    if (IsBadReadPtr(obj, 0x18)) return out;
 
-    // DataHandler::questList is a tList<TESQuest> at +0xD4 ({item, next}).
-    struct Node { UInt8* item; Node* next; };
-    Node* node = reinterpret_cast<Node*>(dh + 0xD4);
-    for (int safety = 0; node && safety < 8192; ++safety) {
-        if (IsBadReadPtr(node, 8)) break;
-        UInt8* q = node->item;
-        node = node->next;
-        if (!q || IsBadReadPtr(q, 0x54)) continue;
+    Vec3 pos{};
+    if (!ObjectiveMarkerPos(obj, pos)) return out;   // no marker -> can't lead
 
-        if (*reinterpret_cast<UInt8*>(q + 0x3C) == 0) continue;   // running?
+    const char* raw = p->questObjective->displayText.m_data;
+    std::string name = (raw && !IsBadReadPtr(raw, 1) && *raw)
+                           ? GameStrToUtf8(raw)
+                           : std::string("Aktywne zadanie");
 
-        // Walk the quest's objectives; keep the last DISPLAYED, not-completed
-        // one with a live marker (the current journal objective). Without the
-        // status gate, hundreds of finished/background quests that stay
-        // 'running' with stale completed markers flood the list.
-        //
-        // BGSQuestObjective status @ +0x1C: bit0 = displayed, bit1 = completed
-        // (the player's active objective dumps as 1 here). Only displayed &&
-        // !completed objectives appear on the compass / in the journal.
-        Vec3 best{};
-        bool have = false;
-        Node* on = reinterpret_cast<Node*>(q + 0x4C);
-        for (int s2 = 0; on && s2 < 512; ++s2) {
-            if (IsBadReadPtr(on, 8)) break;
-            UInt8* obj = on->item;
-            on = on->next;
-            if (!obj || IsBadReadPtr(obj, 0x20)) continue;
-            UInt32 status = *reinterpret_cast<UInt32*>(obj + 0x1C);
-            if ((status & 0x1) == 0 || (status & 0x2) != 0) continue;
-            Vec3 p;
-            if (ObjectiveMarkerPos(obj, p)) { best = p; have = true; }
-        }
-        if (!have) continue;
-
-        // Only player-facing quests have a display name. Background/system
-        // quests (script containers, dialogue, DLC controllers) are unnamed —
-        // skip them so the list matches the journal, not all ~hundreds of
-        // engine quests that happen to be 'running'.
-        const char* nm = *reinterpret_cast<char**>(q + 0x34);  // fullName.name
-        if (!nm || IsBadReadPtr(nm, 1) || !*nm) continue;
-        std::string name = GameStrToUtf8(nm);
-        if (name.empty()) continue;
-
-        WorldEntity e;
-        e.kind     = WorldEntity::Kind::Quest;
-        e.name     = std::move(name);
-        e.position = best;
-        e.form_id  = 0;
-        out.push_back(std::move(e));
-    }
+    WorldEntity e;
+    e.kind     = WorldEntity::Kind::Quest;
+    e.name     = std::move(name);
+    e.position = pos;
+    e.form_id  = 0;
+    out.push_back(std::move(e));
     return out;
 }
 
