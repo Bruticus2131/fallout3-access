@@ -333,18 +333,26 @@ void PollQuestChange()
 }
 
 // Announce first/third-person changes (the player toggles view with F by
-// default). Polls the bThirdPerson flag and speaks when it flips.
-int g_last_pov = -1;   // -1 unknown, 0 first, 1 third
+// default). The bThirdPerson flag blips during the camera transition (and
+// flickers while the game initialises the camera on load), so we debounce:
+// announce only once the value has held steady for a few ticks and differs
+// from what we last said.
+int g_last_pov = -1;        // last announced view: -1 unknown, 0 first, 1 third
+int g_pov_cand = -1;        // value currently being debounced
+int g_pov_cand_ticks = 0;   // ticks the candidate has held
+constexpr int kPovStableTicks = 5;
 
 void PollViewChange()
 {
-    if (!IsGameplayActive()) { g_last_pov = -1; return; }
+    if (!IsGameplayActive()) { g_last_pov = g_pov_cand = -1; return; }
     int pov = game::IsThirdPerson() ? 1 : 0;
-    // First read, or still within the post-load cooldown: the camera flag
-    // flickers between first/third while the game initialises it on load, so
-    // absorb those changes silently and only announce genuine toggles after.
-    if (g_last_pov == -1 || g_postload_cooldown > 0) { g_last_pov = pov; return; }
-    if (pov == g_last_pov) return;
+    // During the post-load cooldown just track the value silently.
+    if (g_postload_cooldown > 0) { g_last_pov = g_pov_cand = pov; return; }
+    if (g_last_pov == -1) { g_last_pov = g_pov_cand = pov; return; }
+
+    if (pov != g_pov_cand) { g_pov_cand = pov; g_pov_cand_ticks = 0; return; }
+    if (++g_pov_cand_ticks < kPovStableTicks) return;   // not settled yet
+    if (pov == g_last_pov) return;                       // net change is nothing
     g_last_pov = pov;
     tolk::Speak(pov ? "Trzecia osoba" : "Pierwsza osoba",
                 tolk::Priority::Ui, true);
