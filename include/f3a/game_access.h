@@ -116,6 +116,10 @@ void SetPlayerYawTo(const Vec3& target);
 // true if a setting was found and written.
 bool SetIniSettingFloat(const char* name, float value);
 
+// Read a float INI setting's in-memory value. Returns true and fills `out` if
+// found; false otherwise. Used to verify the collection addresses are right.
+bool GetIniSettingFloat(const char* name, float& out);
+
 // Opaque token identifying the player's current cell — changes when the
 // player moves to another cell or a different save is loaded. Used to drop a
 // stale scan list. nullptr if there is no player.

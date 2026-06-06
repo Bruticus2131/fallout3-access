@@ -307,9 +307,19 @@ void ActivateTarget()
         console::Run(cmd);
     } else {
         int r = config::Get().activate_pick_radius;
-        if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius",
-                                            (float)r);
+        bool ok = false;
+        if (r > 0) ok = game::SetIniSettingFloat("fActivatePickSphereRadius",
+                                                 (float)r);
+        // Diagnostic: read the value back so we can tell if the write landed
+        // (i.e. whether the INI-collection address is correct).
+        float rb = -1.0f;
+        game::GetIniSettingFloat("fActivatePickSphereRadius", rb);
         SendUseKey();
+        char dbg[96];
+        std::snprintf(dbg, sizeof(dbg), "Używam: %s, promień %s %.0f",
+                      e.name.c_str(), ok ? "ok" : "BRAK", rb);
+        tolk::Speak(dbg, tolk::Priority::Ui, true);
+        return;
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
 }

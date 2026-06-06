@@ -419,17 +419,18 @@ void SetPlayerYawTo(const Vec3& target)
     p->rotZ = std::atan2(dx, dy);
 }
 
-bool SetIniSettingFloat(const char* name, float value)
+namespace {
+// Locate a Setting struct by name across both INI collections (returns the
+// Setting*, whose float value is at +0x04), or nullptr.
+// IniSettingCollection: vtbl@0, iniPath[0x100]@4, +0x104, +0x108,
+// tList<Setting> settings @ +0x10C. Setting: vtbl@0, Info data@0x04 (float f),
+// char* name @0x08. Names may carry a ":Section" suffix, so match the prefix.
+UInt8* FindIniSetting(const char* name)
 {
-    if (!name || !*name) return false;
+    if (!name || !*name) return nullptr;
     const size_t nlen = std::strlen(name);
-    // IniSettingCollection: vtbl@0, iniPath[0x100]@4, +0x104, +0x108,
-    // tList<Setting> settings @ +0x10C. Setting: vtbl@0, Info data@0x04 (float
-    // f at +0x04), char* name @0x08. Setting names may carry a ":Section"
-    // suffix (e.g. "fActivatePickSphereRadius:Controls"), so match the prefix.
     const UInt32 colls[2] = { rt::g_addrs->iniSettingColl,
                               rt::g_addrs->iniPrefColl };
-    bool any = false;
     for (UInt32 caddr : colls) {
         if (!caddr) continue;
         auto** pp = reinterpret_cast<UInt8**>(caddr);
@@ -446,14 +447,28 @@ bool SetIniSettingFloat(const char* name, float value)
             char* nm = *reinterpret_cast<char**>(set + 0x08);
             if (!nm || IsBadReadPtr(nm, nlen + 1)) continue;
             if (_strnicmp(nm, name, nlen) == 0 &&
-                (nm[nlen] == '\0' || nm[nlen] == ':')) {
-                *reinterpret_cast<float*>(set + 0x04) = value;
-                any = true;
-                break;   // one match per collection is enough
-            }
+                (nm[nlen] == '\0' || nm[nlen] == ':'))
+                return set;
         }
     }
-    return any;
+    return nullptr;
+}
+} // namespace
+
+bool SetIniSettingFloat(const char* name, float value)
+{
+    UInt8* set = FindIniSetting(name);
+    if (!set) return false;
+    *reinterpret_cast<float*>(set + 0x04) = value;
+    return true;
+}
+
+bool GetIniSettingFloat(const char* name, float& out)
+{
+    UInt8* set = FindIniSetting(name);
+    if (!set) return false;
+    out = *reinterpret_cast<float*>(set + 0x04);
+    return true;
 }
 
 Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to)
