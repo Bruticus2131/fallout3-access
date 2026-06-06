@@ -766,28 +766,38 @@ void DumpViewOffsets()
     auto* player = fose_rt::Player();
     if (!player) { log::DumpWrite("no player"); return; }
     UInt8* base = reinterpret_cast<UInt8*>(player);
-    const int from = 0x540, to = 0x680;
-    static UInt8 snap[0x140];
+    // Scan a wide dword range; log every dword that CHANGED between the two
+    // dumps, as int and float, so a camera-distance float or an enum/bool POV
+    // field both show up. Stand still so few unrelated fields move.
+    const int from = 0x180, to = 0x9C0;
+    static UInt32 snap[(0x9C0 - 0x180) / 4];
     static bool have = false;
+    int n = (to - from) / 4;
     if (!have) {
-        for (int i = from; i < to; ++i)
-            snap[i - from] = MemReadable(base + i, 1) ? base[i] : 0xFF;
+        for (int k = 0; k < n; ++k) {
+            UInt8* a = base + from + k * 4;
+            snap[k] = MemReadable(a, 4) ? *reinterpret_cast<UInt32*>(a) : 0;
+        }
         have = true;
         log::DumpWrite("baseline captured 0x%X..0x%X — toggle view (F), F11 again",
                        from, to);
         return;
     }
     int diffs = 0;
-    for (int i = from; i < to; ++i) {
-        if (!MemReadable(base + i, 1)) continue;
-        UInt8 now = base[i], was = snap[i - from];
-        if (now != was && (was == 0 || was == 1) && (now == 0 || now == 1)) {
-            log::DumpWrite("  +0x%03X: %u -> %u  <-- view flag candidate", i, was, now);
+    for (int k = 0; k < n; ++k) {
+        UInt8* a = base + from + k * 4;
+        if (!MemReadable(a, 4)) continue;
+        UInt32 now = *reinterpret_cast<UInt32*>(a), was = snap[k];
+        if (now != was) {
+            float fw = *reinterpret_cast<float*>(&was);
+            float fn = *reinterpret_cast<float*>(&now);
+            log::DumpWrite("  +0x%03X: 0x%08X(%d, %.2f) -> 0x%08X(%d, %.2f)",
+                           from + k * 4, was, (int)was, fw, now, (int)now, fn);
             ++diffs;
         }
-        snap[i - from] = now;
+        snap[k] = now;
     }
-    if (!diffs) log::DumpWrite("  (no bool flips in range)");
+    log::DumpWrite("  %d changed dwords", diffs);
 }
 
 // Does a pointer look like a TESObjectREFR? baseForm ptr @0x1C, world pos
