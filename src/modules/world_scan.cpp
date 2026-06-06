@@ -7,6 +7,7 @@
 #include "f3a/config.h"
 #include "f3a/logger.h"
 #include "f3a/polling_loop.h"
+#include "f3a/console.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -264,6 +265,30 @@ void AutoWalkToggle()
     autowalk::StartTo(e.position, e.name);
 }
 
+// Activate the selected object WITHOUT aiming the crosshair — essential for a
+// blind player who can't line up the third-person reticle. We drive the
+// console the same way you would by hand: select the reference with `prid`,
+// then `activate player` so the game runs its normal use/open/read handler.
+void ActivateTarget()
+{
+    if (!GameplayAndHud()) return;
+    if (!HaveTarget()) return;
+    const auto& e = g_scan_list[g_scan_index];
+    if (e.kind == game::WorldEntity::Kind::Quest || e.form_id == 0) {
+        tolk::Speak("Tego nie można aktywować.", tolk::Priority::System, true);
+        return;
+    }
+    if (!console::Available()) {
+        tolk::Speak("Konsola niedostępna.", tolk::Priority::System, true);
+        return;
+    }
+    char cmd[64];
+    std::snprintf(cmd, sizeof(cmd), "prid %08X", e.form_id);
+    console::Run(cmd);
+    console::Run("activate player 1");
+    tolk::Speak("Aktywowano: " + e.name, tolk::Priority::Ui, true);
+}
+
 } // namespace
 
 void Init()
@@ -276,6 +301,7 @@ void Init()
     hotkeys::Bind(h.turn_to,       &TurnToCurrent);
     hotkeys::Bind(h.guide_beacon,  &GuideToggle);
     hotkeys::Bind(h.auto_walk,     &AutoWalkToggle);
+    hotkeys::Bind(h.activate_target, &ActivateTarget);
     F3A_INFO("World scan module ready.");
 }
 void Shutdown() {}

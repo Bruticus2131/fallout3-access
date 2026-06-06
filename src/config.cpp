@@ -110,6 +110,7 @@ bool Load(const wchar_t* ini_path)
     h.guide_beacon     = ReadKey(L"Hotkeys", L"GuideBeacon",     h.guide_beacon,     ini_path);
     h.auto_walk        = ReadKey(L"Hotkeys", L"AutoWalk",        h.auto_walk,        ini_path);
     h.guide_quest      = ReadKey(L"Hotkeys", L"GuideQuest",      h.guide_quest,      ini_path);
+    h.activate_target  = ReadKey(L"Hotkeys", L"ActivateTarget",  h.activate_target,  ini_path);
 
     F3A_INFO("Config loaded. Language='%s'.", s.language.c_str());
     F3A_INFO("Hotkeys: toggle=0x%02X silence=0x%02X dump=0x%02X",

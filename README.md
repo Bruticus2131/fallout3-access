@@ -98,7 +98,8 @@ Explore and travel without sight:
 | Ctrl + Page Up / Page Down | change scanner category: all / NPCs / items / doors / containers / quests |
 | `'` (apostrophe) | turn to face the selected object |
 | `;` (semicolon) | **beacon guidance**: you walk (W), the mod plays a positional sonar ping at the target — panned left/right by direction, higher-pitched when it's ahead and lower when behind, faster as you close in. Turn until the ping is centred and high, then walk toward it. Distance is called out and you're warned if the target is on another floor. Press again to stop. |
-| `\` (backslash) | **auto-walk**: the mod walks you to the target on open ground (gentle steering, stops on obstacles or a different floor). Press again to stop. |
+| `\` (backslash) | **auto-walk**: the mod walks you to the target — it turns you toward it with mouse-look and holds forward, tracing a curve to the goal (works in first and third person; stops on obstacles or a different floor). Press again to stop. Turn strength is tunable via `[Voice] AutoWalkTurnGain`. |
+| End | **activate** the selected object without aiming — opens the door, reads the book, loots the container, etc. Drives the console `activate`, so there's no crosshair to line up. |
 
 Beacon guidance (`;`) is the recommended way to get around indoors; auto-walk (`\`) is handy on open terrain. All keys are remappable in the INI.
 
