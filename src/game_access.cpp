@@ -408,6 +408,17 @@ const void* GetPlayerCell()
     return p ? (const void*)p->parentCell : nullptr;
 }
 
+uint32_t GetCrosshairRefID()
+{
+    auto* ifm = rt::IFM();
+    if (!ifm) return 0;
+    UInt8* b = reinterpret_cast<UInt8*>(ifm);
+    if (IsBadReadPtr(b + 0xFC, 4)) return 0;
+    auto* refr = *reinterpret_cast<TESObjectREFR**>(b + 0xFC);
+    if (!refr || IsBadReadPtr(refr, 0x40)) return 0;
+    return refr->refID;
+}
+
 std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id)
 {
     if (out_form_id) *out_form_id = 0;

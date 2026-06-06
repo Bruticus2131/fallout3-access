@@ -286,54 +286,56 @@ void SendUse(bool down)
 
 int g_use_hold_ticks = 0;   // single-press path: frames to keep Use held
 
-// Pitch-sweep path for floor/low objects (items, containers): the crosshair
-// sits too high to hit something on the ground. Like SkyrimAccessMod's
-// SetHeading/SetLooking, we aim by WRITING the player's angles directly (yaw =
-// rotZ at the target, pitch = rotX swept across the full vertical range) and tap
-// Use at each step. Writing rotX is what mouse-injection failed to do. We stop
-// the instant a menu opens (activation succeeded). First-person only — in third
-// person the camera has its own pitch. Doors/NPCs use the single-press path.
-enum class Sweep { Idle, Running };
-Sweep      g_sweep      = Sweep::Idle;
-game::Vec3 g_sweep_tgt{};
-int        g_sweep_frame = 0;
-constexpr int kSweepStepFrames = 5;     // frames per pitch step (E held ~3)
-constexpr int kSweepSteps      = 14;    // pitch samples across the arc
-constexpr float kPitchMax      = 1.40f; // radians (~80 deg) up and down
-
-// Aim yaw at the target and pitch to this step's angle (re-asserted each frame
-// so the camera controller can't drift it before the Use tap registers).
-void ApplySweepAim(int step)
+void SendMouse(long dx, long dy)
 {
-    auto pp = game::GetPlayerPosition();
-    float dx = g_sweep_tgt.x - pp.x, dy = g_sweep_tgt.y - pp.y;
-    float yaw = std::atan2(dx, dy);
-    float frac = kSweepSteps > 1 ? (float)step / (kSweepSteps - 1) : 0.5f;
-    float pitch = -kPitchMax + frac * (2.0f * kPitchMax);   // -max .. +max
-    game::SetPlayerLook(yaw, pitch);
+    if (!dx && !dy) return;
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dx = dx; in.mi.dy = dy;
+    in.mi.dwFlags = MOUSEEVENTF_MOVE;        // relative
+    SendInput(1, &in, sizeof(INPUT));
 }
 
-void StartSweep(const game::Vec3& tgt)
+// Floor/low-object activation via crosshair FEEDBACK. The game exposes what's
+// under the crosshair (crosshairRef), so instead of guessing the pitch we sweep
+// the view (mouse pitch + a gentle yaw correction toward the target) until the
+// SELECTED object's refID actually appears under the crosshair, then hold Use to
+// activate it exactly then. First person; Gamebryo (crosshair) pick on for the
+// duration. Doors/NPCs use the single-press path.
+enum class Sweep { Idle, Searching, Activating };
+Sweep      g_sweep        = Sweep::Idle;
+game::Vec3 g_sweep_tgt{};
+uint32_t   g_sweep_target = 0;     // refID we want under the crosshair
+int        g_sweep_frame  = 0;
+int        g_sweep_applied = 0;    // net mouse-dy applied (to undo on stop)
+int        g_act_hold      = 0;    // frames to hold Use once locked on target
+uint32_t   g_sweep_cross0  = 0;    // crosshair refID at start (motion check)
+bool       g_sweep_moved   = false;
+constexpr int  kSweepFrames     = 120;  // ~3s budget to find the object
+constexpr long kPitchPerFrame   = 11;   // mouse counts of pitch per frame
+constexpr int  kSweepHalf       = 40;   // sweep one way this many frames, then back
+
+void StartSweep(const game::Vec3& tgt, uint32_t targetID)
 {
-    g_sweep       = Sweep::Running;
-    g_sweep_tgt   = tgt;
-    g_sweep_frame = 0;
-    // Crosshair/camera-following pick so vertical aim actually matters (the
-    // default Havok pick fires roughly horizontally and ignores camera pitch).
+    g_sweep         = Sweep::Searching;
+    g_sweep_tgt     = tgt;
+    g_sweep_target  = targetID;
+    g_sweep_frame   = 0;
+    g_sweep_applied = 0;
+    g_act_hold      = 0;
+    g_sweep_cross0  = game::GetCrosshairRefID();
+    g_sweep_moved   = false;
     game::SetIniSettingInt("bActivatePickUseGamebryoPick", 1);
 }
 
-void StopSweep(bool restorePitch)
+void StopSweep(const char* msg, bool restoreView)
 {
     SendUse(false);
     game::SetIniSettingInt("bActivatePickUseGamebryoPick", 0);  // restore default
-    if (restorePitch) {                 // exhausted the arc without a menu
-        auto pp = game::GetPlayerPosition();
-        float dx = g_sweep_tgt.x - pp.x, dy = g_sweep_tgt.y - pp.y;
-        game::SetPlayerLook(std::atan2(dx, dy), 0.0f);   // level the view
-        tolk::Speak("Nie trafiłem w obiekt.", tolk::Priority::Background, false);
-    }
+    if (restoreView && g_sweep_applied) SendMouse(0, -g_sweep_applied);
+    if (msg && *msg) tolk::Speak(msg, tolk::Priority::System, true);
     g_sweep = Sweep::Idle;
+    g_sweep_applied = 0;
 }
 
 void ActivateTarget()
@@ -372,7 +374,7 @@ void ActivateTarget()
                           "Szukam: %s, odległość %.0f, wysokość %.0f",
                           e.name.c_str(), dh, dz);
             tolk::Speak(dbg, tolk::Priority::Ui, true);
-            StartSweep(e.position);   // sweep the view to catch floor objects
+            StartSweep(e.position, e.form_id);   // crosshair-guided aim+activate
             return;
         }
         SendUse(true);                // doors / NPCs: single hold-release
@@ -429,24 +431,45 @@ void Tick(float)
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
 
-    if (g_sweep != Sweep::Running) return;
+    if (g_sweep == Sweep::Idle) return;
 
-    // Leaving gameplay / a menu other than the HUD: if a menu opened we likely
-    // activated something — success; stop without restoring pitch.
-    if (!poll::IsGameplayActive()) { StopSweep(false); return; }
+    if (!poll::IsGameplayActive()) { StopSweep(nullptr, false); return; }
     auto m = menu::ActiveMenu();
-    if (m != menu::Id::None && m != menu::Id::HUDMain) { StopSweep(false); return; }
+    if (m != menu::Id::None && m != menu::Id::HUDMain) {   // a menu opened = done
+        StopSweep(nullptr, false);
+        return;
+    }
 
-    int step  = g_sweep_frame / kSweepStepFrames;
-    int phase = g_sweep_frame % kSweepStepFrames;
-    if (step >= kSweepSteps) { StopSweep(true); return; }  // whole arc, no hit
+    if (g_sweep == Sweep::Activating) {
+        // Crosshair is on the target: stay still and hold Use a few frames.
+        if (--g_act_hold <= 0) StopSweep(nullptr, true);
+        return;
+    }
 
-    // Re-assert the aim every frame (write yaw+pitch), and tap Use within the
-    // step: press, hold ~3 frames, release.
-    ApplySweepAim(step);
-    if      (phase == 0) SendUse(true);
-    else if (phase == 3) SendUse(false);
-    ++g_sweep_frame;
+    // Searching: is the selected object now under the crosshair?
+    uint32_t cross = game::GetCrosshairRefID();
+    if (cross != g_sweep_cross0) g_sweep_moved = true;
+    if (cross != 0 && cross == g_sweep_target) {
+        SendUse(true);                       // lock on and activate
+        g_act_hold = 6;
+        g_sweep    = Sweep::Activating;
+        tolk::Speak("Cel pod celownikiem, używam.", tolk::Priority::Ui, true);
+        return;
+    }
+
+    // Not yet: gentle yaw correction toward the target + a pitch sweep that goes
+    // one way then back, so the crosshair traverses the whole vertical arc.
+    auto pp = game::GetPlayerPosition();
+    auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), g_sweep_tgt);
+    long dx = (long)(br.relative_yaw * 4.0f);
+    if (dx >  120) dx =  120;
+    if (dx < -120) dx = -120;
+    long dy = (g_sweep_frame < kSweepHalf) ? kPitchPerFrame : -kPitchPerFrame;
+    SendMouse(dx, dy);
+    g_sweep_applied += dy;
+    if (++g_sweep_frame >= kSweepFrames)
+        StopSweep(g_sweep_moved ? "Nie znalazłem celu pod celownikiem."
+                                : "Celownik się nie rusza.", true);
 }
 
 void Init()

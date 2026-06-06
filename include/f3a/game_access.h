@@ -120,6 +120,10 @@ bool IsThirdPerson();
 std::string GetCrosshairRefName(uint32_t* out_form_id = nullptr,
                                 uint32_t* out_type_id = nullptr);
 
+// Just the refID of the reference under the crosshair (0 if none). Cheap enough
+// to poll every frame — used as feedback to aim at a specific object.
+uint32_t GetCrosshairRefID();
+
 // Aim the player's view: write yaw (rotZ) and pitch (rotX) directly, the way
 // SkyrimAccessMod's SetHeading/SetLooking aim the crosshair at a target. Angles
 // in radians; yaw 0 = +Y (north), clockwise. Used to point the crosshair at an
