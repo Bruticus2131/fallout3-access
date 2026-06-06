@@ -1,15 +1,13 @@
 // AutoWalk — walks the player to a target picked with the object scanner.
 //
-// State machine (mirrors the architecture of the author's earlier mod):
-//   AW_IDLE -> AW_WALKING -> (arrive | stuck | cancel) -> AW_IDLE
+//   Idle -> Walking -> (arrive | stuck | cancel) -> Idle
 //
-// Movement: we DON'T rotate the player to steer (writing rotZ fights the
-// engine's own movement controller and makes the player orbit/spin). Instead
-// we drive with the four movement keys (WASD) relative to whatever way the
-// player faces — decomposing the heading-to-goal into forward/back + strafe —
-// so the player slides toward the waypoint without ever turning. Trick
-// borrowed from the "Better Autowalk" FOSE plugin. The player hears distance
-// callouts and a clear stop reason.
+// Movement = how a sighted player actually moves: TURN toward the goal with
+// mouse-look (the engine's own turn path — writing player->rotZ directly fights
+// the movement controller and makes the player spin), and hold FORWARD (W) once
+// roughly facing it. Forward-only can't orbit a target the way pure strafing
+// can. We follow navmesh waypoints when a path was found, else a straight line.
+// The player hears distance callouts and a clear stop reason.
 
 #include "f3a/modules.h"
 #include "f3a/game_access.h"
@@ -30,99 +28,74 @@
 namespace f3a::modules::autowalk {
 namespace {
 
-enum class State { Idle, Walking, Avoiding };
+enum class State { Idle, Walking };
 
 State        g_state = State::Idle;
 game::Vec3   g_target_pos{};
 std::string  g_target_name;
 
-// Navmesh path (waypoints from player to target). When we have one we steer
-// to the current waypoint instead of straight at the target — that's what
-// routes around walls. Empty = fall back to straight-line + bug avoidance.
+// Navmesh path (waypoints from player to target). When present we steer to the
+// current waypoint instead of straight at the target — that routes around
+// walls. Empty = straight-line.
 std::vector<game::Vec3> g_waypoints;
-size_t       g_wp_index = 0;
-bool         g_have_path = false;
+size_t       g_wp_index   = 0;
+bool         g_have_path  = false;
 constexpr float kWaypointRadius = 96.0f;   // advance when this close (~1.5 m)
 
 // Stuck detection: compare position over a sliding window.
 game::Vec3   g_last_probe_pos{};
-float        g_probe_timer   = 0.0f;
-constexpr float kProbeEvery  = 1.5f;   // seconds
-constexpr float kMinProgress = 12.0f;  // game units per probe window
-
-// Obstacle avoidance ("bug" algorithm): when blocked heading straight at the
-// goal, veer off-axis to slide along the obstacle, then re-aim at the goal.
-// We don't have raycasts, so we just TRY a side; if still stuck, widen the
-// angle and alternate sides; after enough failures, give up.
-float g_avoid_timer   = 0.0f;
-int   g_avoid_side    = 1;     // +1 right, -1 left (alternates)
-float g_avoid_angle   = 50.0f; // degrees off the goal heading
-int   g_avoid_tries   = 0;
-constexpr float kAvoidDuration = 1.6f;  // seconds spent veering per attempt
-constexpr int   kAvoidMaxTries = 5;     // give up after this many
-
-float YawToDegrees(const game::Vec3& from, const game::Vec3& to)
-{
-    float dx = to.x - from.x, dy = to.y - from.y;
-    float deg = std::atan2(dx, dy) * 57.2957795f;   // 0 = north, matches game
-    return deg;
-}
+float        g_probe_timer  = 0.0f;
+constexpr float kProbeEvery  = 2.0f;   // seconds
+constexpr float kMinProgress = 16.0f;  // game units per probe window
 
 // Distance callouts.
 float        g_callout_timer = 0.0f;
 constexpr float kCalloutEvery = 2.5f;
 
-// Arrival radius (~1.7 m).
-constexpr float kArriveDist = 110.0f;
+constexpr float kArriveDist = 110.0f;  // ~1.7 m
 
-// Different-floor guard: a straight-line driver can't climb stairs, so if the
+// Different-floor guard: with no navmesh path we can't climb stairs, so if the
 // target is well above/below us, stop and tell the player to use the beacon.
 constexpr float kFloorDelta = 160.0f;
 
-// Movement keys as hardware scancodes (set 1). Default Fallout 3 bindings:
-// W = forward, S = back, A = strafe left, D = strafe right. DirectInput sees
-// scancode injection. (If the player rebinds movement this would need to read
-// their bindings — defaults cover the vast majority.)
-constexpr WORD kScanW = 0x11, kScanA = 0x1E, kScanS = 0x1F, kScanD = 0x20;
+// --- Turning via mouse-look ------------------------------------------------
+// Relative bearing (deg, + = goal is to the right) -> horizontal mouse motion.
+// The per-tick feedback loop converges, so the gain only needs to be roughly
+// right. Dead zone avoids jitter when already aligned; the cap stops us from
+// whipping around on a big error.
+constexpr float kTurnGain   = 9.0f;    // mouse counts per degree of error
+constexpr long  kTurnMax    = 500;     // max counts per tick
+constexpr float kTurnDead   = 3.0f;    // deg — don't bother turning inside this
+// Only walk forward once we're roughly facing the goal, so we never stride away
+// from it while still turning around.
+constexpr float kForwardCone = 50.0f;  // deg
 
-struct MoveKeys { bool w = false, a = false, s = false, d = false; };
-MoveKeys g_keys;   // currently-held movement keys
-
-void SendScan(WORD scan, bool down)
+void TurnMouse(float relDeg)
 {
+    if (std::fabs(relDeg) <= kTurnDead) return;
+    long dx = (long)(relDeg * kTurnGain);
+    if (dx >  kTurnMax) dx =  kTurnMax;
+    if (dx < -kTurnMax) dx = -kTurnMax;
     INPUT in{};
-    in.type       = INPUT_KEYBOARD;
-    in.ki.wScan   = scan;
-    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    in.type       = INPUT_MOUSE;
+    in.mi.dx      = dx;             // relative, + = turn right
+    in.mi.dwFlags = MOUSEEVENTF_MOVE;
     SendInput(1, &in, sizeof(in));
 }
 
-// Apply a desired key set, sending only the edges that changed (no key spam).
-void ApplyKeys(MoveKeys want)
-{
-    if (want.w != g_keys.w) SendScan(kScanW, want.w);
-    if (want.a != g_keys.a) SendScan(kScanA, want.a);
-    if (want.s != g_keys.s) SendScan(kScanS, want.s);
-    if (want.d != g_keys.d) SendScan(kScanD, want.d);
-    g_keys = want;
-}
+// --- Forward key (W = scancode 0x11) ---------------------------------------
+constexpr WORD kScanW = 0x11;
+bool g_forward_down = false;
 
-void ReleaseAllKeys() { ApplyKeys(MoveKeys{}); }
-
-// Drive toward a world point by strafing — never rotates the player. Decompose
-// the heading-to-goal (relative to current facing) into an 8-way WASD combo;
-// the bearing feedback loop corrects the residual angle as we move.
-void DriveToward(const game::Vec3& target)
+void Forward(bool down)
 {
-    auto pp = game::GetPlayerPosition();
-    auto br = game::ComputeBearing(pp, game::GetPlayerYaw(), target);
-    float rel = br.relative_yaw;        // -180..180, 0 = ahead, + = right
-    MoveKeys k;
-    k.w = (rel > -67.5f  && rel <  67.5f);
-    k.s = (rel >  112.5f || rel < -112.5f);
-    k.d = (rel >   22.5f && rel <  157.5f);
-    k.a = (rel <  -22.5f && rel > -157.5f);
-    ApplyKeys(k);
+    if (down == g_forward_down) return;   // only send edges
+    INPUT in{};
+    in.type       = INPUT_KEYBOARD;
+    in.ki.wScan   = kScanW;
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    SendInput(1, &in, sizeof(in));
+    g_forward_down = down;
 }
 
 float DistanceToTarget()
@@ -133,8 +106,8 @@ float DistanceToTarget()
     return std::sqrt(dx * dx + dy * dy);
 }
 
-// The point we currently steer toward: the active waypoint if we have a
-// navmesh path, otherwise the final target.
+// The point we currently steer toward: the active waypoint if we have a path,
+// otherwise the final target.
 game::Vec3 CurrentGoal()
 {
     if (g_have_path && g_wp_index < g_waypoints.size())
@@ -142,8 +115,7 @@ game::Vec3 CurrentGoal()
     return g_target_pos;
 }
 
-// Advance past any waypoints we've already reached. Returns true if the path
-// is exhausted (only the final target remains).
+// Advance past waypoints we've already reached.
 void AdvanceWaypoints()
 {
     if (!g_have_path) return;
@@ -156,38 +128,33 @@ void AdvanceWaypoints()
     }
 }
 
+// Turn toward the goal; walk forward once roughly aligned. Returns the |error|.
+float Steer(const game::Vec3& goal)
+{
+    auto  pp  = game::GetPlayerPosition();
+    auto  br  = game::ComputeBearing(pp, game::GetPlayerYaw(), goal);
+    float rel = br.relative_yaw;          // -180..180, 0 = ahead, + = right
+    TurnMouse(rel);
+    Forward(std::fabs(rel) < kForwardCone);
+    return std::fabs(rel);
+}
+
 void StopWalking(const char* reason_utf8)
 {
     if (g_state == State::Idle) return;
-    ReleaseAllKeys();
+    Forward(false);
     g_state = State::Idle;
-    if (reason_utf8 && *reason_utf8) {
+    if (reason_utf8 && *reason_utf8)
         tolk::Speak(reason_utf8, tolk::Priority::System, true);
-    }
 }
 
-// Steer along the goal heading offset by the current avoidance angle/side.
-void SteerAvoiding()
+float ProbeMoved()
 {
     auto pp = game::GetPlayerPosition();
-    float goalDeg  = YawToDegrees(pp, CurrentGoal());
-    float veerDeg  = goalDeg + g_avoid_side * g_avoid_angle;
-    float rad      = veerDeg * 0.01745329252f;
-    game::Vec3 p{ pp.x + std::sin(rad) * 300.0f,
-                  pp.y + std::cos(rad) * 300.0f, pp.z };
-    DriveToward(p);
-}
-
-void EnterAvoiding()
-{
-    g_state       = State::Avoiding;
-    g_avoid_timer = 0.0f;
-    g_avoid_side  = -g_avoid_side;                  // alternate side each time
-    g_avoid_angle = 50.0f + 20.0f * g_avoid_tries;  // widen with each failure
-    if (g_avoid_angle > 110.0f) g_avoid_angle = 110.0f;
-    ++g_avoid_tries;
-    g_last_probe_pos = game::GetPlayerPosition();
-    g_probe_timer    = 0.0f;
+    float mx = pp.x - g_last_probe_pos.x;
+    float my = pp.y - g_last_probe_pos.y;
+    g_last_probe_pos = pp;
+    return std::sqrt(mx * mx + my * my);
 }
 
 } // namespace
@@ -202,19 +169,16 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_last_probe_pos = game::GetPlayerPosition();
     g_probe_timer    = 0.0f;
     g_callout_timer  = 0.0f;
-    g_avoid_tries    = 0;
-    g_avoid_side     = 1;
 
     // Try to compute a real path around walls. If it fails (no navmesh,
-    // endpoints off-mesh), g_have_path stays false and we walk straight with
-    // bug-avoidance like before.
+    // endpoints off-mesh), g_have_path stays false and we walk straight.
     g_waypoints.clear();
     g_wp_index  = 0;
     g_have_path = navmesh::BuildPath(game::GetPlayerPosition(), pos,
                                      g_waypoints) && !g_waypoints.empty();
 
     g_state = State::Walking;
-    DriveToward(CurrentGoal());
+    Steer(CurrentGoal());
 
     char buf[256];
     std::snprintf(buf, sizeof(buf), "Idę do: %s, %s%s",
@@ -229,21 +193,11 @@ void Stop()
     StopWalking("Zatrzymano.");
 }
 
-float ProbeMoved()
-{
-    auto pp = game::GetPlayerPosition();
-    float mx = pp.x - g_last_probe_pos.x;
-    float my = pp.y - g_last_probe_pos.y;
-    g_last_probe_pos = pp;
-    return std::sqrt(mx * mx + my * my);
-}
-
 void Tick(float dt)
 {
     if (g_state == State::Idle) return;
 
-    // Any menu (other than the HUD) opening cancels the walk — so does
-    // leaving gameplay (load, main menu).
+    // Any menu (other than the HUD) or leaving gameplay cancels the walk.
     if (!poll::IsGameplayActive()) { StopWalking(nullptr); return; }
     auto active = menu::ActiveMenu();
     if (active != menu::Id::None && active != menu::Id::HUDMain) {
@@ -259,8 +213,8 @@ void Tick(float dt)
         return;
     }
 
-    // Different floor → a straight-line walk can't get there. Only bail when
-    // we DON'T have a navmesh path; a real path handles stairs/height itself.
+    // Different floor → a straight-line walk can't get there. Only bail when we
+    // have no navmesh path; a real path handles stairs/height itself.
     if (!g_have_path) {
         float dz = g_target_pos.z - game::GetPlayerPosition().z;
         if (std::fabs(dz) > kFloorDelta) {
@@ -270,48 +224,19 @@ void Tick(float dt)
         }
     }
 
-    if (g_state == State::Walking) {
-        // Follow the path: advance through reached waypoints, steer at the
-        // current one (or the target if we have no path).
-        AdvanceWaypoints();
-        DriveToward(CurrentGoal());
+    AdvanceWaypoints();
+    Steer(CurrentGoal());
 
-        g_probe_timer += dt;
-        if (g_probe_timer >= kProbeEvery) {
-            g_probe_timer = 0.0f;
-            if (ProbeMoved() < kMinProgress) {
-                // Blocked — try to go around instead of giving up.
-                tolk::Speak("Przeszkoda, próbuję obejść.",
-                            tolk::Priority::Background, false);
-                EnterAvoiding();
-            } else {
-                g_avoid_tries = 0;   // making progress; reset failure count
-            }
+    // Stuck detection: if we've been holding forward but barely moved, give up
+    // cleanly rather than grinding against geometry.
+    g_probe_timer += dt;
+    if (g_probe_timer >= kProbeEvery) {
+        g_probe_timer = 0.0f;
+        if (g_forward_down && ProbeMoved() < kMinProgress) {
+            StopWalking("Utknąłem. Spróbuj naprowadzania ręcznego.");
+            return;
         }
-    } else { // Avoiding
-        SteerAvoiding();
-        g_avoid_timer += dt;
-        g_probe_timer  += dt;
-
-        // Check progress mid-veer; if we're moving freely, resume straight.
-        if (g_probe_timer >= kProbeEvery) {
-            g_probe_timer = 0.0f;
-            float moved = ProbeMoved();
-            if (moved < kMinProgress) {
-                if (g_avoid_tries >= kAvoidMaxTries) {
-                    StopWalking("Nie mogę obejść przeszkody. "
-                                "Spróbuj naprowadzania ręcznego.");
-                    return;
-                }
-                EnterAvoiding();   // try the other side / wider angle
-                return;
-            }
-        }
-        if (g_avoid_timer >= kAvoidDuration) {
-            g_state = State::Walking;   // re-aim at the goal
-            g_probe_timer = 0.0f;
-            g_last_probe_pos = game::GetPlayerPosition();
-        }
+        if (!g_forward_down) g_last_probe_pos = game::GetPlayerPosition();
     }
 
     // Periodic distance callout.
@@ -330,8 +255,7 @@ void Init()
 
 void Shutdown()
 {
-    // Never leave a movement key stuck down.
-    ReleaseAllKeys();
+    Forward(false);   // never leave the forward key stuck down
     g_state = State::Idle;
 }
 
