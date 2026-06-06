@@ -471,6 +471,14 @@ bool GetIniSettingFloat(const char* name, float& out)
     return true;
 }
 
+bool SetIniSettingInt(const char* name, uint32_t value)
+{
+    UInt8* set = FindIniSetting(name);
+    if (!set) return false;
+    *reinterpret_cast<uint32_t*>(set + 0x04) = value;   // bool/int share the union
+    return true;
+}
+
 Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to)
 {
     float dx = to.x - from.x;

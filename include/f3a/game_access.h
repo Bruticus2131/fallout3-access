@@ -120,6 +120,10 @@ bool SetIniSettingFloat(const char* name, float value);
 // found; false otherwise. Used to verify the collection addresses are right.
 bool GetIniSettingFloat(const char* name, float& out);
 
+// Set an integer/bool INI setting's in-memory value (stored in the same union;
+// written as uint, not float). Returns true if the setting was found.
+bool SetIniSettingInt(const char* name, uint32_t value);
+
 // Opaque token identifying the player's current cell — changes when the
 // player moves to another cell or a different save is loaded. Used to drop a
 // stale scan list. nullptr if there is no player.

@@ -322,6 +322,10 @@ void StartSweep(const game::Vec3& tgt)
     g_sweep_applied = 0;
     auto pp = game::GetPlayerPosition();
     g_sweep_dir = (tgt.z < pp.z + 100.0f) ? 1 : -1;   // below eye -> look down
+    // Use the crosshair/camera-following pick so vertical aim actually matters
+    // (the default Havok pick fires roughly horizontally from the body and
+    // ignores camera pitch — which is why sweeping down never hit the book).
+    game::SetIniSettingInt("bActivatePickUseGamebryoPick", 1);
 }
 
 void StopSweep(bool restorePitch)
@@ -329,6 +333,7 @@ void StopSweep(bool restorePitch)
     SendUse(false);
     if (restorePitch && g_sweep_applied)
         SendMouse(0, -g_sweep_applied);   // return the view roughly to level
+    game::SetIniSettingInt("bActivatePickUseGamebryoPick", 0);  // restore default
     if (restorePitch)   // exhausted the arc without a menu opening
         tolk::Speak("Nie trafiłem w obiekt.", tolk::Priority::Background, false);
     g_sweep = Sweep::Idle;
