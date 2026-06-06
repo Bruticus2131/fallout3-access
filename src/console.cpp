@@ -12,10 +12,23 @@ FOSEConsoleInterface* g_console = nullptr;
 // (the console subsystem isn't up yet — messaging IS, which is why that one
 // works early). So we don't give up at Init; we (re)try to acquire it on demand
 // until it succeeds, which it does once a game is actually running.
+int g_attempts = 0;
+
 void TryAcquire()
 {
     if (g_console || !g_fose) return;
-    g_console = (FOSEConsoleInterface*)g_fose->QueryInterface(kInterface_Console);
+    void* p = g_fose->QueryInterface(kInterface_Console);
+    if (g_attempts < 5) {     // log the first few probes, then stay quiet
+        ++g_attempts;
+        F3A_INFO("Console probe #%d: QueryInterface(kInterface_Console=0) -> %p",
+                 g_attempts, p);
+        if (p) {
+            auto* c = (FOSEConsoleInterface*)p;
+            F3A_INFO("  version=%u RunScriptLine=%p",
+                     c->version, (void*)c->RunScriptLine);
+        }
+    }
+    g_console = (FOSEConsoleInterface*)p;
     if (g_console && !g_console->RunScriptLine) g_console = nullptr;
     if (g_console) F3A_INFO("Console interface acquired.");
 }
