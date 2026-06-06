@@ -131,6 +131,17 @@ uint32_t GetCrosshairRefID(uint32_t* out_type = nullptr);
 // a stale/reused pointer). Returns false if it refused to write.
 bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID);
 
+// Activation by directly calling the engine's TESObjectREFR::Activate(player) —
+// the Skyrim-style "activate by reference", no aiming/occlusion. MUST run on the
+// game's main thread (it runs scripts / opens menus), so don't call it from the
+// poll thread; queue it instead.
+//
+// Install the main-thread executor (IAT-hooks DispatchMessageA) once at load:
+void InstallMainThreadHook();
+// Queue an activation from any thread; it runs on the main thread next message
+// dispatch. expectedRefID guards against a stale pointer.
+void QueueActivate(const void* refr, uint32_t expectedRefID);
+
 // Aim the player's view: write yaw (rotZ) and pitch (rotX) directly, the way
 // SkyrimAccessMod's SetHeading/SetLooking aim the crosshair at a target. Angles
 // in radians; yaw 0 = +Y (north), clockwise. Used to point the crosshair at an

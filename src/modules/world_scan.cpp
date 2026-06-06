@@ -286,15 +286,6 @@ void SendUse(bool down)
 
 int g_use_hold_ticks = 0;   // fallback path: frames to keep Use held
 
-// Crosshair-forced activation: write the game's crosshairRef to point at the
-// EXACT selected reference, then hold Use a few frames — re-asserting
-// crosshairRef each frame so the per-frame pick can't steal it back. The game
-// activates whatever crosshairRef points to, so this reaches objects the
-// crosshair physically can't (a book occluded by a table) with no aiming.
-const void* g_force_refr  = nullptr;
-uint32_t    g_force_id    = 0;
-int         g_force_ticks = 0;
-
 void ActivateTarget()
 {
     if (!GameplayAndHud()) return;
@@ -312,18 +303,16 @@ void ActivateTarget()
         tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
         return;
     }
-    // Widen the pick sphere (helps the natural pick for in-view objects).
-    int r = config::Get().activate_pick_radius;
-    if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius", (float)r);
-
-    // Force the crosshair onto our exact reference, then hold Use.
-    if (e.refr && e.form_id && game::ForceCrosshairRef(e.refr, e.form_id)) {
-        g_force_refr  = e.refr;
-        g_force_id    = e.form_id;
-        g_force_ticks = 10;
-        SendUse(true);
+    // Best path: call the engine's native Activate(player) on our exact ref —
+    // no aiming, no occlusion. It must run on the main thread, so queue it; the
+    // DispatchMessageA hook runs it. Falls back to a Use keypress if we have no
+    // live ref pointer (e.g. quests) or the native call is unavailable.
+    if (e.refr && e.form_id) {
+        game::QueueActivate(e.refr, e.form_id);
     } else {
-        SendUse(true);              // fallback: plain Use against the crosshair
+        int r = config::Get().activate_pick_radius;
+        if (r > 0) game::SetIniSettingFloat("fActivatePickSphereRadius", (float)r);
+        SendUse(true);
         g_use_hold_ticks = 5;
     }
     tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
@@ -376,13 +365,6 @@ void Tick(float)
 {
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
-
-    if (g_force_ticks > 0) {
-        // Keep crosshairRef pinned to our target each frame (the game's pick
-        // would otherwise reset it), then release Use when the hold ends.
-        game::ForceCrosshairRef(g_force_refr, g_force_id);
-        if (--g_force_ticks == 0) SendUse(false);
-    }
 }
 
 void Init()

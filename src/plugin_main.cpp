@@ -25,6 +25,7 @@
 #include "f3a/engine_hooks.h"
 #include "f3a/polling_loop.h"
 #include "f3a/modules.h"
+#include "f3a/game_access.h"
 #include "f3a/console.h"
 #include "f3a/fose_runtime.h"
 
@@ -101,6 +102,10 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 
     // Console interface — used by the debug "start game" hotkey.
     f3a::console::Init(&g_fose);
+
+    // Main-thread executor (IAT-hooks DispatchMessageA) so the poll thread can
+    // safely run game code like TESObjectREFR::Activate.
+    f3a::game::InstallMainThreadHook();
 
     // Load INI from <Game>/Data/FOSE/Plugins/Fallout3Access.ini
     std::wstring ini = ResolvePluginIniPath();

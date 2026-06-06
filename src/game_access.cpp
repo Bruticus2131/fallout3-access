@@ -13,6 +13,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -423,6 +424,96 @@ uint32_t GetCrosshairRefID(uint32_t* out_type)
         if (Readable(bf, 0x08)) *out_type = bf->typeID;
     }
     return refr->refID;
+}
+
+// ---- Native activation on the main thread --------------------------------
+namespace {
+typedef bool (__thiscall* ActivateFn)(void* thisRef, void* activator,
+                                      UInt32 a2, UInt32 a3, UInt32 a4);
+
+// Call TESObjectREFR::Activate(this=refr, activator=player, 0,0,1). Guarded by a
+// prologue-bytes check so a wrong address (e.g. an unverified runtime) can't
+// crash the game — it simply does nothing.
+bool ActivateRefNative(const void* refr, uint32_t expectedRefID)
+{
+    UInt32 addr = rt::g_addrs->refrActivate;
+    if (!addr || IsBadReadPtr(reinterpret_cast<void*>(addr), 6)) return false;
+    const UInt8 prologue[6] = { 0x81, 0xEC, 0x14, 0x01, 0x00, 0x00 }; // sub esp,0x114
+    if (std::memcmp(reinterpret_cast<void*>(addr), prologue, 6) != 0) return false;
+    if (!refr || IsBadReadPtr(refr, 0x40)) return false;
+    if (reinterpret_cast<const TESObjectREFR*>(refr)->refID != expectedRefID)
+        return false;                                  // stale / reused pointer
+    auto* player = rt::Player();
+    if (!player) return false;
+    reinterpret_cast<ActivateFn>(addr)(const_cast<void*>(refr), player, 0, 0, 1);
+    return true;
+}
+
+// Pending activation, set from the poll thread, drained on the main thread.
+std::atomic<const void*> g_pending_refr{ nullptr };
+std::atomic<uint32_t>    g_pending_id{ 0 };
+
+typedef LRESULT (WINAPI* DispatchMessageA_t)(const MSG*);
+DispatchMessageA_t g_realDispatchMessageA = nullptr;
+
+LRESULT WINAPI DispatchMessageA_Hook(const MSG* msg)
+{
+    // Runs on the main (message-pump) thread — safe to call game code here.
+    const void* refr = g_pending_refr.exchange(nullptr);
+    if (refr) ActivateRefNative(refr, g_pending_id.load());
+    return g_realDispatchMessageA ? g_realDispatchMessageA(msg)
+                                  : ::DispatchMessageA(msg);
+}
+
+// Swap an IAT entry (pointer write only — no code patching, low risk).
+void* HookIAT(const char* dll, const char* func, void* newFn)
+{
+    auto* mod = reinterpret_cast<UInt8*>(GetModuleHandleW(nullptr));
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
+    auto* nt  = reinterpret_cast<IMAGE_NT_HEADERS*>(mod + dos->e_lfanew);
+    UInt32 rva = nt->OptionalHeader
+                   .DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!rva) return nullptr;
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(mod + rva);
+    for (; desc->Name; ++desc) {
+        const char* name = reinterpret_cast<const char*>(mod + desc->Name);
+        if (_stricmp(name, dll) != 0) continue;
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(mod + desc->FirstThunk);
+        auto* orig  = reinterpret_cast<IMAGE_THUNK_DATA*>(
+            mod + (desc->OriginalFirstThunk ? desc->OriginalFirstThunk
+                                            : desc->FirstThunk));
+        for (; thunk->u1.Function; ++thunk, ++orig) {
+            if (orig->u1.Ordinal & IMAGE_ORDINAL_FLAG32) continue;
+            auto* ibn = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                mod + orig->u1.AddressOfData);
+            if (std::strcmp(reinterpret_cast<const char*>(ibn->Name), func) != 0)
+                continue;
+            void** slot = reinterpret_cast<void**>(&thunk->u1.Function);
+            DWORD old = 0;
+            VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old);
+            void* prev = *slot;
+            *slot = newFn;
+            VirtualProtect(slot, sizeof(void*), old, &old);
+            return prev;
+        }
+    }
+    return nullptr;
+}
+} // namespace
+
+void InstallMainThreadHook()
+{
+    void* prev = HookIAT("user32.dll", "DispatchMessageA",
+                         reinterpret_cast<void*>(&DispatchMessageA_Hook));
+    g_realDispatchMessageA = reinterpret_cast<DispatchMessageA_t>(prev);
+    F3A_INFO("Main-thread hook (DispatchMessageA IAT) %s.",
+             prev ? "installed" : "FAILED");
+}
+
+void QueueActivate(const void* refr, uint32_t expectedRefID)
+{
+    g_pending_id.store(expectedRefID);
+    g_pending_refr.store(refr);
 }
 
 bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID)
