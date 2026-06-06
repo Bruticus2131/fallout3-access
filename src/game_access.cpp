@@ -455,6 +455,15 @@ UInt8* FindIniSetting(const char* name)
 }
 } // namespace
 
+bool IsThirdPerson()
+{
+    auto* p = rt::Player();
+    if (!p) return false;
+    UInt8* base = reinterpret_cast<UInt8*>(p);
+    if (IsBadReadPtr(base + 0x5A8, 1)) return false;
+    return *(base + 0x5A8) != 0;   // PlayerCharacter::bThirdPerson
+}
+
 bool SetIniSettingFloat(const char* name, float value)
 {
     UInt8* set = FindIniSetting(name);

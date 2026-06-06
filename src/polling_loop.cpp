@@ -332,6 +332,21 @@ void PollQuestChange()
         tolk::Speak("Zadanie: " + name, tolk::Priority::Background, false);
 }
 
+// Announce first/third-person changes (the player toggles view with F by
+// default). Polls the bThirdPerson flag and speaks when it flips.
+int g_last_pov = -1;   // -1 unknown, 0 first, 1 third
+
+void PollViewChange()
+{
+    if (!IsGameplayActive()) { g_last_pov = -1; return; }
+    int pov = game::IsThirdPerson() ? 1 : 0;
+    if (g_last_pov == -1) { g_last_pov = pov; return; }  // first read: silent
+    if (pov == g_last_pov) return;
+    g_last_pov = pov;
+    tolk::Speak(pov ? "Trzecia osoba" : "Pierwsza osoba",
+                tolk::Priority::Ui, true);
+}
+
 void Tick(float dt)
 {
     // Don't touch anything until the InterfaceManager has been created.
@@ -473,6 +488,7 @@ void Tick(float dt)
         modules::guide::Tick(dt);
         modules::worldscan::Tick(dt);
         PollQuestChange();
+        PollViewChange();
     }
 }
 

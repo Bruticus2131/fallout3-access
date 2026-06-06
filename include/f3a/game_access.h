@@ -110,6 +110,9 @@ Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to);
 // Rotate the player to face `target` (writes the player's yaw directly).
 void SetPlayerYawTo(const Vec3& target);
 
+// True if the player is in third-person view (PlayerCharacter+0x5A8).
+bool IsThirdPerson();
+
 // Set a float INI setting's in-memory value by name (e.g.
 // "fActivatePickSphereRadius"). Searches both Fallout.ini and FalloutPrefs.ini
 // collections; matches the name up to an optional ":Section" suffix. Returns
