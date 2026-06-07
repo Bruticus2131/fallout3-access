@@ -67,12 +67,13 @@ constexpr float kFloorDelta = 160.0f;
 // loop converges. Gating forward on "already facing" deadlocked: body never
 // moved, rotZ never updated, camera just spun around it forever.
 //
-// SMOOTH turn: small mouse step per tick so the view eases toward the target
-// instead of whipping. Proportional (slows as it lines up) with a low cap, so a
-// big turn is spread over many frames — gentle, not a jerk. Gain is INI-tunable
-// (Voice/AutoWalkTurnGain); the low cap is what keeps it smooth regardless.
-constexpr long  kTurnMax  = 32;      // max mouse counts per tick (low = smooth)
-constexpr float kTurnDead = 6.0f;    // deg — don't fidget inside this
+// Turn rate. A low cap looked smoother but turned too slowly to track sharp
+// corrections (the walker wandered / missed targets), so keep it fast enough to
+// steer reliably — the "whip" is only visual and the player can't see it.
+// Proportional, so it still eases as it lines up. Gain is INI-tunable
+// (Voice/AutoWalkTurnGain).
+constexpr long  kTurnMax  = 220;     // max mouse counts per tick
+constexpr float kTurnDead = 4.0f;    // deg — don't turn inside this
 
 void TurnMouse(float relDeg)
 {
