@@ -336,6 +336,19 @@ void OnViewToggle()
                 tolk::Priority::Ui, true);
 }
 
+// HP / AP / radiation readout (H). Values from the player's actor values.
+void PlayerStatus()
+{
+    if (!poll::IsGameplayActive()) return;
+    int hp  = (int)(game::GetPlayerAV(16) + 0.5f);   // Health (current)
+    int ap  = (int)(game::GetPlayerAV(12) + 0.5f);   // ActionPoints
+    int rad = (int)(game::GetPlayerAV(54) + 0.5f);   // RadLevel
+    char buf[128];
+    std::snprintf(buf, sizeof(buf),
+                  "Zdrowie %d, akcja %d, promieniowanie %d", hp, ap, rad);
+    tolk::Speak(buf, tolk::Priority::Ui, true);
+}
+
 void CrosshairInfo()
 {
     if (!GameplayAndHud()) return;
@@ -380,6 +393,7 @@ void Init()
     hotkeys::Bind(h.activate_target, &ActivateTarget);
     hotkeys::Bind(h.crosshair_info,  &CrosshairInfo);
     hotkeys::Bind(h.view_toggle,     &OnViewToggle);
+    hotkeys::Bind(h.player_status,   &PlayerStatus);
     F3A_INFO("World scan module ready.");
 }
 void Shutdown() {}

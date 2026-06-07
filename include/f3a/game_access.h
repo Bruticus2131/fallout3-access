@@ -114,6 +114,11 @@ void SetPlayerYawTo(const Vec3& target);
 // True if the player is in third-person view (PlayerCharacter+0x5A8).
 bool IsThirdPerson();
 
+// Current value of one of the player's actor values (e.g. 5..11 = SPECIAL,
+// 12 = ActionPoints, 16 = Health, 54 = RadLevel). Returns -1 on failure.
+// Calls the engine's GetActorValue via the avOwner vtable.
+float GetPlayerAV(uint32_t avCode);
+
 // Name of the reference currently under the crosshair (InterfaceManager+0xFC),
 // "" if none. out_form_id receives its refID, out_type_id its base form type
 // (both 0 if none). This is exactly what the game would activate with Use —

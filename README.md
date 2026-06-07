@@ -83,7 +83,7 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 | J | compass direction | works |
 | X | read nearby objects | works |
 | C | read nearby hostiles | works |
-| H | player status (HP, AP, rads, caps) | work in progress |
+| H | player status — health, action points, radiation | works |
 | K | current quest target direction | work in progress |
 
 (Defaults deliberately avoid keys Fallout 3 uses itself.)

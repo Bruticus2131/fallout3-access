@@ -332,6 +332,47 @@ void PollQuestChange()
         tolk::Speak("Zadanie: " + name, tolk::Priority::Background, false);
 }
 
+// Announce SPECIAL attribute changes (Strength..Luck = AV codes 5..11). Makes
+// the image-only "You're SPECIAL!" book (and any +SPECIAL effect) accessible:
+// when a value changes we say "<name> <new value>". Throttled, and only while in
+// gameplay (where SPECIAL can change), since it calls a game getter per attr.
+const char* g_special_names[7] = {
+    "Siła", "Percepcja", "Wytrzymałość", "Charyzma",
+    "Inteligencja", "Zręczność", "Szczęście"
+};
+int  g_special[7]      = { -1, -1, -1, -1, -1, -1, -1 };
+bool g_special_init    = false;
+int  g_special_throttle = 0;
+
+void PollSpecialChange()
+{
+    if (!IsGameplayActive() || g_postload_cooldown > 0) {
+        g_special_init = false;
+        return;
+    }
+    if (--g_special_throttle > 0) return;
+    g_special_throttle = 6;                 // ~6 ticks between polls
+
+    int cur[7];
+    for (int i = 0; i < 7; ++i) {
+        float v = game::GetPlayerAV(5 + i);
+        if (v < 0.0f) return;               // read failed — skip this round
+        cur[i] = (int)(v + 0.5f);
+    }
+    if (!g_special_init) {
+        for (int i = 0; i < 7; ++i) g_special[i] = cur[i];
+        g_special_init = true;
+        return;
+    }
+    for (int i = 0; i < 7; ++i) {
+        if (cur[i] == g_special[i]) continue;
+        g_special[i] = cur[i];
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%s %d", g_special_names[i], cur[i]);
+        tolk::Speak(buf, tolk::Priority::Ui, true);
+    }
+}
+
 void Tick(float dt)
 {
     // Don't touch anything until the InterfaceManager has been created.
@@ -473,6 +514,7 @@ void Tick(float dt)
         modules::guide::Tick(dt);
         modules::worldscan::Tick(dt);
         PollQuestChange();
+        PollSpecialChange();
     }
 }
 

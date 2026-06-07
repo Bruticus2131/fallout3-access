@@ -601,6 +601,22 @@ UInt8* FindIniSetting(const char* name)
 }
 } // namespace
 
+float GetPlayerAV(uint32_t avCode)
+{
+    // GetActorValue = actor->avOwner(@+0x9C)->vtable[3](avCode), returning a
+    // float (RE'd from the GetActorValue command handler). Reading the vtable
+    // at runtime makes this version-independent. A read-only call — safe enough
+    // off the main thread (no state change / menu).
+    auto* p = rt::Player();
+    if (!p) return -1.0f;
+    UInt8* avOwner = reinterpret_cast<UInt8*>(p) + 0x9C;
+    if (IsBadReadPtr(avOwner, 4)) return -1.0f;
+    void** vtbl = *reinterpret_cast<void***>(avOwner);
+    if (IsBadReadPtr(vtbl, 0x10) || IsBadReadPtr(vtbl[3], 1)) return -1.0f;
+    typedef float (__thiscall* GetAVFn)(void* thisptr, UInt32 code);
+    return reinterpret_cast<GetAVFn>(vtbl[3])(avOwner, avCode);
+}
+
 bool IsThirdPerson()
 {
     auto* p = rt::Player();
