@@ -67,10 +67,12 @@ constexpr float kFloorDelta = 160.0f;
 // loop converges. Gating forward on "already facing" deadlocked: body never
 // moved, rotZ never updated, camera just spun around it forever.
 //
-// Gain is INI-tunable (Voice/AutoWalkTurnGain) because the right value depends
-// on the player's mouse sensitivity. Dead zone avoids jitter; cap stops a whip.
-constexpr long  kTurnMax  = 220;     // max counts per tick
-constexpr float kTurnDead = 4.0f;    // deg — don't turn inside this
+// SMOOTH turn: small mouse step per tick so the view eases toward the target
+// instead of whipping. Proportional (slows as it lines up) with a low cap, so a
+// big turn is spread over many frames — gentle, not a jerk. Gain is INI-tunable
+// (Voice/AutoWalkTurnGain); the low cap is what keeps it smooth regardless.
+constexpr long  kTurnMax  = 32;      // max mouse counts per tick (low = smooth)
+constexpr float kTurnDead = 6.0f;    // deg — don't fidget inside this
 
 void TurnMouse(float relDeg)
 {

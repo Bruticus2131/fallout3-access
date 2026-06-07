@@ -17,4 +17,4 @@ def disasm(va, n, tag=""):
             mark = "   <<< CALL"
         print("  0x%08X  %-9s %s%s" % (ins.address, ins.mnemonic, ins.op_str, mark))
 
-disasm(0x0050EF90, 130, "GetAV helper 0x50EF90")
+disasm(0x00512EC0, 130, "IsPC1stPerson impl")
