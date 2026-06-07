@@ -1111,6 +1111,10 @@ bool ClickMenuBack()
     // via the owning Menu's virtual HandleClick — a vtable call on the live
     // object, so no hardcoded address is involved and the game's own panel
     // logic decides what "back" means at the current level.
+    // Names that act as "leave this menu": the StartMenu's *back_button, and
+    // exit buttons on full-screen menus like the SPECIAL book (exit_menu).
+    static const char* kBackNames[] = { "back_button", "exit_menu",
+                                        "exit_button" };
     struct Node { Tile::ChildNode* item; Node* next; };
     auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
     for (int safety = 0; node && safety < 4096; ++safety) {
@@ -1119,14 +1123,16 @@ bool ClickMenuBack()
             auto* tm = reinterpret_cast<TileMenu*>(cn->child);
             Menu* m = tm->menu;
             if (m) {
-                Tile* btn = FindChildByName(cn->child, "back_button", 6);
-                if (btn && TileVisible(btn)) {
-                    UInt32 id = (UInt32)TileNum(btn, kTileValue_id);
-                    F3A_INFO("ClickMenuBack: '%s' (id=%u) in menu 0x%X",
-                             btn->name.m_data ? btn->name.m_data : "?",
-                             id, m->typeID);
-                    m->HandleClick(id, btn);
-                    return true;
+                for (const char* nm : kBackNames) {
+                    Tile* btn = FindChildByName(cn->child, nm, 6);
+                    if (btn && TileVisible(btn)) {
+                        UInt32 id = (UInt32)TileNum(btn, kTileValue_id);
+                        F3A_INFO("ClickMenuBack: '%s' (id=%u) in menu 0x%X",
+                                 btn->name.m_data ? btn->name.m_data : "?",
+                                 id, m->typeID);
+                        m->HandleClick(id, btn);
+                        return true;
+                    }
                 }
             }
         }

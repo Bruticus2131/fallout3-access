@@ -377,6 +377,10 @@ void PollSpecialChange()
 // flag; we read the actor values here, on the main thread).
 std::atomic<bool> g_status_pending{ false };
 
+// Menu-back / close (Backspace). Calls Menu::HandleClick (a game function that
+// opens/closes menus), so it must run on the main thread too.
+std::atomic<bool> g_menuback_pending{ false };
+
 void AnnounceStatus()
 {
     if (!g_status_pending.exchange(false)) return;
@@ -396,6 +400,7 @@ void MainThreadWork()
 {
     PollSpecialChange();
     AnnounceStatus();
+    if (g_menuback_pending.exchange(false)) game::ClickMenuBack();
 }
 
 void Tick(float dt)
@@ -598,6 +603,9 @@ void Stop()
 // Called from any thread (the H hotkey); the actual actor-value reads happen on
 // the main thread in AnnounceStatus().
 void RequestStatus() { g_status_pending.store(true); }
+
+// Called from any thread (Backspace); ClickMenuBack runs on the main thread.
+void RequestMenuBack() { g_menuback_pending.store(true); }
 
 // --- Diagnostic dump --------------------------------------------------------
 //

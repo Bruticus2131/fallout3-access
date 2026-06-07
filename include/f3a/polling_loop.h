@@ -25,6 +25,10 @@ bool IsGameplayActive();
 // reads run on the main thread; safe to call from the poll/hotkey thread.
 void RequestStatus();
 
+// Request a menu back/close (Backspace). Menu::HandleClick runs on the main
+// thread; safe to call from the poll/hotkey thread.
+void RequestMenuBack();
+
 // True while the main menu (Start) is open or hasn't been left yet via
 // HUDMain. Used by polling to suppress phantom Pip-Boy sub-menu opens
 // during the splash → main menu → loading transition.

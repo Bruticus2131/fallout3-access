@@ -99,9 +99,10 @@ void SilenceAction()
 
 void MenuBackAction()
 {
-    // Click the visible Back button via the game's own handler. If no menu
-    // exposes one right now, do nothing quietly.
-    game::ClickMenuBack();
+    // Click the visible Back/exit button via the game's own handler — but that
+    // (Menu::HandleClick) is a game call that opens/closes menus, so it must run
+    // on the main thread. Request it; the main-thread hook performs it.
+    ::f3a::poll::RequestMenuBack();
 }
 
 void DebugStartGame()
