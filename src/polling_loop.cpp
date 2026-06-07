@@ -373,6 +373,31 @@ void PollSpecialChange()
     }
 }
 
+// HP/AP/radiation readout, requested by the H hotkey (worker thread sets the
+// flag; we read the actor values here, on the main thread).
+std::atomic<bool> g_status_pending{ false };
+
+void AnnounceStatus()
+{
+    if (!g_status_pending.exchange(false)) return;
+    if (!IsGameplayActive()) return;
+    int hp  = (int)(game::GetPlayerAV(16) + 0.5f);   // Health (current)
+    int ap  = (int)(game::GetPlayerAV(12) + 0.5f);   // ActionPoints
+    int rad = (int)(game::GetPlayerAV(54) + 0.5f);   // RadLevel
+    char buf[128];
+    std::snprintf(buf, sizeof(buf),
+                  "Zdrowie %d, akcja %d, promieniowanie %d", hp, ap, rad);
+    tolk::Speak(buf, tolk::Priority::Ui, true);
+}
+
+// Runs every frame on the MAIN thread (via the DispatchMessageA hook), so it's
+// safe to call game functions like GetActorValue from here.
+void MainThreadWork()
+{
+    PollSpecialChange();
+    AnnounceStatus();
+}
+
 void Tick(float dt)
 {
     // Don't touch anything until the InterfaceManager has been created.
@@ -514,7 +539,9 @@ void Tick(float dt)
         modules::guide::Tick(dt);
         modules::worldscan::Tick(dt);
         PollQuestChange();
-        PollSpecialChange();
+        // NOTE: SPECIAL/status read game functions (GetActorValue) and so MUST
+        // run on the main thread — see MainThreadWork(), invoked by the
+        // DispatchMessageA hook, NOT here on the worker thread.
     }
 }
 
@@ -556,14 +583,21 @@ void Start()
     g_last_kbd_value.clear();
     g_last_kbd_container = nullptr;
     for (auto& c : g_state) c = {};
+    // Run SPECIAL/status reads (which call game functions) on the main thread.
+    game::SetMainThreadCallback(&MainThreadWork);
     g_thread = std::thread(&ThreadProc);
 }
 
 void Stop()
 {
     if (!g_running.exchange(false)) return;
+    game::SetMainThreadCallback(nullptr);
     if (g_thread.joinable()) g_thread.join();
 }
+
+// Called from any thread (the H hotkey); the actual actor-value reads happen on
+// the main thread in AnnounceStatus().
+void RequestStatus() { g_status_pending.store(true); }
 
 // --- Diagnostic dump --------------------------------------------------------
 //

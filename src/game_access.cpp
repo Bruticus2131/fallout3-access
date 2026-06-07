@@ -453,6 +453,10 @@ bool ActivateRefNative(const void* refr, uint32_t expectedRefID)
 std::atomic<const void*> g_pending_refr{ nullptr };
 std::atomic<uint32_t>    g_pending_id{ 0 };
 
+// Per-frame callback run on the MAIN thread (so it can call game code safely):
+// the poll loop registers its main-thread work here.
+std::atomic<void(*)()>   g_mainThreadCb{ nullptr };
+
 typedef LRESULT (WINAPI* DispatchMessageA_t)(const MSG*);
 DispatchMessageA_t g_realDispatchMessageA = nullptr;
 
@@ -461,6 +465,7 @@ LRESULT WINAPI DispatchMessageA_Hook(const MSG* msg)
     // Runs on the main (message-pump) thread — safe to call game code here.
     const void* refr = g_pending_refr.exchange(nullptr);
     if (refr) ActivateRefNative(refr, g_pending_id.load());
+    if (auto cb = g_mainThreadCb.load()) cb();
     return g_realDispatchMessageA ? g_realDispatchMessageA(msg)
                                   : ::DispatchMessageA(msg);
 }
@@ -514,6 +519,11 @@ void QueueActivate(const void* refr, uint32_t expectedRefID)
 {
     g_pending_id.store(expectedRefID);
     g_pending_refr.store(refr);
+}
+
+void SetMainThreadCallback(void (*cb)())
+{
+    g_mainThreadCb.store(cb);
 }
 
 bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID)

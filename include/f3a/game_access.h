@@ -147,6 +147,11 @@ void InstallMainThreadHook();
 // dispatch. expectedRefID guards against a stale pointer.
 void QueueActivate(const void* refr, uint32_t expectedRefID);
 
+// Register a callback run every frame ON THE MAIN THREAD (from the DispatchMessageA
+// hook), so it can safely call game functions like GetActorValue. Pass nullptr
+// to clear. The callback must be cheap.
+void SetMainThreadCallback(void (*cb)());
+
 // Aim the player's view: write yaw (rotZ) and pitch (rotX) directly, the way
 // SkyrimAccessMod's SetHeading/SetLooking aim the crosshair at a target. Angles
 // in radians; yaw 0 = +Y (north), clockwise. Used to point the crosshair at an
