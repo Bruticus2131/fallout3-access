@@ -1293,6 +1293,32 @@ std::string GetPipBoyVitals()
 
 std::optional<InventoryItem> GetSelectedInventoryItem() { return std::nullopt; }
 
+std::string GetSelectedItemInfo()
+{
+    // The selected item's stat card is an "*ItemInfoRect" box (Pip-Boy
+    // inventory IM_ItemInfoRect) holding CI_TitleText+CI_ValueText sub-panels:
+    // weight, value, damage/DR, condition, effects, ammo. Find the visible one
+    // under any open menu and read its pairs. FO3's container UI has no such
+    // card (only item names), so this is empty there.
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot) return {};
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
+    for (int s = 0; node && s < 4096; ++s) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) {
+            Tile* box = FindChildByName(cn->child, "ItemInfoRect", 8);
+            if (box && TileVisible(box)) {
+                std::string out;
+                CollectInfoPairs(box, out);
+                if (!out.empty()) return out;
+            }
+        }
+        node = node->next;
+    }
+    return {};
+}
+
 std::string GetActiveMessageText()
 {
     // The plain notification / yes-no / gender-choice popups are Message

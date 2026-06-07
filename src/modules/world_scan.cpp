@@ -336,6 +336,22 @@ void OnViewToggle()
                 tolk::Priority::Ui, true);
 }
 
+// Read the selected item's details (D) — in the Pip-Boy that's the stat card
+// (weight, value, damage/DR, condition, effects, ammo). Silent in normal play
+// so pressing D to strafe doesn't talk; only acts when a menu is open.
+void ItemInfo()
+{
+    if (!poll::IsGameplayActive()) return;
+    std::string info = game::GetSelectedItemInfo();
+    if (!info.empty()) { tolk::Speak(info, tolk::Priority::Ui, true); return; }
+    auto m = menu::ActiveMenu();
+    if (m == menu::Id::None || m == menu::Id::HUDMain) return;   // not in a menu
+    // No stat card here (e.g. container lists only names): re-read the name.
+    auto sel = game::GetKeyboardSelectionText();
+    if (sel && !sel->empty()) tolk::Speak(*sel, tolk::Priority::Ui, true);
+    else tolk::Speak("Brak opisu.", tolk::Priority::System, true);
+}
+
 // HP / AP / radiation readout (H). We only REQUEST it here (poll thread); the
 // actual GetActorValue reads happen on the main thread (calling game functions
 // off the main thread crashes), see polling_loop AnnounceStatus().
@@ -390,6 +406,7 @@ void Init()
     hotkeys::Bind(h.crosshair_info,  &CrosshairInfo);
     hotkeys::Bind(h.view_toggle,     &OnViewToggle);
     hotkeys::Bind(h.player_status,   &PlayerStatus);
+    hotkeys::Bind(h.item_info,       &ItemInfo);
     F3A_INFO("World scan module ready.");
 }
 void Shutdown() {}

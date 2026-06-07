@@ -41,6 +41,7 @@ int DikToVk(uint32_t dik)
     case 0x2E: return 'C';
     case 0x1A: return VK_OEM_4;       // [
     case 0x1B: return VK_OEM_6;       // ]
+    case 0x20: return 'D';            // D — item info in menus
     case 0x27: return VK_OEM_1;       // ;
     case 0x28: return VK_OEM_7;       // '
     case 0x2B: return VK_OEM_5;       // backslash

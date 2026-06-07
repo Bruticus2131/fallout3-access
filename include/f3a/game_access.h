@@ -224,6 +224,11 @@ std::string  GetActivePipBoySubTabName();
 std::string  GetPipBoyVitals();
 std::optional<InventoryItem> GetSelectedInventoryItem();
 
+// The selected item's stat card (weight, value, damage/DR, condition, effects,
+// ammo) read from the Pip-Boy's IM_ItemInfoRect. "" if no card is visible
+// (e.g. the container menu, which only lists names).
+std::string GetSelectedItemInfo();
+
 // ---- Dialog ----
 
 std::string                 GetCurrentDialogSpeaker();

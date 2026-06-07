@@ -34,6 +34,7 @@ struct Hotkeys {
     uint32_t activate_target  = 0xCF; // End — activate the selected object (no aiming)
     uint32_t crosshair_info   = 0x22; // G — say what's under the crosshair
     uint32_t view_toggle      = 0x21; // F — game's view key; we announce the result
+    uint32_t item_info        = 0x20; // D — read selected item's details (in menus)
 };
 
 struct Settings {
