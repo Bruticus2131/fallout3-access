@@ -34,6 +34,7 @@ namespace {
 bool        g_active = false;
 game::Vec3  g_target{};
 std::string g_name;
+bool        g_follow_quest = false;   // re-read the quest marker each tick
 
 // Navmesh path: beacon toward the current waypoint instead of straight at the
 // target, so the sound leads the player AROUND walls. The player still walks
@@ -106,6 +107,7 @@ void StartTo(const game::Vec3& pos, const std::string& name)
     g_target     = pos;
     g_name       = name;
     g_active     = true;
+    g_follow_quest = false;   // plain target; quests use StartToQuest()
     g_ping_timer = 0.0f;
     g_dist_timer = 0.0f;
     g_dir_timer  = 0.0f;
@@ -133,10 +135,30 @@ void StartTo(const game::Vec3& pos, const std::string& name)
                 tolk::Priority::System, true);
 }
 
+// Guide to the player's CURRENT quest marker, re-reading it every tick so the
+// beacon follows the live marker (and retargets if the objective advances mid-
+// walk) instead of a position cached at start. Returns false if there's no
+// quest target with a map marker. Announces the quest name so you know which
+// quest you're being led to.
+bool StartToQuest()
+{
+    auto qt = game::GetCurrentQuestTarget();
+    bool has_pos = qt.valid && (qt.position.x != 0.0f || qt.position.y != 0.0f ||
+                                qt.position.z != 0.0f);
+    if (!has_pos) return false;
+    std::string label = qt.name;
+    std::string q = game::GetTrackedQuestName();
+    if (!q.empty()) label = q + ": " + qt.name;
+    StartTo(qt.position, label);
+    g_follow_quest = true;
+    return true;
+}
+
 void Stop()
 {
     if (!g_active) return;
     g_active = false;
+    g_follow_quest = false;
     tolk::Speak("Naprowadzanie wyłączone.", tolk::Priority::System, true);
 }
 
@@ -144,6 +166,29 @@ void Tick(float dt)
 {
     if (!g_active) return;
     if (!GameplayAndHud()) { g_active = false; return; }
+
+    // Quest mode: re-read the live quest marker. If it moved (objective
+    // advanced, or it was hijacked/updated), retarget and rebuild the path so
+    // the beacon never leads to a stale marker.
+    if (g_follow_quest) {
+        auto qt = game::GetCurrentQuestTarget();
+        if (qt.valid && (qt.position.x != 0.0f || qt.position.y != 0.0f ||
+                         qt.position.z != 0.0f)) {
+            float mx = qt.position.x - g_target.x;
+            float my = qt.position.y - g_target.y;
+            float mz = qt.position.z - g_target.z;
+            if (mx * mx + my * my + mz * mz > 200.0f * 200.0f) {
+                g_target = qt.position;
+                auto pp0 = game::GetPlayerPosition();
+                g_waypoints.clear();
+                g_wp_index  = 0;
+                g_have_path = navmesh::BuildPath(pp0, g_target, g_waypoints) &&
+                              !g_waypoints.empty();
+                tolk::Speak("Cel zadania zmieniony.",
+                            tolk::Priority::Background, false);
+            }
+        }
+    }
 
     auto pp   = game::GetPlayerPosition();
     float yaw = game::GetPlayerYaw();

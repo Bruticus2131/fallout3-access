@@ -131,26 +131,42 @@ bool Available()
     return g_wave != nullptr;
 }
 
-void Ping(float azimuth_deg, float distance01)
+// A clean centred "on-target" blip (equal L/R) at `freq` Hz for `ms`, used by
+// the line-of-sight aim cue. Short fades top and tail so it doesn't click.
+void SynthCue(std::vector<short>& out, float freq, int ms)
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    if (!g_wave && !OpenLocked()) return;   // lazy open on first ping
+    const int n = kSampleRate * ms / 1000;
+    out.resize((size_t)n * kChannels);
+    const float w = 6.2831853f * freq / kSampleRate;
+    int fade = kSampleRate * 6 / 1000;            // 6 ms in/out fade
+    if (fade > n / 2) fade = n / 2;
+    for (int i = 0; i < n; ++i) {
+        float env = 1.0f;
+        if (i < fade)          env = (float)i / (fade ? fade : 1);
+        else if (i > n - fade) env = (float)(n - i) / (fade ? fade : 1);
+        if (env < 0.0f) env = 0.0f;
+        short s = (short)(0.5f * env * std::sin(w * i) * 30000.0f);
+        out[(size_t)i * 2 + 0] = s;
+        out[(size_t)i * 2 + 1] = s;
+    }
+}
 
-    // Find a free buffer (one that's never been used or is flagged done).
+// Queue `pcm` on a free waveOut buffer (caller holds g_mutex, device open).
+void EmitLocked(std::vector<short>& pcm)
+{
     Buf* buf = nullptr;
     for (int i = 0; i < kNumBuffers; ++i) {
         Buf& b = g_bufs[g_next];
         g_next = (g_next + 1) % kNumBuffers;
         if (!b.prepared || (b.hdr.dwFlags & WHDR_DONE)) { buf = &b; break; }
     }
-    if (!buf) return;  // all buffers still playing — skip this ping
+    if (!buf) return;  // all buffers still playing — skip
 
     if (buf->prepared) {
         waveOutUnprepareHeader(g_wave, &buf->hdr, sizeof(WAVEHDR));
         buf->prepared = false;
     }
-
-    Synthesize(buf->pcm, azimuth_deg, distance01);
+    buf->pcm.swap(pcm);
 
     buf->hdr = WAVEHDR{};
     buf->hdr.lpData         = reinterpret_cast<LPSTR>(buf->pcm.data());
@@ -162,6 +178,24 @@ void Ping(float azimuth_deg, float distance01)
     }
     buf->prepared = true;
     waveOutWrite(g_wave, &buf->hdr, sizeof(WAVEHDR));
+}
+
+void Ping(float azimuth_deg, float distance01)
+{
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_wave && !OpenLocked()) return;   // lazy open on first ping
+    std::vector<short> pcm;
+    Synthesize(pcm, azimuth_deg, distance01);
+    EmitLocked(pcm);
+}
+
+void Cue(int freqHz, int ms)
+{
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_wave && !OpenLocked()) return;
+    std::vector<short> pcm;
+    SynthCue(pcm, (float)freqHz, ms);
+    EmitLocked(pcm);
 }
 
 } // namespace f3a::audio

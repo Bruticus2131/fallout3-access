@@ -22,7 +22,12 @@ struct Hotkeys {
     uint32_t toggle_mod       = 0x58; // F12
     uint32_t dump_menu_tree   = 0x57; // F11 — diagnostic dump to log
     uint32_t debug_start_game = 0x44; // F10 — run [Debug] StartGameCommand
+    uint32_t intro_describe   = 0x42; // F8 — toggle intro audio-description track
     uint32_t menu_back        = 0x0E; // Backspace — click the menu Back button
+    uint32_t restore_defaults = 0x13; // R — restore default controls (controls page)
+    uint32_t skip_objective   = 0x0D; // = — skip current objective (advance quest stage)
+    uint32_t vats_body_part   = 0x30; // B — cycle targeted body part in VATS
+    uint32_t center_camera    = 0xC7; // Home — level the view (pitch to horizontal)
     // Object scanner + navigation. PgUp/PgDn cycle objects; Ctrl+PgUp/PgDn
     // cycle the category (matches the author's earlier mod).
     uint32_t scan_prev        = 0xC9; // Page Up — previous nearby object
@@ -35,6 +40,9 @@ struct Hotkeys {
     uint32_t crosshair_info   = 0x22; // G — say what's under the crosshair
     uint32_t view_toggle      = 0x21; // F — game's view key; we announce the result
     uint32_t item_info        = 0x20; // D — read selected item's details (in menus)
+    uint32_t aim_target       = 0x33; // , — aim view at the selected/nearest target
+    uint32_t attack_key       = 0x2F; // V (DIK) — weapon attack, used by the aim burst
+    uint32_t drop_item        = 0xD3; // Delete — drop the selected item (inventory)
 };
 
 struct Settings {
@@ -53,6 +61,32 @@ struct Settings {
     bool   verbose_pipboy     = false;
     bool   read_item_weight   = true;
     bool   read_item_value    = true;
+    bool   vats_tutorial      = true;  // speak the VATS how-to on first open
+    bool   intro_audio_desc   = true;  // auto-play the opening-cinematic audio description
+    // Line-of-sight aim cue: a synth blip when the crosshair is on an enemy
+    // (free-aim combat aid, no VATS). Pitch tunable to taste.
+    bool   target_cue         = true;
+    int    target_cue_hz      = 880;   // blip frequency in Hz
+    // Speak the NAME of whatever the camera is pointing at (not just the
+    // activation verb), and optionally how far it is. Turn the distance off if
+    // the extra words get tiring in crowded areas.
+    bool   crosshair_names    = true;
+    bool   crosshair_distance = true;
+    // Turn toward targets with the engine's own actor-facing routine (the one
+    // Command Extender's FaceObject uses) instead of writing angle fields.
+    bool   native_face        = true;
+    // Walk by driving the engine's own movement update instead of holding W/A/S/D.
+    // Precise speed, smooth turns that slow down instead of skidding. 0 falls
+    // back to the key-holding walker.
+    bool   native_walk        = true;
+    int    autowalk_speed     = 160;   // game units per second at run speed
+    // Synthesized footstep clicks while auto-walking (the engine's own footstep
+    // sounds ride on the walk animation, which driving the mover skips).
+    bool   footstep_cue       = true;
+    // Play the game's own walk/run animation while auto-walking. This also
+    // restores the game's real footstep sounds, which ride on that animation;
+    // the synthesized clicks above are only used when this is off.
+    bool   walk_animation     = true;
     int    barter_warn_loss_caps = 10; // warn when transaction loses player >=N caps
     int    nearby_scan_radius   = 1200; // game units (~ 1 meter = 64 units)
     int    nearby_scan_max_items = 8;

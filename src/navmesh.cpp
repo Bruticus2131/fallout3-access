@@ -73,20 +73,16 @@ bool PointInTri2D(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c)
     return !(neg && pos);
 }
 
-// Read every triangle of every navmesh in the player's cell into `tris`.
-bool GatherCellTriangles(std::vector<Tri>& tris)
+// Read every triangle of every navmesh in ONE cell, appending to `tris`.
+void GatherMeshFromCell(UInt8* cell, std::vector<Tri>& tris)
 {
-    auto* p = fose_rt::Player();
-    if (!p) return false;
-    auto* cell = reinterpret_cast<UInt8*>(p->parentCell);
-    if (!Readable(cell, 0x64)) return false;
-
-    UInt8* holder = *reinterpret_cast<UInt8**>(cell + 0x60);
-    if (!Readable(holder, 0x0C)) return false;
+    if (!Readable(cell, 0x64)) return;
+    UInt8* holder = *reinterpret_cast<UInt8**>(cell + 0x60);   // NavMeshArray
+    if (!Readable(holder, 0x0C)) return;
     auto** meshes = *reinterpret_cast<UInt8***>(holder + 0x04);
     UInt32 meshCount = *reinterpret_cast<UInt32*>(holder + 0x08);
-    if (!meshes || meshCount == 0 || meshCount > 256) return false;
-    if (!Readable(meshes, meshCount * sizeof(void*))) return false;
+    if (!meshes || meshCount == 0 || meshCount > 256) return;
+    if (!Readable(meshes, meshCount * sizeof(void*))) return;
 
     for (UInt32 m = 0; m < meshCount; ++m) {
         UInt8* nm = meshes[m];
@@ -101,7 +97,7 @@ bool GatherCellTriangles(std::vector<Tri>& tris)
             continue;
 
         for (UInt32 t = 0; t < tcount; ++t) {
-            if ((int)tris.size() >= kMaxTriangles) return true;
+            if ((int)tris.size() >= kMaxTriangles) return;
             UInt16* tri = reinterpret_cast<UInt16*>(tdata + t * 16);
             Tri out;
             bool ok = true;
@@ -120,6 +116,59 @@ bool GatherCellTriangles(std::vector<Tri>& tris)
             tris.push_back(out);
         }
     }
+}
+
+// Read triangles from the player's cell AND, in exteriors, the neighbouring
+// loaded cells — so a path can cross cell boundaries. The triangle graph is
+// built by shared quantized vertices, so boundary vertices (identical world
+// coords on both sides) stitch adjacent cells together automatically.
+bool GatherCellTriangles(std::vector<Tri>& tris)
+{
+    auto* p = fose_rt::Player();
+    if (!p) return false;
+    UInt8* pcell = reinterpret_cast<UInt8*>(p->parentCell);
+    if (!Readable(pcell, 0xC4)) return false;
+
+    GatherMeshFromCell(pcell, tris);
+
+    // worldSpace == null -> interior (single cell; nothing to stitch).
+    UInt8* ws = *reinterpret_cast<UInt8**>(pcell + 0xC0);        // worldSpace
+    UInt8* pcoords = *reinterpret_cast<UInt8**>(pcell + 0x44);   // coords
+    if (Readable(ws, 0x34) && Readable(pcoords, 8)) {
+        int px = *reinterpret_cast<int*>(pcoords);
+        int py = *reinterpret_cast<int*>(pcoords + 4);
+        UInt8* map = *reinterpret_cast<UInt8**>(ws + 0x30);      // cellMap
+        if (Readable(map, 0x10)) {
+            UInt32 nb = *reinterpret_cast<UInt32*>(map + 0x04);  // m_numBuckets
+            UInt8** buckets = *reinterpret_cast<UInt8***>(map + 0x08);
+            if (nb > 0 && nb < 1000000 &&
+                Readable(buckets, nb * sizeof(void*))) {
+                int scanned = 0;
+                for (UInt32 b = 0; b < nb && scanned < 64 &&
+                                   (int)tris.size() < kMaxTriangles; ++b) {
+                    UInt8* entry = buckets[b];
+                    for (int guard = 0; entry && guard < 8192; ++guard) {
+                        if (!Readable(entry, 0x0C)) break;
+                        UInt8* c = *reinterpret_cast<UInt8**>(entry + 8); // data
+                        entry = *reinterpret_cast<UInt8**>(entry + 0);    // next
+                        if (c == pcell || !Readable(c, 0x64)) continue;
+                        UInt8* cc = *reinterpret_cast<UInt8**>(c + 0x44);
+                        if (!Readable(cc, 8)) continue;
+                        int cx = *reinterpret_cast<int*>(cc);
+                        int cy = *reinterpret_cast<int*>(cc + 4);
+                        int ddx = cx - px, ddy = cy - py;
+                        if (ddx < 0) ddx = -ddx;
+                        if (ddy < 0) ddy = -ddy;
+                        if (ddx > 2 || ddy > 2) continue;   // within 5x5 grid
+                        GatherMeshFromCell(c, tris);
+                        ++scanned;
+                    }
+                }
+                F3A_INFO("navmesh: gathered %d cells around (%d,%d)",
+                         scanned + 1, px, py);
+            }
+        }
+    }
     return !tris.empty();
 }
 
@@ -132,8 +181,23 @@ uint64_t EdgeKey(uint64_t a, uint64_t b)
 // Locate the triangle under a world point: 2D containment, tie-broken by the
 // triangle whose average height is closest to the point's Z. Falls back to the
 // nearest centroid if the point isn't strictly inside any triangle.
-int LocateTri(const std::vector<Tri>& tris, const Vec3& p)
+// Which triangle is this point on? `exact` reports whether the point genuinely
+// lies inside one, as opposed to us picking the nearest as an approximation.
+//
+// That distinction matters more than it looks. The nearest-triangle fallback
+// used to be UNBOUNDED, so a quest marker kilometres away — in a cell the game
+// has not even streamed in — got matched to whatever triangle happened to sit at
+// the edge of the loaded area. A* then produced a confident-looking path to that
+// edge, and BuildPath appended the real target on the end, so the walk marched
+// to the boundary and then set off in a straight line toward coordinates it had
+// no geometry for. Near targets worked, far ones went nowhere sensible.
+//
+// So the fallback is now bounded: beyond `maxFallback` the answer is "not on
+// this navmesh", which is the honest one.
+int LocateTri(const std::vector<Tri>& tris, const Vec3& p, float maxFallback,
+              bool* exact = nullptr)
 {
+    if (exact) *exact = false;
     int best = -1;
     float bestZ = 1e30f;
     for (int i = 0; i < (int)tris.size(); ++i) {
@@ -144,17 +208,24 @@ int LocateTri(const std::vector<Tri>& tris, const Vec3& p)
             if (dz < bestZ) { bestZ = dz; best = i; }
         }
     }
-    if (best >= 0) return best;
+    if (best >= 0) { if (exact) *exact = true; return best; }
 
     float bestD = 1e30f;
     for (int i = 0; i < (int)tris.size(); ++i) {
         float d = Dist(tris[i].centroid, p);
         if (d < bestD) { bestD = d; best = i; }
     }
-    return best;
+    return (bestD <= maxFallback) ? best : -1;
 }
 
 } // namespace
+
+// How far off the navmesh an endpoint may sit and still be matched to it.
+// The player end is lenient (stairs, furniture, doorways put you just off the
+// mesh constantly). The goal end is strict, because a loose match there is how a
+// distant, unstreamed target gets mistaken for one right in front of us.
+constexpr float kStartFallbackDist = 2000.0f;
+constexpr float kGoalFallbackDist  = 800.0f;
 
 bool BuildPath(const Vec3& from, const Vec3& to,
                std::vector<Vec3>& out_waypoints)
@@ -185,10 +256,18 @@ bool BuildPath(const Vec3& from, const Vec3& to,
             }
     }
 
-    int start = LocateTri(tris, from);
-    int goal  = LocateTri(tris, to);
+    // The player is always standing on or beside walkable ground, so a generous
+    // bound is fine for the start. The goal is the one that must be judged
+    // strictly — see LocateTri.
+    bool goal_exact = false;
+    int start = LocateTri(tris, from, kStartFallbackDist);
+    int goal  = LocateTri(tris, to,   kGoalFallbackDist, &goal_exact);
     if (start < 0 || goal < 0) return false;
-    if (start == goal) { out_waypoints.push_back(to); return true; }
+    if (start == goal) {
+        if (goal_exact) out_waypoints.push_back(to);
+        else            out_waypoints.push_back(tris[goal].centroid);
+        return true;
+    }
 
     // A* over triangle centroids.
     const int N = (int)tris.size();
@@ -244,7 +323,18 @@ bool BuildPath(const Vec3& from, const Vec3& to,
             out_waypoints.push_back(B.centroid);   // fallback
         }
     }
-    out_waypoints.push_back(to);
+    // Only finish AT the target when the target is really on the mesh. Otherwise
+    // the path ends at the closest walkable ground we found, and the caller walks
+    // that far and re-paths from there — by then the game has streamed in more
+    // cells, so the next path reaches further. Appending an off-mesh target here
+    // is what produced the "walk to the edge, then head off into nothing" bug.
+    if (goal_exact) {
+        out_waypoints.push_back(to);
+    } else {
+        out_waypoints.push_back(tris[goal].centroid);
+        F3A_INFO("navmesh: target is off-mesh; path ends at the nearest reachable "
+                 "ground (re-path from there).");
+    }
 
     F3A_INFO("navmesh: path with %d waypoints over %d triangles.",
              (int)out_waypoints.size(), N);

@@ -18,6 +18,10 @@ void InitAll()
     if (c.enable_worldscan) guide::Init();
     container::Init();
     message::Init();
+    intro::Init();
+    hacking::Init();
+    mapnav::Init();
+    quantity::Init();
     F3A_INFO("Modules initialized.");
 }
 
@@ -34,6 +38,10 @@ void ShutdownAll()
     guide::Shutdown();
     container::Shutdown();
     message::Shutdown();
+    intro::Shutdown();
+    hacking::Shutdown();
+    mapnav::Shutdown();
+    quantity::Shutdown();
 }
 
 } // namespace f3a::modules

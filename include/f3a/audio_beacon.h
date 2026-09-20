@@ -21,4 +21,8 @@ bool Available();
 
 void Ping(float azimuth_deg, float distance01);
 
+// A clean centred "on-target" blip at `freqHz` for `ms` ms — the line-of-sight
+// aim cue (played when the crosshair is on an enemy). Distinct from Ping.
+void Cue(int freqHz, int ms);
+
 } // namespace f3a::audio

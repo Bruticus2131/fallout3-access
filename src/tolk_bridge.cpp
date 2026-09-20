@@ -51,6 +51,10 @@ TolkAPI            g_tolk;
 ISpVoice*  g_sapi;          // SAPI fallback
 std::mutex         g_mutex;
 std::atomic<int>   g_current_prio{ -1 };
+// When the last accepted utterance was issued. g_current_prio is only meaningful
+// while that utterance is still playing; we use this (with IsSpeaking) to clear
+// a stale priority once the reader goes idle. Touched only under g_mutex.
+std::chrono::steady_clock::time_point g_last_speak_at{};
 std::wstring       g_reader_name;   // cached detected reader
 std::string        g_reader_name_a;
 std::string        g_last_text;     // most recent utterance (for RepeatLast)
@@ -189,14 +193,24 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
     // Remember the last thing we actually spoke so RepeatLast can replay it.
     g_last_text.assign(text);
 
+    // g_current_prio holds the priority of the last utterance, but it's only
+    // meaningful WHILE that utterance is still playing. It is never cleared on
+    // completion, so without this a single System/Ui line would permanently
+    // suppress every later Background line (e.g. the world-scan list read on X/C
+    // went silent after the first quest/menu announce). Clear it once the reader
+    // is idle — by IsSpeaking when available, plus a wall-clock fallback for the
+    // SAPI path / a flaky IsSpeaking.
+    auto now = std::chrono::steady_clock::now();
+    bool idle = (g_tolk.IsSpeaking && !g_tolk.IsSpeaking());
+    if (now - g_last_speak_at > std::chrono::milliseconds(2500)) idle = true;
+    if (idle) g_current_prio.store(-1);
+
     const int current = g_current_prio.load();
-    if (!interrupt && current >= static_cast<int>(prio)) {
-        // Lower-or-equal priority utterance is in flight; drop us silently.
-        // (Higher priority always interrupts.)
-        if (current > static_cast<int>(prio)) return;
-    }
+    // Drop only if a STRICTLY higher-priority utterance is still in flight.
+    if (!interrupt && current > static_cast<int>(prio)) return;
 
     g_current_prio.store(static_cast<int>(prio));
+    g_last_speak_at = now;
 
     std::wstring w = Utf8ToWide(text);
 

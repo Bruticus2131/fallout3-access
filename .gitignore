@@ -16,3 +16,11 @@ SkuCustomBeaconsAdditional/
 SkyrimAccessMod/
 Better Autowalk*
 *.log
+
+# Reference material kept locally only — not ours to redistribute here.
+# FalloutNVAccess is the FNV accessibility mod's own repo (MIT), read for
+# technique; it carries its own .git and must not be committed into this one.
+FalloutNVAccess/
+FalloutNVAccess.7z
+friend-idea.txt
+.claude/

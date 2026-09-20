@@ -73,6 +73,7 @@ set(F3A_SOURCES
     src/hotkeys.cpp
     src/menu_dispatch.cpp
     src/polling_loop.cpp
+    src/player_mover.cpp
     src/engine_hooks.cpp
     src/game_access.cpp
     src/navmesh.cpp
@@ -83,6 +84,10 @@ set(F3A_SOURCES
     src/modules/vats.cpp
     src/modules/container.cpp
     src/modules/message.cpp
+    src/modules/intro.cpp
+    src/modules/hacking.cpp
+    src/modules/mapnav.cpp
+    src/modules/quantity.cpp
     src/modules/nav_assist.cpp
     src/modules/world_scan.cpp
     src/modules/autowalk.cpp

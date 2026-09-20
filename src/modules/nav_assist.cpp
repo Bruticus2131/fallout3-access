@@ -62,11 +62,16 @@ void SpeakQuestTarget()
                     tolk::Priority::System, true);
         return;
     }
+    // Prefix the quest name so it's clear WHICH quest this marker belongs to
+    // (the tracked-objective slot can be taken over by a different quest).
+    std::string qname = game::GetTrackedQuestName();
+    std::string label = qname.empty() ? qt.name : (qname + ": " + qt.name);
+
     // No marker position decoded yet → read the objective text only.
     bool has_pos = qt.position.x != 0.0f || qt.position.y != 0.0f ||
                    qt.position.z != 0.0f;
     if (!has_pos) {
-        tolk::Speak("Zadanie: " + qt.name, tolk::Priority::System, true);
+        tolk::Speak("Zadanie: " + label, tolk::Priority::System, true);
         return;
     }
     auto pos = game::GetPlayerPosition();
@@ -76,7 +81,7 @@ void SpeakQuestTarget()
     std::string dir  = strings::ClockDirection(br.relative_yaw);
     tolk::Speak(
         strings::RenderArgs(strings::Key::QuestTargetFmt,
-                            qt.name.c_str(), dist.c_str(), dir.c_str()),
+                            label.c_str(), dist.c_str(), dir.c_str()),
         tolk::Priority::System, true);
 }
 
@@ -96,8 +101,19 @@ void GuideToQuest()
                     tolk::Priority::System, true);
         return;
     }
+    // Marker in another worldspace (a wasteland location while we're in Megaton,
+    // etc.): its coordinates are in a different frame, so a beacon toward them
+    // would lead nowhere. Teleport is cell-aware; send the player there instead.
+    if (qt.refr && !game::TargetSharesPlayerSpace(qt.refr)) {
+        tolk::Speak("Cel zadania jest w innej lokacji — nie doprowadzę tam "
+                    "pieszo stąd. Użyj teleportu (Alt+Home).",
+                    tolk::Priority::System, true);
+        return;
+    }
     modules::autowalk::Stop();
-    modules::guide::StartTo(qt.position, qt.name);
+    // Follow the LIVE quest marker (re-read each tick) so the beacon retargets
+    // if the objective advances mid-walk, instead of a position cached at start.
+    modules::guide::StartToQuest();
 }
 
 void SpeakCompass()

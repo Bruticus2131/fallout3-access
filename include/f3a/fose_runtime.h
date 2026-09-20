@@ -39,17 +39,18 @@ struct RuntimeAddrs {
     UInt32 gameSettingColl;  // GameSettingCollection**
     UInt32 dataHandler;      // DataHandler** (has questList)
     UInt32 refrActivate;     // TESObjectREFR::Activate (__thiscall) — code addr
+    UInt32 questSetStage;    // TESQuest::SetStage(stage) (__thiscall) — code addr
 };
 
 inline constexpr RuntimeAddrs kAddrs_1_7 = {   // 0x01070030 standard
     0x0107A104, 0x01075B24, 0x0106A7BC, 0x011793DB,
     0x01179578, 0x0116D6F4, 0x010701A8, 0x0106CDCC,
-    0x004EE000,
+    0x004EE000, 0x0055C9C0,
 };
 inline constexpr RuntimeAddrs kAddrs_1_7ng = { // 0x01070031 no-gore
     0x01077104, 0x01072B24, 0x010677BC, 0x011763DB,
     0x01176578, 0x0116A6F4, 0x0106D1A8, 0x01069DCC,
-    0x004EE000,   // best guess; a prologue-bytes check guards the call
+    0x004EE000, 0x0055C9C0,   // best guesses; a prologue-bytes check guards each call
 };
 
 // Active table; defaults to standard 1.7.0.3 until SelectRuntime() runs.
@@ -70,6 +71,15 @@ inline PlayerCharacter* Player()
 inline InterfaceManager* IFM()
 {
     auto pp = reinterpret_cast<InterfaceManager**>(g_addrs->interfaceManager);
+    return pp ? *pp : nullptr;
+}
+
+// DataHandler singleton base (holds questList @ +0xD4). Returned as a raw byte
+// pointer so callers walk fields by documented offset without pulling in the
+// FOSE DataHandler type (whose methods resolve via DEFINE_MEMBER_FN).
+inline UInt8* DataHandlerBase()
+{
+    auto pp = reinterpret_cast<UInt8**>(g_addrs->dataHandler);
     return pp ? *pp : nullptr;
 }
 

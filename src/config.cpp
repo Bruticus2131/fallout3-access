@@ -77,6 +77,17 @@ bool Load(const wchar_t* ini_path)
     s.verbose_pipboy      = ReadBool(L"Voice", L"VerbosePipBoy",   false, ini_path);
     s.read_item_weight    = ReadBool(L"Voice", L"ReadItemWeight",  true, ini_path);
     s.read_item_value     = ReadBool(L"Voice", L"ReadItemValue",   true, ini_path);
+    s.vats_tutorial       = ReadBool(L"Voice", L"VatsTutorial",    true, ini_path);
+    s.intro_audio_desc    = ReadBool(L"Voice", L"IntroAudioDesc",  true, ini_path);
+    s.target_cue          = ReadBool(L"Voice", L"TargetCue",       true, ini_path);
+    s.target_cue_hz       = ReadInt (L"Voice", L"TargetCueHz",     880,  ini_path);
+    s.crosshair_names     = ReadBool(L"Voice", L"CrosshairNames",   true, ini_path);
+    s.crosshair_distance  = ReadBool(L"Voice", L"CrosshairDistance",true, ini_path);
+    s.native_face         = ReadBool(L"Voice", L"NativeFace",       true, ini_path);
+    s.native_walk         = ReadBool(L"Voice", L"NativeWalk",       true, ini_path);
+    s.autowalk_speed      = ReadInt (L"Voice", L"AutoWalkSpeed",    160,  ini_path);
+    s.footstep_cue        = ReadBool(L"Voice", L"FootstepCue",       true, ini_path);
+    s.walk_animation      = ReadBool(L"Voice", L"WalkAnimation",     true, ini_path);
     s.barter_warn_loss_caps = ReadInt (L"Voice", L"BarterWarnLossCaps", 10, ini_path);
     s.nearby_scan_radius    = ReadInt (L"Voice", L"NearbyScanRadius",   1200, ini_path);
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
@@ -104,7 +115,12 @@ bool Load(const wchar_t* ini_path)
     h.toggle_mod       = ReadKey(L"Hotkeys", L"ToggleMod",       h.toggle_mod,       ini_path);
     h.dump_menu_tree   = ReadKey(L"Hotkeys", L"DumpMenuTree",    h.dump_menu_tree,   ini_path);
     h.debug_start_game = ReadKey(L"Hotkeys", L"DebugStartGame",  h.debug_start_game, ini_path);
+    h.intro_describe   = ReadKey(L"Hotkeys", L"IntroDescribe",   h.intro_describe,   ini_path);
     h.menu_back        = ReadKey(L"Hotkeys", L"MenuBack",        h.menu_back,        ini_path);
+    h.restore_defaults = ReadKey(L"Hotkeys", L"RestoreDefaults", h.restore_defaults, ini_path);
+    h.skip_objective   = ReadKey(L"Hotkeys", L"SkipObjective",   h.skip_objective,   ini_path);
+    h.vats_body_part   = ReadKey(L"Hotkeys", L"VatsBodyPart",    h.vats_body_part,   ini_path);
+    h.center_camera    = ReadKey(L"Hotkeys", L"CenterCamera",    h.center_camera,    ini_path);
     h.scan_next        = ReadKey(L"Hotkeys", L"ScanNext",        h.scan_next,        ini_path);
     h.scan_prev        = ReadKey(L"Hotkeys", L"ScanPrev",        h.scan_prev,        ini_path);
     h.turn_to          = ReadKey(L"Hotkeys", L"TurnTo",          h.turn_to,          ini_path);
@@ -115,6 +131,9 @@ bool Load(const wchar_t* ini_path)
     h.crosshair_info   = ReadKey(L"Hotkeys", L"CrosshairInfo",   h.crosshair_info,   ini_path);
     h.view_toggle      = ReadKey(L"Hotkeys", L"ViewToggle",      h.view_toggle,      ini_path);
     h.item_info        = ReadKey(L"Hotkeys", L"ItemInfo",        h.item_info,        ini_path);
+    h.aim_target       = ReadKey(L"Hotkeys", L"AimTarget",       h.aim_target,       ini_path);
+    h.attack_key       = ReadKey(L"Hotkeys", L"AttackKey",       h.attack_key,       ini_path);
+    h.drop_item        = ReadKey(L"Hotkeys", L"DropItem",        h.drop_item,        ini_path);
 
     F3A_INFO("Config loaded. Language='%s'.", s.language.c_str());
     F3A_INFO("Hotkeys: toggle=0x%02X silence=0x%02X dump=0x%02X",

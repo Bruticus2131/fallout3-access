@@ -55,6 +55,44 @@ void OnTick(float)
     TryAnnounce();
 }
 
+// ---- Text-entry popup (character name, etc.) -------------------------------
+//
+// TextEditMenu: announce the prompt on open, then echo what's typed. We poll the
+// `textedit_text` tile each tick (it's the only signal — the game owns the F/key
+// input) and speak the delta: appended chars as they come (queued so fast typing
+// isn't cut), the whole field on backspace/edit. Lets a blind player hear the
+// name they're entering.
+std::string g_te_last;
+bool        g_te_open = false;
+
+void OnTextEditOpen()
+{
+    g_te_open = true;
+    auto txt  = game::GetTextEditText();
+    g_te_last = txt ? *txt : std::string();
+    // Minimal: no "enter name" prompt (the user doesn't want it). Just read any
+    // existing text; an empty field opens silently and the letter-echo takes over.
+    if (!g_te_last.empty())
+        tolk::Speak(g_te_last, tolk::Priority::Ui, true);
+}
+
+void OnTextEditClose() { g_te_open = false; g_te_last.clear(); }
+
+void OnTextEditTick(float)
+{
+    if (!g_te_open) return;
+    auto txt = game::GetTextEditText();
+    if (!txt) return;                       // no reliable read this tick
+    const std::string cur = *txt;
+    if (cur == g_te_last) return;           // unchanged (also swallows caret blink)
+    g_te_last = cur;
+    // Read the WHOLE text so far on every change → "z, zu, zuz, zuzi, zuzia".
+    // interrupt=true so the latest state wins (no piled-up fragments); an empty
+    // field stays silent (no "puste" spam).
+    if (!cur.empty())
+        tolk::Speak(cur, tolk::Priority::Ui, true);
+}
+
 } // namespace
 
 void Init()
@@ -66,6 +104,10 @@ void Init()
                         tolk::Priority::System, true);
         });
     menu::RegisterMenu(menu::Id::Book, &OnOpen, &OnClose, &OnTick);
+    menu::RegisterMenu(menu::Id::TextEdit, &OnTextEditOpen, &OnTextEditClose,
+                       &OnTextEditTick);
+    // Terminal text is polled directly in polling_loop (PollTerminal), not via
+    // menu dispatch — the terminal isn't reliably detected as a menu "open".
     F3A_INFO("Message module ready.");
 }
 void Shutdown() {}

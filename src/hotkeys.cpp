@@ -29,7 +29,10 @@ int DikToVk(uint32_t dik)
     // translate correctly — it returns a bogus non-zero VK (numpad aliases),
     // which used to shadow the fallback and silently bind the wrong key.
     switch (dik) {
+    case 0x0D: return VK_OEM_PLUS;    // = / +  (skip objective)
     case 0x10: return 'Q';
+    case 0x30: return 'B';            // B — cycle VATS body part
+    case 0x13: return 'R';
     case 0x14: return 'T';
     case 0x21: return 'F';
     case 0x22: return 'G';
@@ -106,6 +109,30 @@ void MenuBackAction()
     ::f3a::poll::RequestMenuBack();
 }
 
+void RestoreDefaultsAction()
+{
+    // R = click "Restore Defaults" on the controls page. The actual click is a
+    // game call (main thread); ClickRestoreDefaults no-ops unless that page is
+    // open, so pressing R during gameplay (where it's the reload key) is safe.
+    ::f3a::poll::RequestRestoreDefaults();
+}
+
+void SkipObjectiveAction()
+{
+    // '=' = skip the current (inaccessible) objective by advancing the tracked
+    // quest one stage. Only meaningful in gameplay; the SetStage call runs on
+    // the main thread.
+    if (!::f3a::poll::IsGameplayActive()) return;
+    ::f3a::poll::RequestSkipObjective();
+}
+
+void VatsBodyPartAction()
+{
+    // B = cycle the targeted body part in VATS. ClickVatsBodyPart no-ops unless
+    // VATS is open, so pressing B elsewhere is harmless.
+    ::f3a::poll::RequestVatsBodyPart();
+}
+
 void DebugStartGame()
 {
     const auto& cmd = config::Get().debug_start_command;
@@ -167,6 +194,15 @@ void Rebind()
     // Menu navigation: Backspace = go back one menu level.
     Bind(h.menu_back, &MenuBackAction);
 
+    // R = restore default controls (only acts on the controls settings page).
+    Bind(h.restore_defaults, &RestoreDefaultsAction);
+
+    // '=' = skip the current objective (advance the tracked quest's stage).
+    Bind(h.skip_objective, &SkipObjectiveAction);
+
+    // B = cycle the targeted body part in VATS.
+    Bind(h.vats_body_part, &VatsBodyPartAction);
+
     // The rest are wired by their owning modules via additional Bind() calls
     // from world_scan / nav_assist / pipboy etc.
     F3A_INFO("Hotkeys: %u bindings active.", (unsigned)g_bindings.size());
@@ -220,6 +256,14 @@ bool CtrlActive()
     return (GetAsyncKeyState(VK_CONTROL)  & 0x8000) ||
            (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
            (GetAsyncKeyState(VK_RCONTROL) & 0x8000);
+}
+
+// Alt held — the modifier for Alt+Home = teleport (vs plain Home = aim).
+bool AltActive()
+{
+    return (GetAsyncKeyState(VK_MENU)  & 0x8000) ||
+           (GetAsyncKeyState(VK_LMENU) & 0x8000) ||
+           (GetAsyncKeyState(VK_RMENU) & 0x8000);
 }
 
 } // namespace f3a::hotkeys

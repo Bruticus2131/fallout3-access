@@ -177,15 +177,14 @@ std::string ClockDirection(float relative_yaw_deg)
 
 std::string FormatDistance(float game_units)
 {
-    float meters = game_units / UNITS_PER_METER;
+    // Report in raw GAME UNITS (not meters) — the native FO3 distance unit the
+    // player thinks in. ~100 units ≈ 1.5 m, so under that = "right next to you".
     char buf[48];
-    if (meters < 1.5f) {
+    if (game_units < 100.0f) {
         std::snprintf(buf, sizeof(buf), IsPolish() ? "tuż obok" : "right next to you");
-    } else if (meters < 100.0f) {
-        std::snprintf(buf, sizeof(buf), IsPolish() ? "%d metrów" : "%d meters",
-                      (int)std::round(meters));
     } else {
-        std::snprintf(buf, sizeof(buf), IsPolish() ? "ponad sto metrów" : "over a hundred meters");
+        std::snprintf(buf, sizeof(buf), IsPolish() ? "%d jednostek" : "%d units",
+                      (int)std::round(game_units));
     }
     return buf;
 }

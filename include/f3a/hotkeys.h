@@ -24,5 +24,6 @@ void Rebind();
 // makes modifier+key combos reliable despite the ~80 ms poll granularity.
 bool ShiftActive();
 bool CtrlActive();
+bool AltActive();
 
 } // namespace f3a::hotkeys
