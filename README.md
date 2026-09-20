@@ -8,23 +8,37 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 
 **Working today**
 
-- Menu reading with full keyboard navigation:
-  - main menu, pause menu, save & load menus,
-  - settings menus — volume sliders read their value ("Music, 25"; left/right reads just the new value), difficulty stepper and On/Off toggles read their current choice,
-  - confirmation dialogs — the question is read first, then the focused Yes/No button,
-- Pip-Boy reading (experimental),
-- **Backspace** goes back one menu level (presses the game's own Back button),
-- mouse hover reads the item under the cursor, keyboard focus is tracked independently,
-- localized game text is handled code-page-aware (Polish cp1250 supported out of the box),
-- repeat-last-phrase and stop-speech hotkeys,
-- works with both retail editions of patch 1.7.0.3 (standard and no-gore) — detected automatically.
+- **Menu reading with full keyboard navigation** — main menu, pause, save & load,
+  settings (sliders read their value, toggles and steppers read their choice),
+  confirmation dialogs (question first, then the focused button).
+- **Pip-Boy** — stats, items, data; quest list with objectives.
+- **Dialogue, barter, containers and the message boxes** the game throws at you.
+- **Inventory** — item stat cards on **D**, worn items announced as equipped,
+  **Delete** drops the selected item, and the "how many?" stack prompt is read
+  out with the game's own confirm/cancel keys.
+- **World navigation** — object scanner, turn-to-object, audio beacon guidance
+  and auto-walk that routes around walls using the game's navmesh, including
+  through load doors into other cells.
+- **World map** — browse every known location with distance and bearing, and
+  fast-travel there through the game's own travel path.
+- **Combat** — VATS is fully keyboard-driven (switch target, cycle body part,
+  hear hit chance); outside VATS an audio cue tells you when an enemy is under
+  the crosshair.
+- **Terminals and the hacking minigame** — screen text is read as it types out,
+  candidate passwords are listed and spelled.
+- **Lockpicking** — an audio cue guides the pick to the sweet spot.
+- **Player status** on **H**, location on **L**, compass on **J**.
+- Localized game text handled code-page-aware (Polish cp1250 out of the box).
+- Works with both retail editions of patch 1.7.0.3 (standard and no-gore),
+  detected automatically.
 
-**Planned / in progress**
+**Rough edges / in progress**
 
-- World navigation: object scanner, turn-to-object, auto-walk,
-- dialogue reading, barter, lockpicking feedback, VATS combat,
-- player status readout (HP / AP / rads / caps),
-- character creation flow.
+- Character creation (the RaceSex menu) is not yet guided.
+- Long-distance travel on foot is best combined with map fast travel; walking
+  across the wasteland in one go is not reliable yet.
+- Auto-walk can still get wedged on difficult terrain; it tells you when it
+  gives up rather than walking into a wall silently.
 
 ## Requirements
 
@@ -77,14 +91,16 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 
 ### In the game world
 
-| Key | Action | Status |
-| --- | --- | --- |
-| L | where am I — location and facing direction | works |
-| J | compass direction | works |
-| X | read nearby objects | works |
-| C | read nearby hostiles | works |
-| H | player status — health, action points, radiation | works |
-| K | current quest target direction | work in progress |
+| Key | Action |
+| --- | --- |
+| L | where am I — location and facing direction |
+| J | compass direction |
+| X | read nearby objects |
+| C | read nearby hostiles |
+| H | player status — health, action points, radiation |
+| K | current quest target: name, direction and distance |
+| F | the game's view-toggle key; the mod announces first or third person |
+| F8 | opening-cinematic audio description (plays by itself; F8 stops it) |
 
 (Defaults deliberately avoid keys Fallout 3 uses itself.)
 
@@ -97,22 +113,73 @@ Explore and travel without sight:
 | Page Up / Page Down | cycle nearby objects (reads "name, distance, clock direction, i of N") |
 | Ctrl + Page Up / Page Down | change scanner category: all / NPCs / items / doors / containers / quests |
 | `'` (apostrophe) | turn to face the selected object |
-| `;` (semicolon) | **beacon guidance**: you walk (W), the mod plays a positional sonar ping at the target — panned left/right by direction, higher-pitched when it's ahead and lower when behind, faster as you close in. Turn until the ping is centred and high, then walk toward it. Distance is called out and you're warned if the target is on another floor. Press again to stop. |
-| `\` (backslash) | **auto-walk**: the mod walks you to the target — it turns you toward it with mouse-look and holds forward, tracing a curve to the goal (works in first and third person; stops on obstacles or a different floor). Press again to stop. Turn strength is tunable via `[Voice] AutoWalkTurnGain`. |
-| End | **activate** the selected object without aiming — opens the door, reads the book, loots the container, etc. Drives the console `activate`, so there's no crosshair to line up. |
+| Home | centre the view on the selected object (or the nearest actor) |
+| Shift + Home | keep the camera on a moving target until you press it again |
+| `;` (semicolon) | **beacon guidance**: you walk, the mod plays a positional sonar ping at the target — panned by direction, higher-pitched ahead and lower behind, faster as you close in. Press again to stop. |
+| `.` (period) | beacon guidance to the current quest marker |
+| `\` (backslash) | **auto-walk**: the mod walks you there, following a navmesh path around walls and through load doors. Press again to stop. |
+| End | **activate** the selected object without aiming — opens the door, reads the book, loots the container |
+| Alt + Home | last resort: teleport to the selected object when it cannot be reached on foot |
+| G | say what is under the crosshair |
 
-Beacon guidance (`;`) is the recommended way to get around indoors; auto-walk (`\`) is handy on open terrain. All keys are remappable in the INI.
+Auto-walk steers the player directly rather than holding the movement keys, so
+it controls speed precisely and slows into turns instead of skidding off ledges.
+It plays the game's walk and run animations, so you hear real footsteps.
+A quest marker is followed **live**: if the objective changes while you are on
+your way, the walk retargets instead of finishing at a stale marker.
+
+### World map (Pip-Boy → Data → World Map)
+
+| Key | Action |
+| --- | --- |
+| Page Up / Page Down | browse locations (name, distance, bearing, whether discovered) |
+| Enter | fast-travel there (the game's own travel, with its own rules) |
+| Home | set it as the auto-walk destination and leave the map |
+| End | filter: all / discovered / undiscovered |
+
+### Inventory and stacks
+
+| Key | Action |
+| --- | --- |
+| D | read the selected item's stat card (weight, value, damage, condition) |
+| Delete | drop the selected item |
+| Arrows, then **A** / **E** | in the "how many?" prompt: set the amount, then confirm / cancel (these are the game's own keys; the mod reads the number aloud) |
+
+### Combat
+
+| Key | Action |
+| --- | --- |
+| V.A.T.S. key | enter VATS; the mod reads target, body part and hit chance |
+| A / D | in VATS: previous / next target |
+| W / S / B | in VATS: cycle the targeted body part |
+| `,` (comma) | aim the view at the selected or nearest target (free aim, no VATS) |
+| `=` | skip an objective that cannot be completed blind (advances the quest stage — use deliberately) |
 
 ## Configuration
 
 Edit `Data\FOSE\Plugins\Fallout3Access.ini`:
 
 - `[General] Language` — `pl` or `en` (language of the mod's own messages),
-- `[General] GameTextCodepage` — code page of the *game's* text; `0` = auto (`pl` → 1250, otherwise system ANSI), set `1250` / `1252` explicitly if names sound garbled,
+- `[General] GameTextCodepage` — code page of the *game's* text; `0` = auto
+  (`pl` → 1250, otherwise system ANSI). Set `1250` / `1252` explicitly if item
+  names sound garbled,
 - `[Modules]` — enable/disable feature modules,
-- `[Voice]` — verbosity options (item weight/value, warnings),
 - `[Hotkeys]` — every key listed above, as DirectInput scancodes,
 - `[Debug] StartGameCommand` — console command bound to F10.
+
+Useful `[Voice]` settings:
+
+| Key | Meaning |
+| --- | --- |
+| `CrosshairNames` | say the NAME of what you are looking at, not just the verb |
+| `CrosshairDistance` | add the distance to that announcement |
+| `TargetCue`, `TargetCueHz` | audio cue when an enemy is under the crosshair, and its pitch |
+| `NativeWalk` | auto-walk drives the player directly (`0` falls back to holding the movement keys) |
+| `AutoWalkSpeed` | auto-walk speed in game units per second |
+| `WalkAnimation` | play the game's walk/run animation while auto-walking (this is what gives you real footstep sounds) |
+| `FootstepCue` | synthesized step clicks, used only when the animation is off |
+| `NearbyScanRadius`, `NearbyScanMaxItems` | how far and how much the scanner reports |
+| `CompassUnits` | `0` = clock face ("three o'clock"), `1` = degrees |
 
 ## Troubleshooting
 
