@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include <cstdint>
 #include <string>
 
@@ -26,10 +28,11 @@ struct Hotkeys {
     uint32_t menu_back        = 0x0E; // Backspace — click the menu Back button
     uint32_t restore_defaults = 0x13; // R — restore default controls (controls page)
     uint32_t skip_objective   = 0x0D; // = — skip current objective (advance quest stage)
-    uint32_t vats_body_part   = 0x30; // B — cycle targeted body part in VATS
+    uint32_t vats_body_part   = 0;    // disabled: B exits VATS in FO3, and the
+                                  // body-part button is invisible here anyway
     uint32_t center_camera    = 0xC7; // Home — level the view (pitch to horizontal)
-    // Object scanner + navigation. PgUp/PgDn cycle objects; Ctrl+PgUp/PgDn
-    // cycle the category (matches the author's earlier mod).
+    // Object scanner + navigation. PgUp/PgDn cycle objects; Shift+PgUp/PgDn
+    // cycle the category.
     uint32_t scan_prev        = 0xC9; // Page Up — previous nearby object
     uint32_t scan_next        = 0xD1; // Page Down — next nearby object
     uint32_t turn_to          = 0x28; // ' — face the selected object
@@ -43,6 +46,18 @@ struct Hotkeys {
     uint32_t aim_target       = 0x33; // , — aim view at the selected/nearest target
     uint32_t attack_key       = 0x2F; // V (DIK) — weapon attack, used by the aim burst
     uint32_t drop_item        = 0xD3; // Delete — drop the selected item (inventory)
+    uint32_t press_row        = 0xD2; // Insert — press the highlighted row (rebinding keys)
+    uint32_t aim_hold         = 0x1B; // ] — hold/release the game's aim (right mouse)
+    // Trim the held aim up/down. The mod cannot see where the shot lands, but
+    // the player can hear it — so these put the last word with them.
+    // F9 — capture an aim set by someone who can SEE the crosshair, and work
+    // backwards from it. Every other number in this mod was read back from our
+    // own writes; this is the one independent measurement available.
+    // [ — in a container, jump between the container's list and your own.
+    uint32_t container_side   = 0x1A;
+    uint32_t aim_calibrate    = 0x43; // F9
+    uint32_t aim_up           = 0xC8; // Up arrow   — raise the aim point
+    uint32_t aim_down         = 0xD0; // Down arrow — lower the aim point
 };
 
 struct Settings {
@@ -70,6 +85,9 @@ struct Settings {
     // Speak the NAME of whatever the camera is pointing at (not just the
     // activation verb), and optionally how far it is. Turn the distance off if
     // the extra words get tiring in crowded areas.
+    // Read the HUD's own prose: tutorials, hints and refusal messages. Off if
+    // the extra talking gets in the way.
+    bool   hud_reader         = true;
     bool   crosshair_names    = true;
     bool   crosshair_distance = true;
     // Turn toward targets with the engine's own actor-facing routine (the one
@@ -80,6 +98,17 @@ struct Settings {
     // back to the key-holding walker.
     bool   native_walk        = true;
     int    autowalk_speed     = 160;   // game units per second at run speed
+    // Aim at an object's COLLISION centre. OFF by default: reaching it means
+    // calling virtuals on Havok objects at offsets taken from New Vegas, and
+    // that crashed FO3 outright with no log line. The default aim point is the
+    // model's render bound, which is a plain memory read.
+    bool   aim_collision      = false;
+    // A quest marker is a PLACE, not a thing you walk into: it can sit inside
+    // scenery, on a firing line you are meant to stand behind, or above a floor
+    // you cannot climb. Getting this close to one ends the walk, with no other
+    // condition attached — which is the difference between "you are there" and
+    // a walk that circles a marker it can never reach. 0 turns it off.
+    int    quest_arrive_dist  = 0;     // game units; 0 = walk all the way in
     // Synthesized footstep clicks while auto-walking (the engine's own footstep
     // sounds ride on the walk animation, which driving the mover skips).
     bool   footstep_cue       = true;
@@ -121,6 +150,17 @@ struct Settings {
 };
 
 bool Load(const wchar_t* ini_path);
+
+// Aim corrections learned from a sighted player, kept in the INI under
+// [AimOffsets] as "0xBASEFORMID = x,y,z".
+//
+// These MUST outlive the session. A correction is measured once, by someone who
+// can see the crosshair, and losing it on every restart would mean asking for
+// that help again every time the game is launched — which is exactly the kind
+// of dependence the mod exists to remove.
+struct AimOffset { uint32_t base_form_id; float x, y, z; };
+std::vector<AimOffset> LoadAimOffsets();
+void SaveAimOffset(uint32_t base_form_id, float x, float y, float z);
 const Settings& Get();
 
 // For runtime tweaks (toggle_mod hotkey).

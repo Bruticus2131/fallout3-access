@@ -55,6 +55,46 @@ uint32_t ReadKey(const wchar_t* section, const wchar_t* key,
 
 } // namespace
 
+// Where the INI lives, remembered from Load() so a correction can be written
+// back to the same file it was read from.
+wchar_t g_ini_path[MAX_PATH] = L"";
+
+std::vector<AimOffset> LoadAimOffsets()
+{
+    std::vector<AimOffset> out;
+    if (!g_ini_path[0]) return out;
+    // The whole section at once: the keys are form IDs, so they cannot be
+    // enumerated any other way.
+    std::vector<wchar_t> buf(8192);
+    DWORD n = GetPrivateProfileSectionW(L"AimOffsets", buf.data(),
+                                        (DWORD)buf.size(), g_ini_path);
+    if (n == 0) return out;
+    for (const wchar_t* e = buf.data(); *e; e += wcslen(e) + 1) {
+        const wchar_t* eq = wcschr(e, L'=');
+        if (!eq) continue;
+        AimOffset o{};
+        o.base_form_id = (uint32_t)wcstoul(e, nullptr, 0);
+        const wchar_t* v = eq + 1;
+        wchar_t* end = nullptr;
+        o.x = wcstof(v, &end);            if (!end || *end != L',') continue;
+        o.y = wcstof(end + 1, &end);      if (!end || *end != L',') continue;
+        o.z = wcstof(end + 1, nullptr);
+        if (o.base_form_id) out.push_back(o);
+    }
+    return out;
+}
+
+void SaveAimOffset(uint32_t base_form_id, float x, float y, float z)
+{
+    if (!g_ini_path[0] || !base_form_id) return;
+    wchar_t key[32], val[96];
+    swprintf_s(key, L"0x%08X", base_form_id);
+    swprintf_s(val, L"%.1f,%.1f,%.1f", x, y, z);
+    if (!WritePrivateProfileStringW(L"AimOffsets", key, val, g_ini_path))
+        F3A_INFO("Config: could not write the aim correction to %S (error %lu)",
+                 g_ini_path, GetLastError());
+}
+
 bool Load(const wchar_t* ini_path)
 {
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
@@ -63,6 +103,8 @@ bool Load(const wchar_t* ini_path)
     }
 
     auto& s = g_settings;
+
+    wcscpy_s(g_ini_path, ini_path);
 
     s.enable_pipboy    = ReadBool(L"Modules", L"PipBoy",    true,  ini_path);
     s.enable_dialog    = ReadBool(L"Modules", L"Dialog",    true,  ini_path);
@@ -81,11 +123,14 @@ bool Load(const wchar_t* ini_path)
     s.intro_audio_desc    = ReadBool(L"Voice", L"IntroAudioDesc",  true, ini_path);
     s.target_cue          = ReadBool(L"Voice", L"TargetCue",       true, ini_path);
     s.target_cue_hz       = ReadInt (L"Voice", L"TargetCueHz",     880,  ini_path);
+    s.hud_reader          = ReadBool(L"Voice", L"HudReader",        true, ini_path);
     s.crosshair_names     = ReadBool(L"Voice", L"CrosshairNames",   true, ini_path);
     s.crosshair_distance  = ReadBool(L"Voice", L"CrosshairDistance",true, ini_path);
     s.native_face         = ReadBool(L"Voice", L"NativeFace",       true, ini_path);
     s.native_walk         = ReadBool(L"Voice", L"NativeWalk",       true, ini_path);
+    s.aim_collision       = ReadBool(L"Voice", L"AimCollision",     false, ini_path);
     s.autowalk_speed      = ReadInt (L"Voice", L"AutoWalkSpeed",    160,  ini_path);
+    s.quest_arrive_dist   = ReadInt (L"Voice", L"QuestArriveDist",  0,    ini_path);
     s.footstep_cue        = ReadBool(L"Voice", L"FootstepCue",       true, ini_path);
     s.walk_animation      = ReadBool(L"Voice", L"WalkAnimation",     true, ini_path);
     s.barter_warn_loss_caps = ReadInt (L"Voice", L"BarterWarnLossCaps", 10, ini_path);
@@ -134,6 +179,12 @@ bool Load(const wchar_t* ini_path)
     h.aim_target       = ReadKey(L"Hotkeys", L"AimTarget",       h.aim_target,       ini_path);
     h.attack_key       = ReadKey(L"Hotkeys", L"AttackKey",       h.attack_key,       ini_path);
     h.drop_item        = ReadKey(L"Hotkeys", L"DropItem",        h.drop_item,        ini_path);
+    h.press_row        = ReadKey(L"Hotkeys", L"PressRow",        h.press_row,        ini_path);
+    h.aim_hold         = ReadKey(L"Hotkeys", L"AimHold",         h.aim_hold,         ini_path);
+    h.container_side   = ReadKey(L"Hotkeys", L"ContainerSide",   h.container_side,   ini_path);
+    h.aim_calibrate    = ReadKey(L"Hotkeys", L"AimCalibrate",    h.aim_calibrate,    ini_path);
+    h.aim_up           = ReadKey(L"Hotkeys", L"AimUp",           h.aim_up,           ini_path);
+    h.aim_down         = ReadKey(L"Hotkeys", L"AimDown",         h.aim_down,         ini_path);
 
     F3A_INFO("Config loaded. Language='%s'.", s.language.c_str());
     F3A_INFO("Hotkeys: toggle=0x%02X silence=0x%02X dump=0x%02X",

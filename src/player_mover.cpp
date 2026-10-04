@@ -4,6 +4,7 @@
 #include "f3a/logger.h"
 #include "f3a/audio_beacon.h"
 #include "f3a/game_access.h"
+#include "f3a/polling_loop.h"
 
 #include <windows.h>
 #include <atomic>
@@ -59,6 +60,38 @@ std::atomic<bool>  g_run{ false };
 float g_heading = 0.0f;          // radians, engine convention (0 = +Y/north)
 bool  g_heading_seeded = false;
 
+// Stopping is requested from the polling thread but CARRIED OUT in the hook,
+// which runs on the game's own thread and is handed the engine's real mover as
+// `this`. Doing it the other way round meant guessing the mover's offset inside
+// the player and calling an animation function off-thread — and if that guess
+// was wrong the movement bits were never cleared, which left the player walking
+// on by themselves with nothing on screen to explain it.
+std::atomic<bool> g_stop_pending{ false };
+
+// Watchdog. Whoever drives the mover re-states the goal every tick, so a goal
+// that stops being refreshed means the driver is gone — the walk was cancelled,
+// a menu opened, a load screen came up, the mod was switched off mid-walk. The
+// engine would happily keep pushing the player toward the last goal forever, so
+// treat silence as "stop". This is the backstop that makes self-walking
+// impossible regardless of which caller forgot to clean up.
+// Frames of "brake" after a stop: see the stop path in the hook.
+constexpr int kBrakeFrames = 20;   // ~1/3 s — long enough to outlast a hitch
+int g_brake = 0;
+
+// Drift check. Neither of us can watch the screen, so "it said I arrived and
+// then kept walking" has to become a measurement rather than a guess: after a
+// stop, watch the player's position for a second and write to the log if they
+// are still travelling. A log line either names the bug or rules this out.
+constexpr float kDriftWindow = 1.0f;    // seconds to watch
+constexpr float kDriftLimit  = 40.0f;   // units; walking covers far more
+float g_watch = 0.0f;
+float g_watch_x = 0.0f, g_watch_y = 0.0f;
+
+std::atomic<uint32_t> g_goal_stamp{ 0 };   // bumped by every SetGoal
+uint32_t g_seen_stamp = 0;                 // hook-side copy of it
+float    g_goal_age   = 0.0f;              // seconds since it last changed
+constexpr float kGoalTimeout = 0.40f;      // ~5 autowalk ticks
+
 // Footsteps. Driving the player through Actor::Move skips the walk animation,
 // and the game hangs its footstep sounds off that animation — so an autowalk was
 // silent, losing the one cue that tells a blind player they are actually moving
@@ -104,6 +137,30 @@ void SetMoverFlags(void* mover, bool moving, bool running)
     *f2 = (*f2 & ~kFlagMask) | bits;
 }
 
+// Stop the mover the way the ENGINE stops it, through its own vtable, instead
+// of writing the flag words ourselves.
+//
+//   slot 2  0x007E8F30  ClearMovementFlags(UInt32)  ANDs ~bits into mover+0x94
+//   slot 4  0x007DDB40  ClearMoveState()            zeroes mover+0x38 and +0x71
+//
+// The second one matters: +0x38 and +0x71 are state we never touched, and
+// clearing the flag words alone left them set — which is a very good reason for
+// a player to keep walking after everything else said the walk was over.
+// Only called when the object really is a PlayerMover, checked by its vtable,
+// so the slot numbers are the ones that were disassembled.
+void EngineStopMover(void* mover)
+{
+    if (!mover || IsBadReadPtr(mover, 4)) return;
+    void** vt = *reinterpret_cast<void***>(mover);
+    if (reinterpret_cast<uintptr_t>(vt) != kPlayerMoverVtable) return;
+    if (IsBadReadPtr(vt, 5 * sizeof(void*))) return;
+
+    using ClearFlagsFn = void (__thiscall*)(void*, uint32_t);
+    using ClearStateFn = void (__thiscall*)(void*);
+    if (vt[2]) reinterpret_cast<ClearFlagsFn>(vt[2])(mover, 0xFFFFFFFFu);
+    if (vt[4]) reinterpret_cast<ClearStateFn>(vt[4])(mover);
+}
+
 void ActorMove(void* actor, float dt, float disp[3])
 {
     if (!actor) return;
@@ -115,9 +172,82 @@ void ActorMove(void* actor, float dt, float disp[3])
     fn(actor, dt, disp, kMoveFlags);
 }
 
+// Put the mover back the way the engine expects and drop out of the walk
+// animation. Main thread only — it calls into the game.
+//
+// The idle animation is not cosmetic here. The walk animation is what produces
+// the game's FOOTSTEP SOUNDS, and for a player who cannot see the screen those
+// sounds ARE the message "you are still walking". Leaving them running after a
+// walk has ended is indistinguishable, by ear, from the walk never stopping.
+void StopNow(void* mover)
+{
+    SetMoverFlags(mover, false, false);
+    EngineStopMover(mover);
+    if (g_current_anim != kAnimIdle) {
+        bool idled = false;
+        if (auto* p = rt::Player()) idled = game::PlayActorAnimGroup(p, kAnimIdle);
+        g_current_anim = kAnimIdle;
+        F3A_INFO("Mover: stop — flags cleared, idle animation %s.",
+                 idled ? "played" : "REFUSED");
+    } else {
+        F3A_INFO("Mover: stop — flags cleared.");
+    }
+    g_step_accum = 0.0f;
+
+    if (auto* p = rt::Player()) {
+        g_watch   = kDriftWindow;
+        g_watch_x = p->posX;
+        g_watch_y = p->posY;
+    }
+}
+
 void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
 {
+    // Aiming rides along on this hook. It has nothing to do with walking; it is
+    // here because this is the one place we already run INSIDE the engine's
+    // per-frame update, which is where a view change has to happen to survive
+    // into the camera and the shot. See poll::AimTick.
+    struct AimAfter {
+        ~AimAfter() { poll::AimTick(); }
+    } aimAfter;
+
+    // Carry out a stop asked for from another thread, before anything else —
+    // the engine reads these flags in the original Update we are about to call.
+    if (g_stop_pending.exchange(false)) {
+        StopNow(mover);
+        g_brake = kBrakeFrames;
+    }
+
     if (!g_active.load()) {
+        // Braking. Simply ceasing to call Move does NOT stop the actor: it keeps
+        // whatever motion it was last given until something replaces it, so the
+        // player coasted on after arriving — which, with no screen to check
+        // against, reads as "it said I arrived and then kept walking". Feed the
+        // same call a zero displacement for a few frames to take that motion
+        // away, and keep the movement bits down while the engine settles.
+        if (g_brake > 0) {
+            --g_brake;
+            SetMoverFlags(mover, false, false);
+            EngineStopMover(mover);
+            float clamped = dt;
+            if (clamped > 0.033f) clamped = 0.033f;
+            if (clamped < 0.0f)   clamped = 0.0f;
+            float zero[3] = { 0.0f, 0.0f, 0.0f };
+            if (auto* p = rt::Player()) ActorMove(p, clamped, zero);
+        }
+        if (g_watch > 0.0f) {
+            g_watch -= dt;
+            if (g_watch <= 0.0f) {
+                if (auto* p = rt::Player()) {
+                    float dx = p->posX - g_watch_x, dy = p->posY - g_watch_y;
+                    float moved = std::sqrt(dx * dx + dy * dy);
+                    if (moved > kDriftLimit)
+                        F3A_INFO("Mover: player STILL MOVING %.0f units in the "
+                                 "second after the stop.", moved);
+                }
+                g_watch = 0.0f;
+            }
+        }
         if (g_original) g_original(mover, dt);
         return;
     }
@@ -133,6 +263,22 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     float clamped = dt;
     if (clamped > 0.033f) clamped = 0.033f;
     if (clamped < 0.0f)   clamped = 0.0f;
+
+    // Watchdog: has anyone restated the goal recently?
+    uint32_t stamp = g_goal_stamp.load();
+    if (stamp != g_seen_stamp) {
+        g_seen_stamp = stamp;
+        g_goal_age   = 0.0f;
+    } else {
+        g_goal_age += clamped;
+        if (g_goal_age >= kGoalTimeout) {
+            F3A_INFO("Mover: goal not refreshed for %.2f s — stopping.", g_goal_age);
+            g_active.store(false);
+            StopNow(mover);
+            if (g_original) g_original(mover, dt);
+            return;
+        }
+    }
 
     float gx = g_goal_x.load();
     float gy = g_goal_y.load();
@@ -267,6 +413,7 @@ void SetGoal(float x, float y, bool run)
     g_goal_x.store(x);
     g_goal_y.store(y);
     g_run.store(run);
+    g_goal_stamp.fetch_add(1);      // feeds the watchdog in the hook
     if (!g_active.exchange(true)) {
         g_heading_seeded = false;   // seed on next frame
         g_step_accum = 0.0f;
@@ -277,17 +424,11 @@ void SetGoal(float x, float y, bool run)
 void Clear()
 {
     if (!g_active.exchange(false)) return;
-    if (g_current_anim != kAnimIdle) {
-        if (auto* p = rt::Player()) game::PlayActorAnimGroup(p, kAnimIdle);
-        g_current_anim = kAnimIdle;
-    }
-    // Drop the movement bits so scripts and the HUD do not think we are still
-    // walking. The mover is reachable through the player.
-    if (auto* p = rt::Player()) {
-        void* mover = *reinterpret_cast<void**>(
-            reinterpret_cast<uint8_t*>(p) + 0x184);          // player->actorMover
-        SetMoverFlags(mover, false, false);
-    }
+    // Hand the actual stopping to the hook: it runs on the game's thread and is
+    // given the engine's own mover, so nothing here has to guess an offset or
+    // call into the game from the polling thread. The very next frame clears the
+    // movement bits before the engine's Update gets to act on them.
+    g_stop_pending.store(true);
 }
 
 float CurrentHeadingDeg()

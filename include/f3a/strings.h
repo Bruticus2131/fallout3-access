@@ -36,6 +36,18 @@ enum class Key {
     NearbyItemFmt,
     BarterTotalFmt,            // %d player gives, %d trader gives, %d net
     BarterLossWarn,            // %d caps
+    // SPECIAL book (the vault's attribute book). Its pages are images, so the
+    // attribute NAMES and DESCRIPTIONS have to come from us. The names match the
+    // game's own wording, verified against a Pip-Boy dump; the descriptions are
+    // ours, and are replaced by the game's text whenever the Pip-Boy has shown
+    // it (see modules/specialbook).
+    SpecialBookIntroFmt,       // %s = all seven values
+    SpecialStrength, SpecialPerception, SpecialEndurance, SpecialCharisma,
+    SpecialIntelligence, SpecialAgility, SpecialLuck,
+    SpecialDescStrength, SpecialDescPerception, SpecialDescEndurance,
+    SpecialDescCharisma, SpecialDescIntelligence, SpecialDescAgility,
+    SpecialDescLuck,
+    SpecialPageFmt,            // %d = page number
     LockpickSweetSpot,
     LockpickBrokenSoon,
     LockpickBroken,
@@ -53,6 +65,14 @@ enum class Key {
     ItemNoValue,
     LevelUp,
     KeyNotBound,
+    // Loot Menu Updated's on-HUD container list.
+    LootContainerFmt,          // %s = container name
+    LootItemFmt,               // %s = entry, %s = "n z m"
+    LootEquipped,
+    LootStealing,
+    LootWeightFmt,             // %s = carry weight as the overlay shows it
+    LootPositionFmt,           // %s = position, %s = total
+    LootClosed,
 };
 
 // All format directives are positional printf-style for std::snprintf.

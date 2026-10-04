@@ -56,6 +56,11 @@ void OnTick(float dt);
 // Identify currently active top menu.
 Id ActiveMenu();
 
+// Is this menu on screen at all? Not the same question as ActiveMenu(): the
+// game lays transient overlays (tutorial hints) over menus that are still very
+// much open, and work belonging to the menu underneath must not stop.
+bool IsOpen(Id id);
+
 // Resolve a human-readable name for announcement.
 std::string_view DisplayName(Id id);
 

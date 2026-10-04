@@ -44,7 +44,11 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 
 1. **Fallout 3** or **Fallout 3 GOTY** — [Steam](https://store.steampowered.com/app/22300/Fallout_3/) / GOG, at game version **1.7.0.3**.
 2. **FOSE v1.3 beta 2** — the Fallout Script Extender.
-3. A screen reader (NVDA recommended) or any SAPI voice installed.
+3. **[Loot Menu Updated](https://www.nexusmods.com/fallout3/mods/27191)** — required.
+   It replaces the container screen with a list drawn on the HUD, and the mod
+   reads that list out: container name, the highlighted entry, its place in the
+   list and whether it is equipped. Without it, looting is far harder to follow.
+4. A screen reader (NVDA recommended) or any SAPI voice installed.
 
 ## Installation
 
@@ -111,7 +115,7 @@ Explore and travel without sight:
 | Key | Action |
 | --- | --- |
 | Page Up / Page Down | cycle nearby objects (reads "name, distance, clock direction, i of N") |
-| Ctrl + Page Up / Page Down | change scanner category: all / NPCs / items / doors / containers / quests |
+| Shift + Page Up / Page Down | change scanner category: all / NPCs / items / doors / containers / quests |
 | `'` (apostrophe) | turn to face the selected object |
 | Home | centre the view on the selected object (or the nearest actor) |
 | Shift + Home | keep the camera on a moving target until you press it again |

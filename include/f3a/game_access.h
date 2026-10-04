@@ -186,12 +186,137 @@ const std::vector<MapMarker>& CachedMapMarkers();
 // the map isn't open.
 bool GetMapCursor(float* x, float* y);
 
+// Every prose line currently visible on the HUD — tutorials, hints and the
+// game's "you can't do that because…" notices. Counters that tick constantly
+// (health, AP, ammo, compass, clock) and the tiles other pollers already read
+// are filtered out, so the caller can simply announce lines it hasn't seen yet.
+std::vector<std::string> GetHudProse();
+
+// What VATS knows beyond the tiles: action points (which decide how many shots
+// you can queue), ammo, how many shots are already queued, and the hit chance
+// from the body-part record. Each `has_*` flag says whether that value passed a
+// sanity check — the field offsets come from New Vegas and are unverified here,
+// so anything implausible is reported as absent rather than spoken.
+struct VatsInfo {
+    bool has_ap = false;     int ap = 0;          int max_ap = 0;
+    bool has_ammo = false;   int clip_ammo = 0;   int reserve_ammo = 0;
+    bool has_chance = false; int hit_chance = 0;
+    int  queued = 0;         // shots already queued
+};
+bool GetVatsInfo(VatsInfo* out);
+
 // Play a movement animation group on an actor, the way the game's own PlayGroup
 // command does: 0 = Idle, 3 = Forward (walk), 7 = FastForward (run). Needed
 // because moving the player directly plays no animation — and the game's
 // footstep sounds ride on that animation. MAIN THREAD only. False if the address
 // guards rejected this build.
 bool PlayActorAnimGroup(void* actor, uint32_t animGroup);
+
+// ---- Aiming at an object's real body ----
+//
+// The centre of a reference's COLLISION shape, in world coordinates — the point
+// a bullet would meet. False when the object has no rigid body (many props) or
+// its 3D isn't loaded. MUST run on the main thread: it calls into the model.
+bool GetCollisionAABBCenter(const void* refr, float* outX, float* outY, float* outZ);
+
+// The best available aim point for a reference: the collision centre, else the
+// render bound's centre, else the origin lifted to chest height. `how` receives
+// which one was used, so the choice can be reported instead of guessed at.
+// MUST run on the main thread.
+bool GetAimPointFor(const void* refr, Vec3* out, const char** how = nullptr);
+
+// Where the rendering camera is. False if it can't be read or lands implausibly
+// far from the player — callers then use the player's eye height instead.
+bool GetCameraWorldPos(float* x, float* y, float* z);
+
+// Point the view at a reference's body: aim point resolved as above, angles
+// measured from the camera, heading applied through the engine's own turning
+// routine and elevation through SetAngle. No fudge factors. MUST run on the
+// main thread. `detail` receives which aim point was used.
+bool AimAtReference(const void* refr, std::string* detail = nullptr);
+
+// ---- VATS limbs ----
+//
+// One tile per body part, each with its own position, name and hit chance.
+// The menu's body-part button is invisible on this build, so cycling limbs
+// means moving between THESE, not pressing a button.
+struct VatsLimb {
+    const void* tile = nullptr;
+    std::string name;      // "Korpus", "Prawe nogi", ...
+    std::string chance;    // "95%"
+    int  part_id = 0;      // the game's own body-part id, stable per limb
+    bool selected = false; // this is the limb VATS is currently aimed at
+    float x = 0.0f, y = 0.0f;
+};
+std::vector<VatsLimb> GetVatsLimbs();
+
+// Click a limb's tile. Kept for diagnostics only: those tiles carry id 0 and no
+// target trait, so this does nothing — queueing goes through ClickVatsSelect.
+bool ClickVatsLimb(const void* tile);
+
+// The limb VATS is currently aimed at, plus where it sits in the cycle. This
+// is read from the GAME's own state rather than from an index of ours, so the
+// player's own clicks and wheel are reflected too. Sampled on the main thread.
+struct VatsPick {
+    char name[64]   = {};
+    char chance[16] = {};
+    int  count = 0;    // distinct body parts on this target
+    int  index = 0;    // 1-based position of the selected one; 0 = none shown
+    int  queued = -1;  // shots on the VATS queue list; -1 = couldn't be read
+    // The whole cycle, in order. Needed because `index` can legitimately be 0:
+    // if the game ever stops marking a selection, the reader still has to say
+    // SOMETHING rather than go silent, and it says this list's entry instead.
+    char names[8][48] = {};
+};
+bool GetVatsPick(VatsPick* out);
+
+// Shots currently on the VATS queue, counted from the on-screen list. -1 when
+// it can't be read. Main thread only.
+int GetVatsQueuedCount();
+
+// Screen position of the selected limb's marker — where the cursor must be for
+// a queueing click to land. False when nothing is selected. Main thread only.
+bool GetVatsSelectedLimbPos(float* x, float* y);
+
+// Queue a shot at the selected limb ("Wybierz", id 7). Main thread only.
+bool ClickVatsSelect();
+
+// ---- Loot Menu Updated (F3LootMenu.dll) ------------------------------------
+// That mod draws a container's contents as an overlay ON the HUD rather than
+// opening a menu, so none of our menu handlers ever see it; it keeps its state
+// in custom tile traits named _JLM*. Reading those is the only way a blind
+// player gets at a list that is, for everyone else, simply on screen.
+//
+// Strings are fixed buffers, not std::string: this is sampled on the game's
+// thread and read on the polling thread, and handing a std::string across that
+// boundary is a bug this project has already paid for once.
+struct LootMenuInfo {
+    bool visible   = false;
+    char title[96] = {};     // container or corpse name
+    char item[160] = {};     // the entry currently highlighted
+    char weight[48]= {};     // carry weight, as the overlay shows it ("200/300")
+    int  index     = 0;      // highlight position within the visible window
+    int  offset    = 0;      // how far the list has scrolled
+    int  total     = 0;      // entries in the container
+    bool equipped  = false;  // the highlighted entry is worn/wielded
+    bool stealing  = false;  // taking from here counts as theft
+};
+
+// Sample the overlay. False when it isn't showing. MUST run on the main thread
+// — the loot mod rebuilds those item tiles as the player scrolls.
+bool GetLootMenuInfo(LootMenuInfo* out);
+
+// Replace the game's control markers in a piece of its text (e.g.
+// "&-sUActnMenumode;") with the key the player has bound to that action. Hints
+// from the tutorial carry these unexpanded on a keyboard, and read as gibberish
+// otherwise. Returns the text unchanged when it has no markers.
+std::string ExpandControlTokens(const std::string& text);
+
+// Is the player holding the game's AIM control (whatever they bound it to)?
+bool IsAimControlHeld();
+
+// Is a weapon drawn?
+bool IsWeaponOut();
 
 // Turn the player toward a world point using the engine's OWN actor-facing
 // routine (the one Command Extender's FaceObject calls). Goes through the
@@ -209,6 +334,11 @@ bool ClickSelectedRowIn(const char* listNameSubstr);
 // Is the keyboard highlight inside a list whose name contains this substring?
 // Read-only, safe from any thread — lets a key decide what it should do.
 bool IsKeyboardSelectionIn(const char* listNameSubstr);
+
+// Every distinct visible line of text in a menu, in tree order. For screens
+// with no list to walk — a page of a book, an info panel — where the useful
+// thing is simply "what does this say now".
+std::vector<std::string> GetMenuTextLines(uint32_t menuType);
 
 // The objectives shown for the quest selected in the Pip-Boy's Quests tab, as
 // one string. Empty when that list isn't on screen or has no text.
@@ -278,6 +408,102 @@ void AimLookAt(const Vec3& target);
 // Same, but add `pitchBiasRad` to the computed pitch — used to sweep the
 // vertical aim up/down when the exact eye height / target origin is uncertain.
 void AimLookAtBiased(const Vec3& target, float pitchBiasRad);
+
+// Where a shot actually leaves from: the camera's world position, read from the
+// engine instead of estimated as "the player's feet plus a guess". The guess is
+// what made every shot miss — an adult and a ten-year-old do not share an eye
+// height. False when the 3D is not ready.
+bool GetCameraPos(Vec3* out);
+
+// The engine's own view raycast — the one that decides what is under the
+// crosshair. Returns true if anything was hit; `outRefId` names it (0 for
+// scenery with no reference) and `outDist` gives the range. This is the mod's
+// only way to SEE, and it settles questions that guessing never could: is the
+// aim on the target, or is something in the way.
+bool RayCastView(const Vec3& from, const Vec3& dir, float maxDist,
+                 uint32_t* outRefId, float* outDist,
+                 const void** outRef = nullptr);
+
+// A point on the object at `origin` that the view can actually reach, found
+// with the engine's own ray. An object's origin is not its middle, and asking a
+// sighted player to measure that for every kind of object in the game is not an
+// answer — this is. False if nothing on it can be reached, which means
+// something is in the way.
+bool SolveAimPoint(const Vec3& origin, uint32_t wantRefId, Vec3* out);
+
+// Sweep the engine's ray across a window around `centre` and write a map of
+// everything it finds to the log: which references are there, how far, and
+// where in the window. When an object refuses to be hit, this says what IS
+// being hit instead — which no amount of reasoning about coordinates can.
+void RayMapAround(const Vec3& centre);
+
+// One thing the rays found in front of the player: what it is, where it is, and
+// how big it looks from here.
+struct RayHit {
+    uint32_t refid = 0;
+    std::string name;
+    float dist = 0.0f;       // game units
+    float yaw = 0.0f;        // degrees from straight ahead, + = right
+    float pitch = 0.0f;      // degrees, + = down
+    int   samples = 0;       // how many rays landed on it
+};
+
+// Sweep the engine's ray across a cone in front of the player and report every
+// distinct thing it finds, nearest first.
+//
+// This answers the question the mod could never answer before: WHAT IS THERE.
+// Coordinates from the game's own records say where an object's origin is, and
+// an origin can sit inside a wall, behind scenery, or nowhere near the part you
+// are supposed to shoot. Rays say what a bullet would actually meet.
+std::vector<RayHit> RayScanAhead(float yawSpanDeg, float pitchSpanDeg,
+                                 float stepDeg, float maxDist);
+
+// Aim the player's view the way the engine itself does: the native pitch clamp
+// and yaw-delta functions PLUS the camera rotation globals the renderer reads.
+// Writing the angle fields alone does not move the weapon — the engine
+// recomputes the view from its own state every frame and overwrites them.
+// Main thread only (it calls into the game). Returns false on a build whose
+// prologue guards do not match, so callers can fall back.
+bool AimPlayerAtRad(float pitchRad, float yawRad);
+
+// Same, expressed as "look at this world point"; `up` lifts the aim point off
+// the target's origin (torso height, typically 100).
+// `dzBias` shifts the aim point vertically, in game units. It corrects for the
+// eye height and the target's aim point in one number — see the definition.
+bool AimPlayerAtPoint(const Vec3& target, float up, float dzBias = 0.0f);
+
+// How far the player's view has drifted from the last aim we applied, in
+// radians (yaw and pitch). False when no aim has been applied yet. Measured a
+// frame later than the write, which is the only way to see the engine undoing
+// it.
+bool AimDriftSinceLast(float* outYaw, float* outPitch);
+
+// The two camera rotation values the renderer reads, in radians. Reading these
+// back is how we tell whether the view really follows the aim or only the
+// player's body does.
+bool GetCameraAngles(float* outPitch, float* outYaw);
+
+// The yaw the ENGINE considers the player to be facing, through its own
+// accessor (vtable+0x2BC) rather than the raw field. In New Vegas this is the
+// body rotation PLUS a separate free-aim offset, and if Fallout 3 does the same
+// then the raw field is not where the view points.
+bool GetEffectiveYawRad(float* out);
+
+// Height above the player's origin that a shot is assumed to leave from. It is
+// a guess by nature — an adult and the ten-year-old of the prologue are nowhere
+// near each other — and getting it wrong tilts every shot. CalibrateEyeHeight
+// replaces the guess with a measurement taken from a real, working aim.
+float EyeHeight();
+void  SetEyeHeight(float units);
+
+// The base form a reference was built from — the identity shared by every copy
+// of an object, so a correction measured on one of three identical targets
+// applies to the other two.
+const void* BaseFormOf(const void* refr);
+
+// The base form's FORM ID — the same identity, but a number that stays valid
+// between sessions, so a correction can be written to the INI.
+uint32_t BaseFormIdOf(const void* refr);
 
 // Native engine SetAngle (`Player.SetAngle X/Z`) via 0x00522B50 — writes the
 // rotation AND runs the post-update + node-transform steps our raw field write
@@ -365,6 +591,20 @@ struct MenuSelection {
     const void* container = nullptr;
 };
 std::optional<MenuSelection> GetKeyboardSelection();
+
+// The two halves of a container menu, read straight from their tiles.
+//
+// A container screen is two lists side by side — CM_Container_InventoryList
+// holds what the container has, CM_Items_InventoryList what you are carrying —
+// and nothing in the audio told the player which one they were in, or whether
+// the container had anything in it at all. `rows` counts real entries, so an
+// empty locker can say so instead of leaving someone pressing keys at nothing.
+struct ContainerSide { std::string title; int rows = 0; };
+bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs);
+
+// Move the keyboard focus to the other list by pressing its first row the way
+// a mouse click would. Returns false when that list is empty.
+bool FocusContainerList(bool container_side);
 
 // Convenience: the focused row as one string ("label" or "label, value").
 // Used by the diagnostic dump.

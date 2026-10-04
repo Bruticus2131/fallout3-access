@@ -9,6 +9,7 @@
 #include "f3a/fose_runtime.h"
 #include "f3a/config.h"
 #include "f3a/logger.h"
+#include "fose/GameOSDepend.h"
 #include "f3a/polling_loop.h"
 
 #include <windows.h>
@@ -750,10 +751,16 @@ std::vector<std::string> DebugNearbyRefs(int radius)
         const char* nm = BaseFormName(base);
         std::string name = (nm && !IsBadReadPtr(nm, 1)) ? GameStrToUtf8(nm)
                                                         : std::string();
+        // World position as well as range: with the player's own position in
+        // the log, that is enough to work out on paper WHAT SITS IN THE LINE OF
+        // FIRE. Distance alone cannot answer that, and "the shot keeps missing
+        // although the aim is provably correct" is exactly the question left.
         char buf[256];
         std::snprintf(buf, sizeof(buf),
-                      "0x%08X typ=%u dist=%.0f dz=%.0f flags=0x%X '%.60s'",
+                      "0x%08X typ=%u dist=%.0f dz=%.0f at=(%.0f,%.0f,%.0f) "
+                      "flags=0x%X '%.60s'",
                       r->refID, base->typeID, std::sqrt(d2), dz,
+                      r->posX, r->posY, r->posZ,
                       r->flags, name.c_str());
         rows.push_back({ std::sqrt(d2), buf });
     }
@@ -1031,6 +1038,45 @@ bool GetMapCursor(float* x, float* y)
     if (x) *x = TileAbsX(c) + TileNum(c, kTileValue_width) * 0.5f;
     if (y) *y = TileAbsY(c) + TileNum(c, kTileValue_height) * 0.5f;
     return true;
+}
+
+namespace {
+// Every distinct visible string inside a tile subtree, as separate lines.
+// Duplicates are dropped: menus repeat the same text on a parent and its child
+// all the time, and hearing it twice is worse than not hearing it at all.
+void CollectTextLines(Tile* t, int depth, std::vector<std::string>& out)
+{
+    if (!t || depth > 12 || out.size() > 64) return;
+    if (TileVisible(t)) {
+        if (const char* raw = TileStringTrait(t)) {
+            std::string line = GameStrToUtf8(raw);
+            const char* ws = " \t\n\r";
+            size_t b = line.find_first_not_of(ws);
+            if (b != std::string::npos) {
+                line = line.substr(b, line.find_last_not_of(ws) - b + 1);
+                if (line.size() > 1) {
+                    bool dup = false;
+                    for (const auto& e : out) if (e == line) { dup = true; break; }
+                    if (!dup) out.push_back(line);
+                }
+            }
+        }
+    }
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&t->childList);
+    for (int i = 0; node && i < 4096; ++i) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) CollectTextLines(cn->child, depth + 1, out);
+        node = node->next;
+    }
+}
+} // namespace
+
+std::vector<std::string> GetMenuTextLines(uint32_t menuType)
+{
+    std::vector<std::string> out;
+    if (Tile* m = FindVisibleMenuTile(menuType)) CollectTextLines(m, 0, out);
+    return out;
 }
 
 // The objectives listed for the quest selected in the Pip-Boy's Quests tab.
@@ -1412,6 +1458,574 @@ void AimLookAtBiased(const Vec3& target, float pitchBiasRad)
 
 void AimLookAt(const Vec3& target) { AimLookAtBiased(target, 0.0f); }
 
+// ---- Native aim rotation (the FNV accessibility mod's recipe, ported) ------
+//
+// Writing rotZ/rotX, or driving the SetAngle script command, does NOT aim the
+// weapon. The engine recomputes the view every frame from its own internal
+// pitch/yaw state and from the camera's rotation globals, and overwrites what
+// we wrote before it ever reaches the crosshair. That is why "center on the
+// target, hold aim, shoot" kept missing: the announcement was right and the
+// gun was pointing somewhere else.
+//
+// The FNV mod drives all three layers in the same frame. Fallout 3 has the same
+// three, found here by disassembly:
+//
+//   SetPitchWithClamp  0x00765440  __thiscall(Actor*, float), ret 4
+//       Clamps to +-1.5533430 rad (89 degrees — the constant at 0x00E17CA4)
+//       and writes the pitch through the engine's own accessor.
+//   AddDeltaZRot       0x00765400  __thiscall(Actor*, float), ret 4
+//       Reads the current yaw through vtable+0x2BC, adds the delta, writes it
+//       back through vtable+0x2C4. Yaw is set as a DELTA, not absolutely.
+//   Camera rotation globals   pitch = 0x0107BA14, yaw = 0x0107BA1C
+//       What the renderer actually reads. Three independent places in the
+//       executable fill them with exactly this pair, which is how they were
+//       identified:
+//           call [vtable+0x2BC] ; fstp [0x0107BA1C]   <- yaw
+//           call 0x00765430     ; fstp [0x0107BA14]   <- pitch
+//       (0x00765430 is `fld [ecx+0x20]; ret` — GetRotationX.) Without these the
+//       camera lags behind the weapon and the crosshair sits on empty space.
+//
+// Everything here CALLS game code, so it is main-thread only.
+namespace {
+
+constexpr uintptr_t kSetPitchWithClamp = 0x00765440;
+constexpr uintptr_t kAddDeltaZRot      = 0x00765400;
+constexpr uintptr_t kCameraPitchGlobal = 0x0107BA14;
+constexpr uintptr_t kCameraYawGlobal   = 0x0107BA1C;
+constexpr unsigned  kGetRotationZSlot  = 0x2BC / 4;   // vtable index
+constexpr float     kAimPi    = 3.14159265f;
+constexpr float     kAimTwoPi = 6.28318530f;
+constexpr float     kEyeDefault = 100.0f;  // starting guess, replaced by measurement
+float g_eye_height = kEyeDefault;
+
+// Prologue guards, checked once. A build that does not match keeps the old
+// behaviour instead of jumping into the middle of something else.
+int g_aim_native_ok = -1;   // -1 = untested
+
+// Camera probe state — see the probe in AimPlayerAtRad.
+int   g_cam_probe_tick  = 0;
+bool  g_cam_probe_skip  = false;
+bool  g_cam_probe_armed = false;
+float g_cam_probe_yaw   = 0.0f;
+float g_cam_probe_pitch = 0.0f;
+
+// What we asked for last time, so the next frame can see what survived.
+float g_aim_last_yaw   = 0.0f;
+float g_aim_last_pitch = 0.0f;
+bool  g_aim_last_valid = false;
+
+bool AimNativeReady()
+{
+    if (g_aim_native_ok >= 0) return g_aim_native_ok != 0;
+    g_aim_native_ok = 0;
+    const uint8_t pitchSig[] = { 0x51, 0xD9, 0x05 };          // push ecx; fld [imm32]
+    const uint8_t yawSig[]   = { 0x56, 0x57, 0x8B, 0xF1 };    // push esi; push edi; mov esi,ecx
+    auto* pp = reinterpret_cast<const uint8_t*>(kSetPitchWithClamp);
+    auto* yp = reinterpret_cast<const uint8_t*>(kAddDeltaZRot);
+    if (IsBadReadPtr(pp, sizeof(pitchSig)) || IsBadReadPtr(yp, sizeof(yawSig))) {
+        F3A_INFO("Aim: native rotation functions unreadable — falling back.");
+        return false;
+    }
+    if (std::memcmp(pp, pitchSig, sizeof(pitchSig)) != 0 ||
+        std::memcmp(yp, yawSig,   sizeof(yawSig))   != 0) {
+        F3A_INFO("Aim: native rotation prologues differ — falling back.");
+        return false;
+    }
+    if (IsBadWritePtr(reinterpret_cast<void*>(kCameraPitchGlobal), 4) ||
+        IsBadWritePtr(reinterpret_cast<void*>(kCameraYawGlobal), 4)) {
+        F3A_INFO("Aim: camera rotation globals unwritable — falling back.");
+        return false;
+    }
+    g_aim_native_ok = 1;
+    F3A_INFO("Aim: native rotation ready (pitch 0x%08X, yaw 0x%08X, camera "
+             "0x%08X/0x%08X).", (unsigned)kSetPitchWithClamp,
+             (unsigned)kAddDeltaZRot, (unsigned)kCameraPitchGlobal,
+             (unsigned)kCameraYawGlobal);
+    return true;
+}
+
+} // namespace
+
+const void* BaseFormOf(const void* refr)
+{
+    if (!refr || IsBadReadPtr(refr, 0x20)) return nullptr;
+    return reinterpret_cast<const TESObjectREFR*>(refr)->baseForm;
+}
+
+uint32_t BaseFormIdOf(const void* refr)
+{
+    auto* base = reinterpret_cast<const TESForm*>(BaseFormOf(refr));
+    if (!base || IsBadReadPtr(base, 0x10)) return 0;
+    return base->refID;
+}
+
+float EyeHeight()            { return g_eye_height; }
+void  SetEyeHeight(float u)  { g_eye_height = u; }
+
+// ---- The engine's own view raycast ----------------------------------------
+//
+// Everything above this point had to guess where a shot comes from and where an
+// object's middle is, because nothing in the mod could SEE. The engine can. The
+// pick that decides what is under the crosshair is a Havok raycast, and it is
+// callable: ButcherPete FOSE (c6-dev, MIT) implements GetCrosshairRefEx for
+// Fallout 3 with exactly this call, the way JIP does for New Vegas — which is
+// what the FNV accessibility mod leans on. The addresses below come from that
+// source and were checked against this executable.
+//
+//   0x00574540  __thiscall TESObjectREFR* Pick(void* viewCaster,
+//                   NiPoint3* from, NiPoint3* dir, float maxDist,
+//                   float* outDist, bool* outHit)
+//   InterfaceManager + 0x13C   the viewCaster the pick runs on
+//   0x0107BA78                 the first-person camera node (null = no 3D yet)
+//   player + 0x988             kCamera1stPos — the camera's WORLD position,
+//                              which is the real answer to "where does the shot
+//                              leave from", a number we had been inventing
+//   player + 0x5A9             bThirdPerson
+//   player + 0x90C             camera3rdPos, added when the camera orbits
+namespace {
+
+constexpr uintptr_t kViewPickFn        = 0x00574540;
+constexpr uintptr_t kCamera1stNodePtr  = 0x0107BA78;
+constexpr uint32_t  kIfmViewCaster     = 0x13C;
+constexpr uint32_t  kPlayerCamera1stPos= 0x988;
+constexpr uint32_t  kPlayerThirdPerson = 0x5A9;
+constexpr uint32_t  kPlayerCamera3rdPos= 0x90C;
+
+int g_ray_ok = -1;   // -1 = untested
+
+bool RayCastReady()
+{
+    if (g_ray_ok >= 0) return g_ray_ok != 0;
+    g_ray_ok = 0;
+    const uint8_t sig[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x6A, 0xFF };
+    auto* p = reinterpret_cast<const uint8_t*>(kViewPickFn);
+    if (IsBadReadPtr(p, sizeof(sig)) || std::memcmp(p, sig, sizeof(sig)) != 0) {
+        F3A_INFO("Ray: the view pick at 0x%08X does not match — raycasts off.",
+                 (unsigned)kViewPickFn);
+        return false;
+    }
+    g_ray_ok = 1;
+    F3A_INFO("Ray: engine view pick available at 0x%08X.", (unsigned)kViewPickFn);
+    return true;
+}
+
+} // namespace
+
+bool GetCameraPos(Vec3* out)
+{
+    auto* p = rt::Player();
+    if (!p || !out) return false;
+    auto* b = reinterpret_cast<uint8_t*>(p);
+    if (IsBadReadPtr(b + kPlayerCamera1stPos, 12)) return false;
+
+    const float* c = reinterpret_cast<const float*>(b + kPlayerCamera1stPos);
+    Vec3 pos{ c[0], c[1], c[2] };
+
+    if (!IsBadReadPtr(b + kPlayerThirdPerson, 1) && b[kPlayerThirdPerson] &&
+        !IsBadReadPtr(b + kPlayerCamera3rdPos, 12)) {
+        const float* c3 = reinterpret_cast<const float*>(b + kPlayerCamera3rdPos);
+        pos.x += c3[0]; pos.y += c3[1]; pos.z += c3[2];
+    }
+
+    // Sanity: the camera belongs to the player. Before the 3D exists it can be
+    // stale or zero, and silently aiming from the wrong place is worse than
+    // admitting we do not know.
+    float dx = pos.x - p->posX, dy = pos.y - p->posY, dz = pos.z - p->posZ;
+    if (dx * dx + dy * dy + dz * dz > 400.0f * 400.0f) return false;
+    if (!*reinterpret_cast<void**>(kCamera1stNodePtr) && !IsThirdPerson())
+        return false;
+
+    *out = pos;
+    return true;
+}
+
+bool RayCastView(const Vec3& from, const Vec3& dir, float maxDist,
+                 uint32_t* outRefId, float* outDist, const void** outRef)
+{
+    if (outRefId) *outRefId = 0;
+    if (outDist)  *outDist  = 0.0f;
+    if (outRef)   *outRef   = nullptr;
+    if (!RayCastReady()) return false;
+    auto* ifm = rt::IFM();
+    if (!ifm) return false;
+    auto* caster = *reinterpret_cast<void**>(
+        reinterpret_cast<uint8_t*>(ifm) + kIfmViewCaster);
+    if (!caster || IsBadReadPtr(caster, 4)) return false;
+
+    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (len < 1e-6f) return false;
+    float f[3] = { from.x, from.y, from.z };
+    float d[3] = { dir.x / len, dir.y / len, dir.z / len };
+    float hitDist = 0.0f;
+    bool  hit = false;
+
+    using PickFn = TESObjectREFR* (__thiscall*)(void*, float*, float*, float,
+                                                float*, bool*);
+    TESObjectREFR* ref = reinterpret_cast<PickFn>(kViewPickFn)(
+        caster, f, d, maxDist, &hitDist, &hit);
+
+    // Havok works in metres, the game in its own units — about seven to one.
+    // The pick reports its distance in HAVOK units, so a hit 340 units away
+    // comes back as roughly 48, and comparing that against a range in game
+    // units makes every hit look like a miss. That is what made the ray report
+    // "nothing reachable" at a target the shots were visibly striking.
+    constexpr float kHavokToGame = 6.999125f;
+    if (outDist) *outDist = hitDist * kHavokToGame;
+    if (!ref || IsBadReadPtr(ref, 0x20)) return hit;
+    if (outRefId) *outRefId = ref->refID;
+    if (outRef)   *outRef   = ref;
+    return true;
+}
+
+namespace {
+
+} // namespace
+
+// Find a point on `origin`'s object that the view can actually reach.
+//
+// A reference's origin is wherever its model happens to be anchored — for the
+// vault's rifle targets that is a foot to one side and half a metre below the
+// part you shoot at. Rather than ask a sighted player to measure that for every
+// kind of object in the game, ASK THE ENGINE: cast its own view ray at the
+// origin and, if that does not land on the thing, at points around it until one
+// does. The rays are invisible and cost nothing the player can feel, and the
+// answer is exact.
+//
+// Returns false when nothing on the object can be reached — which is itself
+// worth knowing, because it means something is in the way.
+bool SolveAimPoint(const Vec3& origin, uint32_t wantRefId, Vec3* out)
+{
+    if (!out) return false;
+    Vec3 eye;
+    if (!GetCameraPos(&eye)) return false;
+
+    // Two standards, tried in that order.
+    //
+    // `exact` means the ray came back holding the target itself. `loose` also
+    // accepts anything stopping at the same range, on the grounds that a target
+    // is built from several references and a bullet cannot tell them apart.
+    //
+    // Loose alone is not enough, and the log shows exactly why: aiming at this
+    // target's origin, the ray stops on a wall SIX UNITS in front of it. Six is
+    // well within any sane "same object" tolerance, so the loose test was happy
+    // — while every shot went into the wall. The target's origin is buried
+    // behind the surface it is mounted on; the part you are meant to hit sticks
+    // out somewhere else entirely. So: look for a real hit on the target first,
+    // everywhere, and settle for a near miss only if there is none.
+    auto probe = [&](const Vec3& c, bool exact) -> bool {
+        Vec3 d{ c.x - eye.x, c.y - eye.y, c.z - eye.z };
+        float want = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (want < 1.0f) return false;
+        uint32_t id = 0; float dist = 0.0f;
+        if (!RayCastView(eye, d, want + 400.0f, &id, &dist)) return false;
+        if (wantRefId && id == wantRefId) return true;
+        if (exact) return false;
+        return std::fabs(dist - want) <= 60.0f;
+    };
+
+    // One line about the very first ray, so the next log says what the engine
+    // saw rather than only that we did not like it.
+    {
+        Vec3 d{ origin.x - eye.x, origin.y - eye.y, origin.z - eye.z };
+        float want = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        uint32_t id = 0; float dist = 0.0f;
+        bool any = RayCastView(eye, d, want + 400.0f, &id, &dist);
+        F3A_INFO("AimSolve: ray from (%.0f,%.0f,%.0f) at the origin -> hit=%d "
+                 "ref=%08X dist=%.0f (wanted %.0f)",
+                 eye.x, eye.y, eye.z, any ? 1 : 0, id, dist, want);
+    }
+
+    if (probe(origin, /*exact*/true)) { *out = origin; return true; }
+
+    // Build a frame facing the target so the search sweeps ACROSS the view
+    // rather than along it.
+    Vec3 f{ origin.x - eye.x, origin.y - eye.y, origin.z - eye.z };
+    float fl = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
+    if (fl < 1.0f) return false;
+    f.x /= fl; f.y /= fl; f.z /= fl;
+    Vec3 right{ f.y, -f.x, 0.0f };
+    float rl = std::sqrt(right.x * right.x + right.y * right.y);
+    if (rl < 1e-4f) { right = { 1.0f, 0.0f, 0.0f }; rl = 1.0f; }
+    right.x /= rl; right.y /= rl;
+    Vec3 up{ right.y * f.z - right.z * f.y,
+             right.z * f.x - right.x * f.z,
+             right.x * f.y - right.y * f.x };
+
+    static const float kRadius[] = { 20.0f, 40.0f, 60.0f, 80.0f, 100.0f, 130.0f };
+    constexpr int kSpokes = 16;
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool exact = (pass == 0);
+        for (float r : kRadius) {
+            for (int i = 0; i < kSpokes; ++i) {
+                float a = i * (6.28318530f / kSpokes);
+                float cu = std::cos(a) * r, cr = std::sin(a) * r;
+                Vec3 c{ origin.x + up.x * cu + right.x * cr,
+                        origin.y + up.y * cu + right.y * cr,
+                        origin.z + up.z * cu + right.z * cr };
+                if (probe(c, exact)) {
+                    F3A_INFO("AimSolve: found %s at radius %.0f, angle %.0f deg",
+                             exact ? "the target itself" : "the same range",
+                             r, a * 57.2957795f);
+                    *out = c;
+                    return true;
+                }
+            }
+        }
+        if (!wantRefId) break;   // no reference to be exact about
+    }
+    return false;
+}
+
+void RayMapAround(const Vec3& centre)
+{
+    Vec3 eye;
+    if (!GetCameraPos(&eye)) { F3A_INFO("RayMap: no camera yet."); return; }
+
+    Vec3 f{ centre.x - eye.x, centre.y - eye.y, centre.z - eye.z };
+    float fl = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
+    if (fl < 1.0f) return;
+    f.x /= fl; f.y /= fl; f.z /= fl;
+    Vec3 right{ f.y, -f.x, 0.0f };
+    float rl = std::sqrt(right.x * right.x + right.y * right.y);
+    if (rl < 1e-4f) { right = { 1.0f, 0.0f, 0.0f }; rl = 1.0f; }
+    right.x /= rl; right.y /= rl;
+    Vec3 up{ right.y * f.z - right.z * f.y,
+             right.z * f.x - right.x * f.z,
+             right.x * f.y - right.y * f.x };
+
+    struct Row { uint32_t id; int n; float minD, maxD, minU, maxU, minR, maxR; };
+    Row rows[24];
+    int nrows = 0;
+
+    // A window a little wider than a practice target, sampled finely enough
+    // that nothing the size of a dinner plate can hide between two rays.
+    constexpr float kSpan = 150.0f, kStep = 20.0f;
+    int probes = 0;
+    for (float u = -kSpan; u <= kSpan; u += kStep) {
+        for (float r = -kSpan; r <= kSpan; r += kStep) {
+            Vec3 c{ centre.x + up.x * u + right.x * r,
+                    centre.y + up.y * u + right.y * r,
+                    centre.z + up.z * u + right.z * r };
+            Vec3 d{ c.x - eye.x, c.y - eye.y, c.z - eye.z };
+            uint32_t id = 0; float dist = 0.0f;
+            ++probes;
+            if (!RayCastView(eye, d, fl + 600.0f, &id, &dist)) continue;
+            int k = -1;
+            for (int i = 0; i < nrows; ++i) if (rows[i].id == id) { k = i; break; }
+            if (k < 0) {
+                if (nrows >= 24) continue;
+                k = nrows++;
+                rows[k] = { id, 0, dist, dist, u, u, r, r };
+            }
+            Row& q = rows[k];
+            ++q.n;
+            if (dist < q.minD) q.minD = dist;
+            if (dist > q.maxD) q.maxD = dist;
+            if (u < q.minU) q.minU = u;   if (u > q.maxU) q.maxU = u;
+            if (r < q.minR) q.minR = r;   if (r > q.maxR) q.maxR = r;
+        }
+    }
+
+    F3A_INFO("RayMap: %d rays around (%.0f,%.0f,%.0f) from (%.0f,%.0f,%.0f), "
+             "range %.0f — %d distinct references:",
+             probes, centre.x, centre.y, centre.z, eye.x, eye.y, eye.z, fl, nrows);
+    for (int i = 0; i < nrows; ++i) {
+        const Row& q = rows[i];
+        F3A_INFO("RayMap:   %08X hits=%-4d dist %.0f..%.0f  up %+.0f..%+.0f  "
+                 "side %+.0f..%+.0f", q.id, q.n, q.minD, q.maxD,
+                 q.minU, q.maxU, q.minR, q.maxR);
+    }
+}
+
+std::vector<RayHit> RayScanAhead(float yawSpanDeg, float pitchSpanDeg,
+                                 float stepDeg, float maxDist)
+{
+    std::vector<RayHit> out;
+    Vec3 eye;
+    if (!GetCameraPos(&eye)) return out;
+    auto* p = rt::Player();
+    if (!p) return out;
+
+    const float D2R = 0.01745329f;
+    float baseYaw   = p->rotZ;
+    float basePitch = p->rotX;
+    if (stepDeg < 0.5f) stepDeg = 0.5f;
+
+    for (float dp = -pitchSpanDeg; dp <= pitchSpanDeg; dp += stepDeg) {
+        for (float dy = -yawSpanDeg; dy <= yawSpanDeg; dy += stepDeg) {
+            float yaw   = baseYaw   + dy * D2R;
+            float pitch = basePitch + dp * D2R;
+            float cp = std::cos(pitch);
+            // Engine convention: yaw 0 looks along +Y, positive pitch looks down.
+            Vec3 dir{ std::sin(yaw) * cp, std::cos(yaw) * cp, -std::sin(pitch) };
+            uint32_t id = 0; float dist = 0.0f; const void* refp = nullptr;
+            if (!RayCastView(eye, dir, maxDist, &id, &dist, &refp)) continue;
+            if (!id) continue;
+
+            RayHit* slot = nullptr;
+            for (auto& h : out) if (h.refid == id) { slot = &h; break; }
+            if (!slot) {
+                if (out.size() >= 16) continue;
+                out.push_back(RayHit{});
+                slot = &out.back();
+                slot->refid = id;
+                slot->dist  = dist;
+                slot->yaw   = dy;
+                slot->pitch = dp;
+                auto* ref = reinterpret_cast<const TESObjectREFR*>(refp);
+                const char* nm = nullptr;
+                if (ref && Readable(ref->baseForm, 8))
+                    nm = BaseFormName(ref->baseForm);
+                slot->name = nm ? GameStrToUtf8(nm) : std::string();
+            }
+            ++slot->samples;
+            if (dist < slot->dist) {         // keep the closest sample's aim
+                slot->dist  = dist;
+                slot->yaw   = dy;
+                slot->pitch = dp;
+            }
+        }
+    }
+
+    std::sort(out.begin(), out.end(),
+              [](const RayHit& a, const RayHit& b) { return a.dist < b.dist; });
+    return out;
+}
+
+bool AimPlayerAtRad(float pitchRad, float yawRad)
+{
+    if (!AimNativeReady()) return false;
+    auto* player = rt::Player();
+    if (!player) return false;
+
+    using PitchFn = void  (__thiscall*)(void*, float);
+    using YawFn   = void  (__thiscall*)(void*, float);
+    using GetZFn  = float (__thiscall*)(void*, int);
+
+    reinterpret_cast<PitchFn>(kSetPitchWithClamp)(player, pitchRad);
+
+    // Yaw goes in as a delta from wherever the engine currently thinks we face.
+    // GetRotationZ takes one stack argument it ignores but still cleans up, so
+    // the parameter must be passed or the call corrupts the caller's stack.
+    void** vt = *reinterpret_cast<void***>(player);
+    if (vt && !IsBadReadPtr(vt + kGetRotationZSlot, sizeof(void*))) {
+        auto getZ = reinterpret_cast<GetZFn>(vt[kGetRotationZSlot]);
+        if (getZ) {
+            float cur = getZ(player, 0);
+            float d = yawRad - cur;
+            while (d >  kAimPi) d -= kAimTwoPi;
+            while (d < -kAimPi) d += kAimTwoPi;
+            reinterpret_cast<YawFn>(kAddDeltaZRot)(player, d);
+        }
+    }
+
+    // Camera probe.
+    //
+    // Every value we have been reading back is a value we wrote ourselves,
+    // which proves nothing about where the camera really points — and the one
+    // independent signal, the reference under the crosshair, never moved while
+    // the aim swung through 24 degrees. So once in a while, DON'T write these
+    // two, and let the engine fill them. Whatever is in them on the next frame
+    // is the engine's own opinion of where the view is looking, and comparing
+    // that with the rotation we set says whether our writes reach the camera at
+    // all. One frame in two hundred: invisible in play, decisive in the log.
+    if (g_cam_probe_skip) {
+        g_cam_probe_skip  = false;
+        g_cam_probe_armed = true;
+        g_cam_probe_yaw   = yawRad;
+        g_cam_probe_pitch = pitchRad;
+    } else {
+        if (g_cam_probe_armed) {
+            g_cam_probe_armed = false;
+            float engYaw   = *reinterpret_cast<float*>(kCameraYawGlobal);
+            float engPitch = *reinterpret_cast<float*>(kCameraPitchGlobal);
+            const float R2D = 57.2957795f;
+            float dy = engYaw - g_cam_probe_yaw;
+            while (dy >  kAimPi) dy -= kAimTwoPi;
+            while (dy < -kAimPi) dy += kAimTwoPi;
+            F3A_INFO("CamProbe: engine says yaw=%.1f pitch=%.1f, we set body "
+                     "yaw=%.1f pitch=%.1f (difference %+.1f / %+.1f deg)",
+                     engYaw * R2D, engPitch * R2D,
+                     g_cam_probe_yaw * R2D, g_cam_probe_pitch * R2D,
+                     dy * R2D, (engPitch - g_cam_probe_pitch) * R2D);
+        }
+        if (++g_cam_probe_tick >= 200) { g_cam_probe_tick = 0; g_cam_probe_skip = true; }
+        *reinterpret_cast<float*>(kCameraPitchGlobal) = pitchRad;
+        *reinterpret_cast<float*>(kCameraYawGlobal)   = yawRad;
+    }
+
+    // Whether the engine KEEPS this has to be measured a frame later, not here
+    // — reading it back in the same breath only proves the write landed. That
+    // check lives in poll::AimTick.
+    g_aim_last_yaw   = yawRad;
+    g_aim_last_pitch = pitchRad;
+    g_aim_last_valid = true;
+    return true;
+}
+
+bool GetEffectiveYawRad(float* out)
+{
+    auto* p = rt::Player();
+    if (!p) return false;
+    void** vt = *reinterpret_cast<void***>(p);
+    if (!vt || IsBadReadPtr(vt + kGetRotationZSlot, sizeof(void*))) return false;
+    using GetZFn = float (__thiscall*)(void*, int);
+    auto fn = reinterpret_cast<GetZFn>(vt[kGetRotationZSlot]);
+    if (!fn) return false;
+    if (out) *out = fn(p, 0);
+    return true;
+}
+
+bool GetCameraAngles(float* outPitch, float* outYaw)
+{
+    if (!AimNativeReady()) return false;
+    if (outPitch) *outPitch = *reinterpret_cast<float*>(kCameraPitchGlobal);
+    if (outYaw)   *outYaw   = *reinterpret_cast<float*>(kCameraYawGlobal);
+    return true;
+}
+
+bool AimDriftSinceLast(float* outYaw, float* outPitch)
+{
+    if (!g_aim_last_valid) return false;
+    auto* p = rt::Player();
+    if (!p) return false;
+    float dy = p->rotZ - g_aim_last_yaw;
+    while (dy >  kAimPi) dy -= kAimTwoPi;
+    while (dy < -kAimPi) dy += kAimTwoPi;
+    if (outYaw)   *outYaw   = dy;
+    if (outPitch) *outPitch = p->rotX - g_aim_last_pitch;
+    return true;
+}
+
+bool AimPlayerAtPoint(const Vec3& target, float up, float dzBias)
+{
+    auto* p = rt::Player();
+    if (!p) return false;
+    // Aim from where the shot really comes from. The engine knows: the camera's
+    // own world position. Everything before this estimated it as the player's
+    // origin plus a fixed number, which is wrong for a crouching adult and
+    // hopeless for the ten-year-old of the prologue — and a wrong origin tilts
+    // every shot no matter how exactly the target is known.
+    Vec3 eye{ p->posX, p->posY, p->posZ + g_eye_height };
+    GetCameraPos(&eye);
+    float dx = target.x - eye.x;
+    float dy = target.y - eye.y;
+    // Two heights here are guesses: where the shot leaves the player (the eye,
+    // which is NOT the reference origin, and which for the ten-year-old of the
+    // prologue is nowhere near an adult's) and where the target's aim point
+    // sits above ITS origin. Geometrically those are one number — both shift
+    // dz — so the aim tracker searches this single correction in UNITS rather
+    // than in degrees. Units are the right currency: the correct value is the
+    // same at every range, whereas an angle that works at two metres is wrong
+    // at ten, which is why the earlier angle sweep could not converge.
+    float dz = (target.z + up + dzBias) - eye.z;
+    float horiz = std::sqrt(dx * dx + dy * dy);
+    if (horiz < 1.0f) horiz = 1.0f;
+    float yaw   = std::atan2(dx, dy);       // engine convention: 0 = +Y (north)
+    float pitch = -std::atan2(dz, horiz);   // negative = looking up
+    return AimPlayerAtRad(pitch, yaw);
+}
+
 // ---- Native engine SetAngle (the friend's lead) ---------------------------
 //
 // `Player.SetAngle X/Z` runs 0x00522B50 SetAngleComponent(ref, axisChar, deg).
@@ -1434,6 +2048,72 @@ void SetPlayerAngleDeg(int axisAscii, float degrees)
         return;
     using PFN = char (__cdecl*)(void* ref, int axis, float deg);
     reinterpret_cast<PFN>(0x00522B50)(p, axisAscii, degrees);
+}
+
+// ---- VATS numbers ----------------------------------------------------------
+//
+// Reading VATS from tiles gives the target, the limb and the hit chance, but
+// misses the thing that actually decides a fight: how many action points are
+// left, and therefore how many shots you can queue. The FNV accessibility mod
+// reads those straight out of the VATSMenu object, and the same fields exist
+// here — FNV's menu layout is an evolution of FO3's.
+//
+// Offsets are FNV's, so they are treated as UNVERIFIED on this build: every
+// value is sanity-checked before it is used, and the raw numbers go to the log
+// once per VATS session so a wrong guess shows up as data rather than as a
+// confidently spoken lie.
+//   +0x0CC  UInt16  queued action count
+//   +0x0E0  float   action points
+//   +0x0E4  float   max action points
+//   +0x0F0  float   ammo in the clip
+//   +0x0F4  float   reserve ammo
+//   +0x100  ptr     current body-part data (hit chance at +0x28)
+bool GetVatsInfo(VatsInfo* out)
+{
+    if (!out) return false;
+    *out = VatsInfo{};
+    Menu* menu = FindMenuByType(kMenuType_VATS);
+    if (!menu || IsBadReadPtr(menu, 0x108)) return false;
+    auto* base = reinterpret_cast<const uint8_t*>(menu);
+
+    auto plausible = [](float v, float hi) {
+        return v >= 0.0f && v <= hi && v == v;      // v == v rejects NaN
+    };
+
+    float ap     = *reinterpret_cast<const float*>(base + 0x0E0);
+    float maxAp  = *reinterpret_cast<const float*>(base + 0x0E4);
+    float clip   = *reinterpret_cast<const float*>(base + 0x0F0);
+    float reserve= *reinterpret_cast<const float*>(base + 0x0F4);
+    uint16_t queued = *reinterpret_cast<const uint16_t*>(base + 0x0CC);
+
+    if (plausible(maxAp, 2000.0f) && maxAp > 0.0f && plausible(ap, maxAp + 1.0f)) {
+        out->ap = (int)(ap + 0.5f);
+        out->max_ap = (int)(maxAp + 0.5f);
+        out->has_ap = true;
+    }
+    if (plausible(clip, 9999.0f) && plausible(reserve, 99999.0f)) {
+        out->clip_ammo = (int)clip;
+        out->reserve_ammo = (int)reserve;
+        out->has_ammo = true;
+    }
+    if (queued <= 64) out->queued = queued;
+
+    // Hit chance from the body-part record, when it looks like a percentage.
+    auto* bp = *reinterpret_cast<const uint8_t* const*>(base + 0x100);
+    if (bp && !IsBadReadPtr((void*)bp, 0x30)) {
+        float chance = *reinterpret_cast<const float*>(bp + 0x28);
+        if (plausible(chance, 100.0f)) { out->hit_chance = (int)(chance + 0.5f); out->has_chance = true; }
+    }
+
+    static bool s_logged = false;
+    if (!s_logged) {
+        s_logged = true;
+        F3A_INFO("VATS raw: ap=%.1f/%.1f clip=%.1f reserve=%.1f queued=%u bp=%p "
+                 "(accepted ap=%d ammo=%d chance=%d)",
+                 ap, maxAp, clip, reserve, (unsigned)queued, (void*)bp,
+                 (int)out->has_ap, (int)out->has_ammo, (int)out->has_chance);
+    }
+    return true;
 }
 
 // ---- Walk animation --------------------------------------------------------
@@ -1507,6 +2187,584 @@ bool PlayActorAnimGroup(void* actor, uint32_t animGroup)
     void* active = *reinterpret_cast<void**>(reinterpret_cast<char*>(animData) + 0xE4);
     reinterpret_cast<AnimStateFn>(0x006FF040)(actor, 0xE, active);
     return true;
+}
+
+// ---- Aiming at a reference's real body ------------------------------------
+//
+// Pointing the crosshair at a thing means pointing it at the thing's BODY, not
+// at the origin the engine records for it. Those differ badly: a target's origin
+// often sits at its feet, inside a table, or at the base of a post. Every
+// attempt to paper over that with fixed height offsets and pitch fudges produced
+// something that worked for one object and missed the next.
+//
+// The reliable source is the object's collision shape, which is what a bullet
+// interacts with anyway. The FNV accessibility mod resolves its aim point the
+// same way, and this is a clean-room implementation of that idea for FO3.
+namespace {
+
+// Gamebryo layout, unchanged between FO3 and FNV:
+constexpr UInt32 kNiAV_Name            = 0x08;   // NiObjectNET::m_name
+constexpr UInt32 kNiAV_CollisionObject = 0x1C;
+constexpr UInt32 kNiNode_WorldBound    = 0x20;   // -> {x, y, z, radius}
+constexpr UInt32 kNiAV_WorldTranslate  = 0x8C;   // m_worldTransform.translate
+constexpr UInt32 kNiNode_Children      = 0x9C;   // NiTArray: data @+4, count @+0xA
+constexpr UInt32 kNiAV_GetAsNiNode     = 3;      // vtable slot
+// Havok stores collision in its own units; the game divides by ~1/7 to draw it.
+constexpr float  kHavokToGame          = 6.999125f;
+
+// The reference's 3D model. FOSE has no field for it, but the engine fetches it
+// through a virtual: SetAngle's worker does `mov edx,[vtable+0x1D0]; call edx`
+// and then writes the rotation matrix into the result at +0x34.
+void* RefNiNode(TESObjectREFR* refr)
+{
+    if (!refr || IsBadReadPtr(refr, 0x40)) return nullptr;
+    void** vtable = *reinterpret_cast<void***>(refr);
+    if (!vtable || IsBadReadPtr(vtable, 0x1D4)) return nullptr;
+    using GetNiNodeFn = void* (__thiscall*)(void* self, int flag);
+    auto fn = reinterpret_cast<GetNiNodeFn>(vtable[0x1D0 / 4]);
+    if (!fn) return nullptr;
+    void* node = fn(refr, 0);
+    if (!node || IsBadReadPtr(node, 0xA0)) return nullptr;
+    return node;
+}
+
+// Havok's shape diagonal comes back in SSE vectors, so both must be 16-aligned.
+__declspec(align(16)) struct HkVec4 { float x, y, z, w; };
+__declspec(align(16)) struct HkDiagonal { HkVec4 min; HkVec4 max; };
+
+// The collision shape's centre for one node, if it carries a rigid body.
+bool NodeCollisionCenter(void* node, float& cx, float& cy, float& cz)
+{
+    auto* n = reinterpret_cast<UInt8*>(node);
+    UInt8* collObj = *reinterpret_cast<UInt8**>(n + kNiAV_CollisionObject);
+    if (!collObj || IsBadReadPtr(collObj, 0x14)) return false;
+    UInt8* worldObj = *reinterpret_cast<UInt8**>(collObj + 0x10);
+    if (!worldObj || IsBadReadPtr(worldObj, 0x2C)) return false;
+    UInt8* hkWorldObj = *reinterpret_cast<UInt8**>(worldObj + 0x08);
+    if (!hkWorldObj || IsBadReadPtr(hkWorldObj, 0x2C)) return false;
+    // collisionType 1 = rigid body. Phantoms (2) have no shape diagonal at all,
+    // and asking them for one calls into the wrong slot.
+    if (*(hkWorldObj + 0x28) != 1) return false;
+
+    UInt32* vtable = *reinterpret_cast<UInt32**>(worldObj);
+    if (!vtable || IsBadReadPtr(vtable, 0xFC)) return false;
+    using GetDiagFn = void (__thiscall*)(UInt8*, HkDiagonal*);
+    auto getDiag = reinterpret_cast<GetDiagFn>(vtable[0xF8 / 4]);
+    if (!getDiag) return false;
+
+    HkDiagonal d{};
+    getDiag(worldObj, &d);
+    cx = (d.min.x + d.max.x) * 0.5f * kHavokToGame;
+    cy = (d.min.y + d.max.y) * 0.5f * kHavokToGame;
+    cz = (d.min.z + d.max.z) * 0.5f * kHavokToGame;
+    return true;
+}
+
+} // namespace
+
+bool GetCollisionAABBCenter(const void* refr, float* outX, float* outY, float* outZ)
+{
+    void* root = RefNiNode(reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr)));
+    if (!root) return false;
+
+    // Breadth of the model tree, iteratively — a recursive walk over game memory
+    // is a crash waiting for a malformed node.
+    void* stack[64];
+    int top = 0;
+    stack[top++] = root;
+    while (top > 0) {
+        void* node = stack[--top];
+        if (!node || IsBadReadPtr(node, 0xA0)) continue;
+
+        float cx, cy, cz;
+        if (NodeCollisionCenter(node, cx, cy, cz)) {
+            if (outX) *outX = cx;
+            if (outY) *outY = cy;
+            if (outZ) *outZ = cz;
+            return true;
+        }
+
+        // Only real NiNodes have children; the cast is the engine's own test.
+        UInt32* vt = *reinterpret_cast<UInt32**>(node);
+        if (!vt || IsBadReadPtr(vt, (kNiAV_GetAsNiNode + 1) * 4)) continue;
+        using AsNodeFn = void* (__thiscall*)(void*);
+        auto asNode = reinterpret_cast<AsNodeFn>(vt[kNiAV_GetAsNiNode]);
+        if (!asNode) continue;
+        void* asNiNode = asNode(node);
+        if (!asNiNode) continue;
+
+        UInt8* arr = reinterpret_cast<UInt8*>(asNiNode) + kNiNode_Children;
+        if (IsBadReadPtr(arr, 0x10)) continue;
+        void** children = *reinterpret_cast<void***>(arr + 0x04);
+        UInt16 count    = *reinterpret_cast<UInt16*>(arr + 0x0A);
+        if (!children || count > 512 || IsBadReadPtr(children, count * 4)) continue;
+        for (UInt16 i = 0; i < count && top < 64; ++i)
+            if (children[i]) stack[top++] = children[i];
+    }
+    return false;
+}
+
+// Where the RENDERING camera is, which is where shots come from. In first person
+// that is near the player's eyes but not at their origin, and the difference is
+// exactly what makes a pitch computed from the feet miss.
+bool GetCameraWorldPos(float* x, float* y, float* z)
+{
+    auto* ifm = rt::IFM();
+    if (!ifm) return false;
+    // InterfaceManager::sceneGraph004 (+0x04) owns the main camera.
+    UInt8* sg = *reinterpret_cast<UInt8**>(reinterpret_cast<UInt8*>(ifm) + 0x04);
+    if (!sg || IsBadReadPtr(sg, 0xB0)) return false;
+    UInt8* cam = *reinterpret_cast<UInt8**>(sg + 0xAC);
+    if (!cam || IsBadReadPtr(cam, kNiAV_WorldTranslate + 12)) return false;
+    float* t = reinterpret_cast<float*>(cam + kNiAV_WorldTranslate);
+
+    // Sanity: the camera lives on the player. If this offset means something
+    // else in this build, the result lands far away — then we say so and the
+    // caller falls back to the player's eye position instead of aiming at junk.
+    auto* p = rt::Player();
+    if (p) {
+        float dx = t[0] - p->posX, dy = t[1] - p->posY, dz = t[2] - p->posZ;
+        if (dx * dx + dy * dy + dz * dz > 600.0f * 600.0f) return false;
+    }
+    if (x) *x = t[0];
+    if (y) *y = t[1];
+    if (z) *z = t[2];
+    return true;
+}
+
+// The object's own dimensions, from the BASE FORM — TESBoundObject::bounds at
+// +0x24: six signed shorts, min x/y/z then max x/y/z, loaded straight from the
+// game's data files. This is plain data: no model, no virtual calls, nothing
+// that can crash. It gives the real distance from an object's origin to its
+// middle, which is exactly what a fixed "+100 units" was pretending to know.
+bool BaseFormCenterOffset(TESForm* base, float* ox, float* oy, float* oz)
+{
+    if (!base || IsBadReadPtr(base, 0x30)) return false;
+    auto* b = reinterpret_cast<const int16_t*>(
+        reinterpret_cast<const UInt8*>(base) + 0x24);
+    int mnx = b[0], mny = b[1], mnz = b[2];
+    int mxx = b[3], mxy = b[4], mxz = b[5];
+    // Reject nonsense: a form that isn't a bound object has something else here.
+    if (mxx < mnx || mxy < mny || mxz < mnz) return false;
+    int spanX = mxx - mnx, spanY = mxy - mny, spanZ = mxz - mnz;
+    if (spanX == 0 && spanY == 0 && spanZ == 0) return false;
+    if (spanX > 20000 || spanY > 20000 || spanZ > 20000) return false;
+    if (ox) *ox = (mnx + mxx) * 0.5f;
+    if (oy) *oy = (mny + mxy) * 0.5f;
+    if (oz) *oz = (mnz + mxz) * 0.5f;
+    return true;
+}
+
+bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
+{
+    if (how) *how = "none";
+    auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
+    if (!r || IsBadReadPtr(r, 0x40) || !out) return false;
+
+    // The collision centre would be ideal, but reaching it requires calling into
+    // the model, and BOTH attempts at that crashed the game on this build: first
+    // the Havok virtuals, then the 3D getter itself (the log stopped exactly at
+    // the call). Those offsets came from New Vegas. Opt-in only, and off by
+    // default, until they can be verified against FO3 rather than assumed.
+    if (config::Get().aim_collision) {
+        float cx, cy, cz;
+        F3A_INFO("AimPoint: trying collision centre (opt-in)");
+        if (GetCollisionAABBCenter(refr, &cx, &cy, &cz)) {
+            *out = { cx, cy, cz };
+            if (how) *how = "collision";
+            return true;
+        }
+    }
+
+    // Default: origin plus the base form's own centre offset, rotated into the
+    // reference's facing so a long object leans the right way.
+    float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+    if (BaseFormCenterOffset(r->baseForm, &ox, &oy, &oz)) {
+        float c = std::cos(r->rotZ), sn = std::sin(r->rotZ);
+        out->x = r->posX + (ox * c - oy * sn);
+        out->y = r->posY + (ox * sn + oy * c);
+        out->z = r->posZ + oz;
+        if (how) *how = "bounds";
+        return true;
+    }
+
+    // Last resort: the origin, lifted to roughly chest height. A guess, and
+    // reported as one.
+    *out = { r->posX, r->posY, r->posZ + 100.0f };
+    if (how) *how = "origin+100";
+    return true;
+}
+
+bool AimAtReference(const void* refr, std::string* detail)
+{
+    F3A_INFO("AimAtReference: start refr=%p", refr);
+    Vec3 target{};
+    const char* how = "none";
+    if (!GetAimPointFor(refr, &target, &how)) return false;
+    F3A_INFO("AimAtReference: aim point %s (%.0f,%.0f,%.0f)",
+             how, target.x, target.y, target.z);
+
+    // Aim FROM the camera when we can read it; the player's origin is at their
+    // feet, and a pitch measured from there is wrong by the player's height.
+    float sx, sy, sz;
+    const char* src = "camera";
+    F3A_INFO("AimAtReference: reading camera");
+    if (!GetCameraWorldPos(&sx, &sy, &sz)) {
+        auto* p = rt::Player();
+        if (!p) return false;
+        sx = p->posX; sy = p->posY; sz = p->posZ + 100.0f;
+        src = "eyes";
+    }
+
+    float dx = target.x - sx, dy = target.y - sy, dz = target.z - sz;
+    float horiz = std::sqrt(dx * dx + dy * dy);
+    const float R2D = 57.2957795f;
+    float yawDeg   = std::atan2(dx, dy) * R2D;                         // 0 = north
+    float pitchUp  = std::atan2(dz, horiz > 1.0f ? horiz : 1.0f) * R2D; // + = above
+
+    // Heading through the engine's own turning routine, elevation through
+    // SetAngle (negative looks up). No bias terms: if this misses, the aim point
+    // or the source position is wrong, and that is what should be fixed.
+    FacePointNative(target);
+    SetPlayerAngleDeg('X', -pitchUp);
+
+    F3A_INFO("AimAtReference: point=%s src=%s target=(%.0f,%.0f,%.0f) "
+             "yaw=%.1f pitch=%.1f dist=%.0f",
+             how, src, target.x, target.y, target.z, yawDeg, pitchUp, horiz);
+    if (detail) *detail = how;
+    return true;
+}
+
+// Is the player holding the game's AIM control right now?
+//
+// Reading the CONTROL rather than a fixed key means this follows whatever the
+// player bound it to — right mouse button by default, but remappable, and the
+// mod has no business assuming. FOSE exposes the bind tables; we then ask
+// Windows whether that physical key or mouse button is down, which is what the
+// FNV accessibility mod does for the same purpose.
+bool IsAimControlHeld()
+{
+    constexpr UInt32 kControl_Aim = 6;
+    auto* globs = *reinterpret_cast<OSInputGlobals**>(0x01176524);
+    if (!globs || IsBadReadPtr(globs, 0x1BC0)) return false;
+    if (kControl_Aim >= OSInputGlobals::kMaxControlBinds) return false;
+
+    UInt8 kb = globs->keyBinds[kControl_Aim];
+    if (kb != 0xFF && kb != 0) {
+        UINT vk = MapVirtualKeyA(kb, MAPVK_VSC_TO_VK);   // DirectInput scancode
+        if (vk && (GetAsyncKeyState((int)vk) & 0x8000)) return true;
+    }
+    UInt8 mb = globs->mouseBinds[kControl_Aim];
+    if (mb != 0xFF) {
+        static const int kMouseVK[] = { VK_LBUTTON, VK_RBUTTON, VK_MBUTTON,
+                                        VK_XBUTTON1, VK_XBUTTON2 };
+        if (mb < (UInt8)(sizeof(kMouseVK) / sizeof(kMouseVK[0])) &&
+            (GetAsyncKeyState(kMouseVK[mb]) & 0x8000)) return true;
+    }
+    return false;
+}
+
+// Does the player have a weapon out? Aim assistance has no business running
+// while the gun is holstered.
+bool IsWeaponOut()
+{
+    auto* p = rt::Player();
+    if (!p) return false;
+    // Actor::isWeaponOut, a byte on the actor; guarded like every raw read.
+    const UInt8* b = reinterpret_cast<const UInt8*>(p) + 0x19C;
+    if (IsBadReadPtr((void*)b, 1)) return false;
+    return *b != 0;
+}
+
+// ---- VATS limbs -----------------------------------------------------------
+//
+// VATS draws ONE TILE PER BODY PART (eight of them on a humanoid), each with its
+// own screen position, its name and its hit chance — "Korpus 95%", "Prawe nogi
+// 95%". There is no working button to cycle them: the menu's BodyPart button is
+// invisible on this build, which is why clicking it did nothing. Selecting a
+// limb means pointing at ITS tile, and queueing a shot means clicking there.
+namespace {
+// Per-limb body-part id carried on the limb_percent tile (Korpus=3, Prawe
+// nogi=1, Lewe nogi=2, Glowa=4 in the dump). Identical across the duplicate
+// tiles of one body part, so it identifies a limb independently of its name.
+constexpr UInt32 kTrait_VatsBodyPartId = 0x27D4;
+
+// The SELECTED body part. In the dump this is 1 on exactly one limb and 0 on
+// the other three, and that same limb is independently singled out two other
+// ways: it is drawn at a different alpha (119.9 against 255) and it is the only
+// one showing its name label. Three signals agreeing is why this is the marker
+// and not the name label, which turned out not to be set at all in play.
+constexpr UInt32 kTrait_VatsLimbSelected = 0x27D6;
+
+void CollectVatsLimbs(Tile* t, int depth, std::vector<VatsLimb>& out)
+{
+    if (!t || depth > 10 || out.size() >= 32) return;
+    // VATS draws ONE limb_percent tile per skeleton node, so a creature with
+    // several legs mapped to the same body part gets several identical tiles —
+    // which is why cycling read "Prawe nogi" three times before moving on. A
+    // dump settled it: of eight tiles, exactly four carry visible=1, and those
+    // four are exactly the four distinct body parts. So the visible one is the
+    // representative tile and the rest are duplicates.
+    if (TileNameHas(t, "limb_percent") && TileVisible(t)) {
+        VatsLimb l;
+        l.tile = t;
+        l.x = TileAbsX(t);
+        l.y = TileAbsY(t);
+        l.part_id = (int)TileNum(t, kTrait_VatsBodyPartId);
+        l.selected = TileNum(t, kTrait_VatsLimbSelected) != 0.0f;
+        if (Tile* n = FindChildByName(t, "limb_name", 3)) {
+            // Fallback only: the selected limb also shows its name label, but
+            // that label was not set during play, so it cannot be the primary
+            // test — it is kept as corroboration if the flag ever goes missing.
+            if (!l.selected) l.selected = TileVisible(n);
+            if (const char* raw = TileStringTrait(n)) {
+                l.name = GameStrToUtf8(raw);
+                // The game pads these with tabs and spaces.
+                while (!l.name.empty() &&
+                       (l.name.back() == ' ' || l.name.back() == '	'))
+                    l.name.pop_back();
+            }
+        }
+        if (Tile* c = FindChildByName(t, "chance_to_hit", 3))
+            if (const char* raw = TileStringTrait(c)) l.chance = GameStrToUtf8(raw);
+        // Same body part twice (several visible nodes) — keep the first, but
+        // let a later tile contribute the selection flag.
+        //
+        // Matched on the NAME as well as the id: a human target came back with
+        // sixteen tiles carrying only six distinct names, so the id alone does
+        // not collapse them. The name is also what the player hears, and two
+        // entries that read identically are not a choice.
+        if (!l.name.empty()) {
+            bool dup = false;
+            for (auto& e : out) {
+                bool same = (l.part_id != 0 && e.part_id == l.part_id) ||
+                            e.name == l.name;
+                if (!same) continue;
+                if (l.selected) { e.selected = true; e.tile = l.tile;
+                                  e.x = l.x; e.y = l.y; }
+                dup = true;
+                break;
+            }
+            if (!dup) out.push_back(l);
+        }
+    }
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&t->childList);
+    for (int i = 0; node && i < 4096; ++i) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) CollectVatsLimbs(cn->child, depth + 1, out);
+        node = node->next;
+    }
+}
+} // namespace
+
+std::vector<VatsLimb> GetVatsLimbs()
+{
+    std::vector<VatsLimb> out;
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot) return out;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) {
+            auto* tm = reinterpret_cast<TileMenu*>(cn->child);
+            Menu* m = tm->menu;
+            if (m && m->typeID == kMenuType_VATS) {
+                CollectVatsLimbs(cn->child, 0, out);
+                break;
+            }
+        }
+        node = node->next;
+    }
+    static int  last_n = -1;
+    static int  last_sel = -1;
+    int sel = -1;
+    for (size_t i = 0; i < out.size(); ++i) if (out[i].selected) { sel = (int)i; break; }
+    if ((int)out.size() != last_n || sel != last_sel) {
+        last_n = (int)out.size();
+        last_sel = sel;
+        F3A_INFO("GetVatsLimbs: %d limb(s), selected=%d (%s)", last_n, sel,
+                 sel >= 0 ? out[sel].name.c_str() : "none");
+    }
+    return out;
+}
+
+// How many shots are queued, counted from the list VATS draws on screen.
+// The menu-struct offset we had for this came from the New Vegas mod and does
+// not hold here — the log shows it reading maxAP as 0 and the body-part pointer
+// as null, so nothing read through those offsets can be trusted. The list, by
+// contrast, is what the player sees.
+int GetVatsQueuedCount()
+{
+    Tile* vats = FindVisibleMenuTile(kMenuType_VATS);
+    if (!vats) return -1;
+    Tile* list = FindChildByName(vats, "queued_actions", 6);
+    if (!list) return -1;
+    int n = 0;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&list->childList);
+    for (int i = 0; node && i < 256; ++i) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) {
+            const char* nm = cn->child->name.m_data;
+            // The listbox's own furniture is always there; the rest are entries.
+            if (nm && std::strcmp(nm, "lb_scrollbar") != 0 &&
+                      std::strcmp(nm, "lb_highlight_box") != 0)
+                ++n;
+        }
+        node = node->next;
+    }
+    return n;
+}
+
+// Where on screen the SELECTED limb's marker sits. Queueing a shot in VATS is
+// a positional click — the game only accepts it when the cursor is actually on
+// a body-part marker — so this is the spot the cursor has to reach.
+bool GetVatsSelectedLimbPos(float* x, float* y)
+{
+    auto limbs = GetVatsLimbs();
+    for (const auto& l : limbs) {
+        if (!l.selected) continue;
+        if (x) *x = l.x;
+        if (y) *y = l.y;
+        return true;
+    }
+    return false;
+}
+
+bool GetVatsPick(VatsPick* out)
+{
+    if (!out) return false;
+    *out = VatsPick{};
+    out->queued = GetVatsQueuedCount();
+    auto limbs = GetVatsLimbs();
+    out->count = (int)limbs.size();
+    for (size_t i = 0; i < limbs.size() && i < 8; ++i)
+        std::snprintf(out->names[i], sizeof(out->names[i]), "%s", limbs[i].name.c_str());
+    for (size_t i = 0; i < limbs.size(); ++i) {
+        if (!limbs[i].selected) continue;
+        out->index = (int)i + 1;
+        std::snprintf(out->name, sizeof(out->name), "%s", limbs[i].name.c_str());
+        std::snprintf(out->chance, sizeof(out->chance), "%s", limbs[i].chance.c_str());
+        break;
+    }
+    return out->count > 0;
+}
+
+// Click a limb's tile through the menu's own handler — the same path that works
+// for the target arrows. This both selects the limb and queues a shot at it,
+// which is what clicking it with a mouse does.
+bool ClickVatsLimb(const void* tile)
+{
+    Menu* menu = FindMenuByType(kMenuType_VATS);
+    auto* t = reinterpret_cast<Tile*>(const_cast<void*>(tile));
+    if (!menu || !t || IsBadReadPtr(t, 0x40)) return false;
+    UInt32 id = (UInt32)TileNum(t, kTileValue_id);
+    F3A_INFO("ClickVatsLimb: id=%u vis=%d", id, (int)TileVisible(t));
+    menu->HandleClick(id, t);
+    return true;
+}
+
+// ---- Control placeholders in the game's own text --------------------------
+//
+// Tutorial hints arrive with the game's control markers still in them, e.g.
+//   "Naciśnij i przytrzymaj &-sUActnMenumode;, aby uruchomić światło Pip-Boya."
+// The engine swaps those for a button icon on a gamepad; with a keyboard it
+// leaves them as they are, so a screen reader reads out "su act n menumode".
+// We replace each one with the key the player ACTUALLY has bound, read from the
+// game's own control table — so remapping a key changes the hint too, and no
+// list of keys is hard-coded here.
+namespace {
+
+struct ControlName { const char* name; UInt32 index; };
+
+// Bethesda's control order, as used by the bind tables.
+constexpr ControlName kControlNames[] = {
+    { "forward",     0 },  { "back",        1 },
+    { "left",        2 },  { "right",       3 },
+    { "attack",      4 },  { "activate",    5 },  { "use", 5 },
+    { "block",       6 },  { "aim",         6 },
+    { "readyweapon", 7 },  { "sneak",       8 },  { "crouch", 8 },
+    { "run",         9 },  { "alwaysrun",  10 },
+    { "automove",   11 },  { "jump",       12 },
+    { "togglepov",  13 },  { "menumode",   14 },  { "pipboy", 14 },
+    { "rest",       15 },  { "vats",       16 },
+    { "quicksave",  25 },  { "quickload",  26 },  { "grab", 27 },
+};
+
+std::string LowerAscii(std::string v)
+{
+    for (char& c : v) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return v;
+}
+
+// "sUActnMenumode" -> "menumode": strip the engine's prefix letters, keeping
+// only the action itself.
+std::string StripControlPrefix(const std::string& token)
+{
+    std::string low = LowerAscii(token);
+    static const char* kPrefixes[] = { "suactn", "suact", "sact", "sn", "su" };
+    for (const char* pre : kPrefixes) {
+        size_t n = std::strlen(pre);
+        if (low.size() > n && low.compare(0, n, pre) == 0) return low.substr(n);
+    }
+    return low;
+}
+
+// The readable name of a DirectInput scancode, from Windows — so it comes out
+// in the user's own language and matches their keyboard layout.
+std::string KeyNameForScancode(UInt8 dik)
+{
+    if (dik == 0 || dik == 0xFF) return {};
+    char buf[64] = {};
+    LONG lparam = (LONG)dik << 16;
+    if (GetKeyNameTextA(lparam, buf, sizeof(buf)) > 0 && buf[0]) return buf;
+    return {};
+}
+
+} // namespace
+
+std::string ExpandControlTokens(const std::string& text)
+{
+    if (text.find('&') == std::string::npos) return text;
+
+    auto* globs = *reinterpret_cast<OSInputGlobals**>(0x01176524);
+    std::string out;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t start = text.find('&', pos);
+        if (start == std::string::npos) { out += text.substr(pos); break; }
+        size_t end = text.find(';', start);
+        if (end == std::string::npos) { out += text.substr(pos); break; }
+
+        out += text.substr(pos, start - pos);
+        // Both "&-name;" and "&name;" appear in the game's text.
+        size_t nameAt = start + 1;
+        if (nameAt < text.size() && text[nameAt] == '-') ++nameAt;
+        std::string action = StripControlPrefix(text.substr(nameAt, end - nameAt));
+
+        std::string replacement;
+        for (const auto& cn : kControlNames) {
+            if (action != cn.name) continue;
+            if (globs && !IsBadReadPtr(globs, 0x1BC0) &&
+                cn.index < OSInputGlobals::kMaxControlBinds) {
+                replacement = KeyNameForScancode(globs->keyBinds[cn.index]);
+                if (replacement.empty()) {
+                    UInt8 mb = globs->mouseBinds[cn.index];
+                    static const char* kMouse[] = { "lewy przycisk myszy",
+                        "prawy przycisk myszy", "środkowy przycisk myszy" };
+                    if (mb < 3) replacement = kMouse[mb];
+                }
+            }
+            break;
+        }
+        // Unknown marker, or a control bound to nothing: drop it rather than
+        // read the raw token aloud.
+        out += replacement;
+        pos = end + 1;
+    }
+    return out;
 }
 
 // ---- Native "face this point" ---------------------------------------------
@@ -1947,6 +3205,21 @@ bool TileSelectable(Tile* t, const char*& out_label)
     return true;
 }
 
+// Is `part` already in `out` as a complete comma-separated element? Used
+// instead of a substring test so a short value (a key binding like "V") is not
+// swallowed by a longer word that happens to contain it ("VATS").
+bool ContainsWholePart(const std::string& out, const std::string& part)
+{
+    for (size_t pos = 0; (pos = out.find(part, pos)) != std::string::npos; ) {
+        size_t end = pos + part.size();
+        bool startOk = (pos == 0) || (pos >= 2 && out.compare(pos - 2, 2, ", ") == 0);
+        bool endOk   = (end == out.size()) || out.compare(end, 2, ", ") == 0;
+        if (startOk && endOk) return true;
+        pos = end;
+    }
+    return false;
+}
+
 // Collect ALL distinct visible strings inside a row (depth-limited DFS),
 // skipping the toggle-value subtree (read separately as the row's value).
 // Save-list rows carry several text parts ('AUTO', 'Vault 101'); reading
@@ -1957,8 +3230,11 @@ void CollectRowText(Tile* t, int depth, std::string& out)
     if (TileNameHas(t, "toggle_value")) return;
     if (const char* s = TileStringTrait(t)) {
         std::string part = GameStrToUtf8(s);
-        // Dedup: row tiles often repeat the same string on a child.
-        if (!part.empty() && out.find(part) == std::string::npos) {
+        // Dedup: row tiles often repeat the same string on a child. Compare
+        // WHOLE parts, not substrings — a plain `find` dropped the control
+        // binding "V" because it occurs inside the action name "VATS", so that
+        // row read as just "VATS" and rebinding it to any other key "fixed" it.
+        if (!part.empty() && !ContainsWholePart(out, part)) {
             if (!out.empty()) out += ", ";
             out += part;
         }
@@ -2395,8 +3671,11 @@ bool ClickMenuButton(uint32_t menuType, const char* btnName, int depth)
                 Tile* btn = FindChildByName(cn->child, btnName, depth);
                 if (btn) {
                     UInt32 id = (UInt32)TileNum(btn, kTileValue_id);
-                    F3A_INFO("ClickMenuButton(menu 0x%X, '%s') id=%u",
-                             menuType, btnName, id);
+                    F3A_INFO("ClickMenuButton(menu 0x%X, '%s') id=%u vis=%.0f "
+                             "menu=%p vtable=%p",
+                             menuType, btnName, id,
+                             TileNum(btn, kTileValue_visible), (void*)m,
+                             *reinterpret_cast<void**>(m));
                     m->HandleClick(id, btn);
                     return true;
                 }
@@ -2411,6 +3690,98 @@ bool ClickMenuButton(uint32_t menuType, const char* btnName, int depth)
 }
 
 
+namespace {
+
+// Rows in a list tile: its children minus the furniture every list carries.
+int CountListRows(Tile* list, Tile** firstRow)
+{
+    if (firstRow) *firstRow = nullptr;
+    if (!list) return 0;
+    int n = 0;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&list->childList);
+    for (int safety = 0; node && safety < 512; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !cn->child) continue;
+        const char* nm = fose_rt::TileName(cn->child);
+        if (!nm || !*nm) continue;
+        if (std::strcmp(nm, "lb_scrollbar") == 0 ||
+            std::strcmp(nm, "lb_highlight_box") == 0) continue;
+        if (n == 0 && firstRow) *firstRow = cn->child;
+        ++n;
+    }
+    return n;
+}
+
+Tile* ContainerTile(const char* name, int depth)
+{
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot) return nullptr;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !cn->child) continue;
+        auto* tm = reinterpret_cast<TileMenu*>(cn->child);
+        Menu* m = tm->menu;
+        if (!m || m->typeID != kMenuType_Container) continue;
+        return FindChildByName(cn->child, name, depth);
+    }
+    return nullptr;
+}
+
+} // namespace
+
+bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs)
+{
+    Tile* myList  = ContainerTile("CM_Items_InventoryList", 4);
+    Tile* thList  = ContainerTile("CM_Container_InventoryList", 4);
+    if (!myList && !thList) return false;
+    if (mine) {
+        Tile* t = ContainerTile("CM_ItemsTitle", 4);
+        mine->title = t && TileStringTrait(t) ? GameStrToUtf8(TileStringTrait(t))
+                                              : std::string();
+        mine->rows  = CountListRows(myList, nullptr);
+    }
+    if (theirs) {
+        Tile* t = ContainerTile("CM_ContainerTitle", 4);
+        theirs->title = t && TileStringTrait(t) ? GameStrToUtf8(TileStringTrait(t))
+                                                : std::string();
+        theirs->rows  = CountListRows(thList, nullptr);
+    }
+    return true;
+}
+
+bool FocusContainerList(bool container_side)
+{
+    Tile* list = ContainerTile(container_side ? "CM_Container_InventoryList"
+                                              : "CM_Items_InventoryList", 4);
+    Tile* row = nullptr;
+    int n = CountListRows(list, &row);
+    if (n <= 0 || !row) return false;
+
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot) return false;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !cn->child) continue;
+        auto* tm = reinterpret_cast<TileMenu*>(cn->child);
+        Menu* m = tm->menu;
+        if (!m || m->typeID != kMenuType_Container) continue;
+        UInt32 id = (UInt32)TileNum(row, kTileValue_id);
+        F3A_INFO("Container: focusing the %s list, first row id=%u",
+                 container_side ? "container" : "player", id);
+        m->HandleClick(id, row);
+        return true;
+    }
+    return false;
+}
+
 bool ClickVatsButton(const char* btnName)
 {
     // e.g. "BodyPart_button" (cycle limb), "left_arrow"/"right_arrow" (switch
@@ -2419,6 +3790,13 @@ bool ClickVatsButton(const char* btnName)
 }
 
 bool ClickVatsBodyPart() { return ClickVatsButton("BodyPart_button"); }
+
+// Queue a shot at the limb currently selected. This is the menu's own "Wybierz"
+// button (id 7). The limb TILES are not buttons at all — a dump shows them with
+// id 0 and no target trait, which is why clicking them queued nothing.
+// "Zatwierdz" (accept_button, id 4) is a different thing entirely: it FIRES the
+// queue and leaves VATS.
+bool ClickVatsSelect() { return ClickVatsButton("Select_button"); }
 
 // The map's action button ("Podróżować do <miejsce>" once a marker is selected).
 // Clicking a marker only SELECTS it — this is the press that actually travels,
@@ -3229,6 +4607,208 @@ std::string GetHudMessage()
     return out.substr(b, e - b + 1);
 }
 
+// Everything the HUD is currently SAYING, as separate lines.
+//
+// The game puts tutorials, hints, "you cannot fast travel while overencumbered",
+// perk and level notices and similar prose straight onto the HUD, and a sighted
+// player just reads them. There is no single tile for that — it comes and goes
+// across the HUD tree — so collect every visible string and let the caller
+// announce the ones that are NEW.
+//
+// The filter is the important part: the HUD is also full of text that changes
+// constantly (health, action points, ammo counts, the compass, the clock). Those
+// are excluded by tile name, otherwise the mod would talk over the game forever.
+// Tiles we already read through their own pollers (Messages, Info) are skipped
+// too, so nothing is announced twice.
+namespace {
+bool HudTileIsNoise(Tile* t)
+{
+    static const char* kNoise[] = {
+        "health", "Health", "hp", "ap_", "Ap", "ammo", "Ammo", "compass",
+        "Compass", "clock", "Clock", "meter", "Meter", "bar", "Bar",
+        "Messages", "Info", "crippled", "Crippled", "xp", "XP", "rad", "Rad",
+        "sneak", "Sneak", "reticle", "Reticle", "enemyhealth", "EnemyHealth",
+        // Loot Menu Updated's overlay. It lives on the HUD and is full of
+        // prose — item names, "Take", the carry weight — which this collector
+        // happily read out at every loading screen. GetLootMenuInfo reads it
+        // properly, so here it is noise.
+        "JLM", "lm_box", "lm_button_text", "lm_PCShortcutLabel",
+    };
+    for (Tile* p = t; p; p = p->parent)
+        for (const char* n : kNoise)
+            if (TileNameHas(p, n)) return true;
+    return false;
+}
+
+void CollectHudProse(Tile* t, int depth, std::vector<std::string>& out)
+{
+    if (!t || depth > 10 || out.size() > 40) return;
+    if (TileVisible(t) && !HudTileIsNoise(t)) {
+        if (const char* s = TileStringTrait(t)) {
+            std::string line = GameStrToUtf8(s);
+            size_t b = line.find_first_not_of(" \t\n\r");
+            if (b != std::string::npos) {
+                size_t e = line.find_last_not_of(" \t\n\r");
+                line = line.substr(b, e - b + 1);
+                // Prose only: skip bare numbers, single characters and the
+                // untranslated placeholders the game leaves in unused tiles.
+                bool digits_only = !line.empty();
+                for (char c : line) if (c < '0' || c > '9') { digits_only = false; break; }
+                if (line.size() > 2 && !digits_only && line != "Button Text")
+                    out.push_back(line);
+            }
+        }
+    }
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&t->childList);
+    for (int i = 0; node && i < 4096; ++i) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) CollectHudProse(cn->child, depth + 1, out);
+        node = node->next;
+    }
+}
+} // namespace
+
+std::vector<std::string> GetHudProse()
+{
+    std::vector<std::string> out;
+    Tile* hud = FindVisibleMenuTile(kMenuType_HUDMain);
+    if (hud) CollectHudProse(hud, 0, out);
+    return out;
+}
+
+// ---- Loot Menu Updated (F3LootMenu.dll) ------------------------------------
+//
+// The overlay keeps everything we need in tile traits it registers itself:
+// _JLMVisible, _JLMTitle, _JLMIndex, _JLMOffset, _JLMTotal, _JLMWeight,
+// _JLMStealing, and per-entry _JLMEquipped. Those names only become numeric
+// trait ids through the engine's own table, so resolve them once and cache.
+namespace {
+
+// 0x00BEA9E0 = TraitNameToID on 1.7 (the FOSE source's own address ladder).
+// Rather than trust that, ASK IT SOMETHING WE ALREADY KNOW: a built-in trait
+// whose id is fixed. If "visible" doesn't come back as kTileValue_visible, this
+// is not the function we think it is and we stay out of it entirely.
+UInt32 TraitId(const char* name)
+{
+    using PFN = UInt32 (__cdecl*)(const char*);
+    static int  state = 0;          // 0 = untested, 1 = usable, -1 = rejected
+    if (state == 0) {
+        const void* fn = reinterpret_cast<const void*>(0x00BEA9E0);
+        if (IsBadReadPtr(fn, 5)) {
+            state = -1;
+            F3A_INFO("TraitId: 0x00BEA9E0 unreadable — loot menu support off");
+        } else if (reinterpret_cast<PFN>(0x00BEA9E0)("visible") != kTileValue_visible) {
+            state = -1;
+            F3A_INFO("TraitId: self-test failed — loot menu support off");
+        } else {
+            state = 1;
+        }
+    }
+    if (state < 0) return 0;
+    return reinterpret_cast<PFN>(0x00BEA9E0)(name);
+}
+
+struct JlmTraits {
+    UInt32 visible = 0, title = 0, index = 0, offset = 0,
+           total = 0, items = 0, weight = 0, stealing = 0, equipped = 0;
+    bool ready = false;
+};
+JlmTraits g_jlm;
+
+bool InitJlmTraits()
+{
+    if (g_jlm.ready) return g_jlm.visible != 0;
+    g_jlm.ready    = true;
+    g_jlm.visible  = TraitId("_JLMVisible");
+    if (!g_jlm.visible) return false;
+    g_jlm.title    = TraitId("_JLMTitle");
+    g_jlm.index    = TraitId("_JLMIndex");
+    g_jlm.offset   = TraitId("_JLMOffset");
+    g_jlm.total    = TraitId("_JLMTotal");
+    g_jlm.items    = TraitId("_JLMItems");
+    g_jlm.weight   = TraitId("_JLMWeight");
+    g_jlm.stealing = TraitId("_JLMStealing");
+    g_jlm.equipped = TraitId("_JLMEquipped");
+    F3A_INFO("Loot menu traits: visible=%u title=%u index=%u total=%u",
+             g_jlm.visible, g_jlm.title, g_jlm.index, g_jlm.total);
+    return true;
+}
+
+// Exact name match. FindChildByName matches on a SUBSTRING, which would hand
+// back "ItemMarker" when asked for "Item1".
+Tile* FindChildExact(Tile* t, const char* name, int depth)
+{
+    if (!t || depth < 0) return nullptr;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&t->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child) {
+            const char* n = cn->child->name.m_data;
+            if (n && std::strcmp(n, name) == 0) return cn->child;
+            if (Tile* r = FindChildExact(cn->child, name, depth - 1)) return r;
+        }
+        node = node->next;
+    }
+    return nullptr;
+}
+
+void CopyTrimmed(char* dst, size_t cap, const char* src)
+{
+    dst[0] = '\0';
+    if (!src || !*src) return;
+    std::string v = GameStrToUtf8(src);
+    size_t b = v.find_first_not_of(" \t\n\r");
+    if (b == std::string::npos) return;
+    size_t e = v.find_last_not_of(" \t\n\r");
+    v = v.substr(b, e - b + 1);
+    std::snprintf(dst, cap, "%s", v.c_str());
+}
+
+} // namespace
+
+bool GetLootMenuInfo(LootMenuInfo* out)
+{
+    if (!out) return false;
+    *out = LootMenuInfo{};
+    if (!InitJlmTraits()) return false;
+
+    Tile* hud = FindVisibleMenuTile(kMenuType_HUDMain);
+    if (!hud) return false;
+    Tile* jlm = FindChildExact(hud, "JLM", 6);
+    if (!jlm) return false;
+
+    if (TileNum(jlm, g_jlm.visible) == 0.0f) return false;
+    CopyTrimmed(out->title, sizeof(out->title), TileStrTrait(jlm, g_jlm.title));
+    // Visible with no container name means the overlay is holding stale state
+    // and has nothing to show — same check the New Vegas mod makes.
+    if (!out->title[0]) return false;
+
+    out->visible  = true;
+    out->index    = (int)TileNum(jlm, g_jlm.index);
+    out->offset   = (int)TileNum(jlm, g_jlm.offset);
+    out->total    = (int)TileNum(jlm, g_jlm.total);
+    out->stealing = TileNum(jlm, g_jlm.stealing) != 0.0f;
+    CopyTrimmed(out->weight, sizeof(out->weight), TileStrTrait(jlm, g_jlm.weight));
+
+    // The highlighted row is the tile named after the in-window index; the
+    // absolute position is that plus the scroll offset.
+    if (out->index >= 0) {
+        char want[16];
+        std::snprintf(want, sizeof(want), "Item%d", out->index);
+        if (Tile* it = FindChildExact(jlm, want, 4)) {
+            const char* s = nullptr;
+            if (Tile* txt = FindChildExact(it, "lm_button_text", 3))
+                s = TileStrTrait(txt, kTileValue_string);
+            if (!s) s = TileStrTrait(it, kTileValue_string);
+            CopyTrimmed(out->item, sizeof(out->item), s);
+            out->equipped = TileNum(it, g_jlm.equipped) != 0.0f;
+        }
+    }
+    return true;
+}
+
 // The crosshair ACTIVATE prompt (the HUD `Info` tile): the verb + target shown
 // when you look at something you can interact with — "Rozmawiaj", "Weź",
 // "Okradnij", "Otwórz", "Użyj"… Reading it aloud lets a blind player know the
@@ -3337,21 +4917,16 @@ std::optional<std::string> GetVatsSelectionText()
         return s;
     };
 
-    std::string enemy, limb, chance;
+    // The TARGET only. This used to append the limb as well, by taking the
+    // first limb_name in the tree — but VATS draws one such tile per body part
+    // and the first is simply whichever comes first in the tree, not the one
+    // being aimed at. The selected limb comes from GetVatsPick, which reads the
+    // game's own marker for it.
+    std::string enemy;
     if (Tile* eh = FindChildByName(vats, "EnemyHealth", 6))
         if (const char* s = TileLabelDeep(eh, 0)) enemy = clean(GameStrToUtf8(s));
-    if (Tile* ln = FindChildByName(vats, "limb_name", 8))
-        if (const char* s = TileStringTrait(ln)) limb = clean(GameStrToUtf8(s));
-    if (Tile* ct = FindChildByName(vats, "chance_to_hit", 8))
-        if (const char* s = TileStringTrait(ct)) chance = clean(GameStrToUtf8(s));
-
-    std::string res;
-    auto add = [&](const std::string& p) {
-        if (!p.empty()) { if (!res.empty()) res += ", "; res += p; }
-    };
-    add(enemy); add(limb); add(chance);
-    if (res.empty()) return std::nullopt;
-    return res;
+    if (enemy.empty()) return std::nullopt;
+    return enemy;
 }
 
 // ---- Dialog / Barter / Lockpick / VATS — TODO ----------------------------

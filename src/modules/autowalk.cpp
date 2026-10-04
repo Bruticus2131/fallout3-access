@@ -15,6 +15,7 @@
 #include "f3a/polling_loop.h"
 #include "f3a/player_mover.h"
 #include "f3a/menu_dispatch.h"
+#include "f3a/hotkeys.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/strings.h"
 #include "f3a/config.h"
@@ -65,6 +66,7 @@ constexpr float kMinProgress = 16.0f;  // must get this many units CLOSER per wi
 
 // Distance callouts.
 float        g_callout_timer = 0.0f;
+float        g_close_timer   = 0.0f;   // seconds spent within kNearArrive
 constexpr float kCalloutEvery = 2.5f;
 
 // Door-opening: when blocked, the obstacle is usually a closed door (e.g. the
@@ -114,6 +116,13 @@ constexpr float kArriveDist = 90.0f;   // ~1.4 m — close enough to activate
 // obstacle: the exact origin is often unreachable (inside furniture, behind a
 // counter, off-navmesh), so "stuck right next to it" means we're effectively there.
 constexpr float kNearArrive = 175.0f;  // ~2.7 m
+
+// Floor-independent arrival backstop. The strict test also demands the same
+// floor, and a target whose Z is wrong — quest markers especially — keeps that
+// false for good, so a walk could circle its destination forever without ever
+// announcing that it got there. Standing this close for this long IS arriving,
+// whatever the height difference claims.
+constexpr float kCloseArriveSecs = 2.5f;
 
 // Different-floor guard: with no navmesh path we can't climb stairs, so if the
 // target is well above/below us, stop and tell the player to use the beacon.
@@ -166,6 +175,7 @@ int  g_strafe_down = 0;   // 0 = none, -1 = left (A), +1 = right (D)
 
 void SendScan(WORD scan, bool down)
 {
+    hotkeys::SuppressKey(scan);   // ours, not the player's — see SuppressKey
     INPUT in{};
     in.type       = INPUT_KEYBOARD;
     in.ki.wScan   = scan;
@@ -198,6 +208,25 @@ constexpr WORD kScanJump = 0x39;
 bool  g_kjump      = false;
 float g_jump_timer = 0.0f;
 void SetJump(bool down) { if (down != g_kjump) { SendScan(kScanJump, down); g_kjump = down; } }
+
+// Let go of every movement key, whether or not we think it is down. Move() only
+// sends EDGES, so the moment our bookkeeping and the game disagree — a key-up
+// swallowed while a menu had focus, a walk cut short between the press and the
+// release — the game is left holding W and the player walks on with nothing
+// driving them. On the way out of a walk, two redundant messages are cheap
+// insurance against that.
+void ReleaseKeysHard()
+{
+    SendScan(kScanW, false);
+    SendScan(kScanA, false);
+    SendScan(kScanS, false);
+    SendScan(kScanD, false);
+    SendScan(kScanJump, false);
+    g_kw = g_ka = g_ks = g_kd = false;
+    g_kjump        = false;
+    g_forward_down = false;
+    g_strafe_down  = 0;
+}
 void TriggerJump()      { if (!g_kjump) { SetJump(true); g_jump_timer = 0.30f; } }
 
 // --- Stuck recovery: when forward progress stalls (an obstacle), strafe
@@ -277,13 +306,29 @@ float Steer(const game::Vec3& goal)
     return a;
 }
 
+// Starting a walk drops any aim lock: both steer the player's heading, and an
+// aim that keeps yanking the view back at a target is not something you can
+// walk away from.
+void DropAimLock() { poll::StopAimTrack(); }
+
 void StopWalking(const char* reason_utf8)
 {
     if (g_state == State::Idle) return;
-    mover::Clear();                     // stop driving the engine's mover
-    Move(false, false, false, false);   // release all movement keys
-    SetJump(false);                     // and the jump key
+    {
+        // Logged because "it walked past the target and kept going" cannot be
+        // diagnosed from the outside: we need to see whether arrival was
+        // detected at all, and from how far out.
+        float d  = DistanceToTarget();
+        float dz = g_target_pos.z - game::GetPlayerPosition().z;
+        F3A_INFO("autowalk stop: %s | dist=%.0f dz=%.0f path=%d wp=%u/%u",
+                 reason_utf8 ? reason_utf8 : "(cicho)", d, dz,
+                 g_have_path ? 1 : 0, (unsigned)g_wp_index,
+                 (unsigned)g_waypoints.size());
+    }
+    mover::Clear();       // stop driving the engine's mover
+    ReleaseKeysHard();    // and let go of every movement key, edge or no edge
     g_jump_timer    = 0.0f;
+    g_close_timer   = 0.0f;
     g_recover_timer = 0.0f;
     g_stuck_count   = 0;
     g_cross         = false;
@@ -565,7 +610,10 @@ void TickCross(float dt)
             g_recover_dir   = -g_recover_dir;
             g_recover_timer = kRecoverSecs;
             TriggerJump();
-            tolk::Speak(DescribeObstacle(), tolk::Priority::Background, false);
+            // Logged, not spoken. Naming every crate and doorframe it squeezes
+            // past turned a walk into a running commentary, and the player
+            // cannot act on any of it — the mod is already going round.
+            F3A_DEBUG("autowalk: %s", DescribeObstacle().c_str());
         } else if (progress >= kMinProgress) {
             g_cross_stuck = 0;
         }
@@ -623,6 +671,7 @@ namespace { bool TryTravelLeg(); }   // defined below, used by StartTo
 void StartTo(const game::Vec3& pos, const std::string& name,
              const void* refr, uint32_t form_id)
 {
+    DropAimLock();
     g_target_pos  = pos;
     g_target_name = name;
     g_target_refr = refr;
@@ -813,14 +862,20 @@ void Tick(float dt)
     // inactive, a LoadingMenu on top) is exactly what we triggered by walking
     // through a door. Wait it out instead of aborting the trip; the post-load
     // wait timer in TickCross only ticks down once gameplay resumes.
+    // Note the mover::Clear() on the cross-worldspace paths. The TRIP stays
+    // alive across a load screen, but the walking must not: the mover keeps
+    // pushing toward whatever goal it was last given, and after a load that goal
+    // is a stale position in the worldspace we just left — which is how the
+    // player ended up strolling off on their own with no walk apparently
+    // running. Steering re-states the goal as soon as the walk resumes.
     if (!poll::IsGameplayActive()) {
-        if (g_cross) return;             // loading between cells — keep the walk alive
+        if (g_cross) { mover::Clear(); return; }   // loading between cells
         StopWalking(nullptr);
         return;
     }
     auto active = menu::ActiveMenu();
     if (active != menu::Id::None && active != menu::Id::HUDMain) {
-        if (g_cross) return;             // a LoadingMenu during a door transition
+        if (g_cross) { mover::Clear(); return; }   // LoadingMenu during a door
         StopWalking(nullptr);
         return;
     }
@@ -840,6 +895,7 @@ void Tick(float dt)
     float dist = DistanceToTarget();                       // horizontal only
     float dz   = g_target_pos.z - game::GetPlayerPosition().z;
     bool  sameFloor = std::fabs(dz) <= kFloorDelta;
+
     // Arrival requires being on the SAME floor too — DistanceToTarget is 2D, so
     // without this we'd falsely "arrive" while standing directly under/over a
     // target on another floor.
@@ -848,6 +904,34 @@ void Tick(float dt)
         std::snprintf(buf, sizeof(buf), "Dotarłeś: %s", g_target_name.c_str());
         StopWalking(buf);
         return;
+    }
+
+    // A quest marker ends the walk at arm's length of the AREA, always.
+    // Markers are placed for the map, not for walking into: this one sits on a
+    // rifle range you are meant to shoot from, and the walk kept shuffling
+    // around it long after the player was standing exactly where the game
+    // wanted them. Unconditional on purpose — no floor test, no path test.
+    if (g_follow_quest && config::Get().quest_arrive_dist > 0 &&
+        dist <= (float)config::Get().quest_arrive_dist) {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf), "Jesteś w rejonie celu: %s",
+                      g_target_name.c_str());
+        StopWalking(buf);
+        return;
+    }
+
+    // ...and the backstop, which does not care about the floor.
+    if (dist <= kNearArrive) {
+        g_close_timer += dt;
+        if (g_close_timer >= kCloseArriveSecs) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "Jesteś przy celu: %s",
+                          g_target_name.c_str());
+            StopWalking(buf);
+            return;
+        }
+    } else {
+        g_close_timer = 0.0f;
     }
 
     // Different floor and no path yet: DON'T bail — go anyway. Keep walking and
@@ -904,7 +988,12 @@ void Tick(float dt)
     g_probe_timer += dt;
     if (g_probe_timer >= kProbeEvery) {
         g_probe_timer = 0.0f;
-        if (g_recover_timer <= 0.0f && g_forward_down && g_door_cooldown <= 0.0f) {
+        // "Trying to move" covers BOTH drives: keys held, or the engine mover
+        // being steered. Testing only the keys meant that under native walking
+        // the probe never ran — so a walk that could not quite reach its target
+        // was never recognised as arrived-or-stuck, and just pushed forever.
+        bool driving = g_forward_down || mover::Active();
+        if (g_recover_timer <= 0.0f && driving && g_door_cooldown <= 0.0f) {
             float progress = g_last_probe_dist - dist;   // + = got closer
             g_last_probe_dist = dist;
             if (progress < kMinProgress) {
@@ -943,13 +1032,12 @@ void Tick(float dt)
                 g_recover_dir   = -g_recover_dir;   // try the other side
                 g_recover_timer = kRecoverSecs;
                 TriggerJump();   // hop while strafing — frees ledges/lips/rubble
-                tolk::Speak(DescribeObstacle(),
-                            tolk::Priority::Background, false);
+                F3A_DEBUG("autowalk: %s", DescribeObstacle().c_str());
             } else {
                 g_stuck_count = 0;                  // made progress — reset
             }
         }
-        if (!g_forward_down) g_last_probe_dist = DistanceToTarget();
+        if (!driving) g_last_probe_dist = DistanceToTarget();
     }
 
     // Periodic distance callout.

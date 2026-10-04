@@ -30,9 +30,16 @@ bool Available();
 
 // Steer toward a world point this frame. Call every tick while walking; the
 // goal is consumed by the next engine movement update. `run` picks run speed.
+//
+// Restating the goal is also what keeps the walk alive: a goal that stops being
+// refreshed for a moment makes the mover stop by itself. Whatever goes wrong
+// upstream — a cancelled walk, a load screen, the mod switched off mid-step —
+// the player cannot be left walking on with nothing driving them.
 void SetGoal(float x, float y, bool run);
 
 // Stop driving: the engine goes back to processing the player's own input.
+// Safe from any thread — the stop itself is performed by the hook on the game's
+// own thread, on the next frame.
 void Clear();
 
 // Is a goal currently being driven?

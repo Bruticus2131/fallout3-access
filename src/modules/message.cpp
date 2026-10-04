@@ -30,7 +30,8 @@ void TryAnnounce()
     if (text.empty() || text == g_last) return;
     g_last   = text;
     g_spoken = true;
-    tolk::Speak(text, tolk::Priority::System, true);
+    // Same control markers as the HUD hints — expand them to real key names.
+    tolk::Speak(game::ExpandControlTokens(text), tolk::Priority::System, true);
 }
 
 void OnOpen()
@@ -62,7 +63,8 @@ void OnTick(float)
 // input) and speak the delta: appended chars as they come (queued so fast typing
 // isn't cut), the whole field on backspace/edit. Lets a blind player hear the
 // name they're entering.
-std::string g_te_last;
+std::string g_te_last;   // what was last announced
+std::string g_te_seen;   // the previous raw reading, for the stability check
 bool        g_te_open = false;
 
 void OnTextEditOpen()
@@ -70,13 +72,14 @@ void OnTextEditOpen()
     g_te_open = true;
     auto txt  = game::GetTextEditText();
     g_te_last = txt ? *txt : std::string();
+    g_te_seen = g_te_last;
     // Minimal: no "enter name" prompt (the user doesn't want it). Just read any
     // existing text; an empty field opens silently and the letter-echo takes over.
     if (!g_te_last.empty())
         tolk::Speak(g_te_last, tolk::Priority::Ui, true);
 }
 
-void OnTextEditClose() { g_te_open = false; g_te_last.clear(); }
+void OnTextEditClose() { g_te_open = false; g_te_last.clear(); g_te_seen.clear(); }
 
 void OnTextEditTick(float)
 {
@@ -84,13 +87,32 @@ void OnTextEditTick(float)
     auto txt = game::GetTextEditText();
     if (!txt) return;                       // no reliable read this tick
     const std::string cur = *txt;
-    if (cur == g_te_last) return;           // unchanged (also swallows caret blink)
+
+    // The field blinks: its text alternates between the name and the name plus
+    // a caret glyph, so "has it changed since last tick" is true on EVERY tick
+    // and the mod read the same thing over and over - "z, z, z, z". Stripping
+    // the one caret character we knew about was not enough, because it is not
+    // the only one. So require a reading to appear TWICE IN A ROW before
+    // believing it: a blink never survives that, a typed letter always does.
+    if (cur != g_te_seen) { g_te_seen = cur; return; }
+    if (cur == g_te_last) return;           // already said this
+    const std::string prev = g_te_last;
     g_te_last = cur;
-    // Read the WHOLE text so far on every change → "z, zu, zuz, zuzi, zuzia".
-    // interrupt=true so the latest state wins (no piled-up fragments); an empty
-    // field stays silent (no "puste" spam).
-    if (!cur.empty())
-        tolk::Speak(cur, tolk::Priority::Ui, true);
+    F3A_DEBUG("TextEdit: '%s' -> '%s'", prev.c_str(), cur.c_str());
+
+    // Say only what was just typed. Reading the whole field after every key
+    // turned entering a name into "z, zu, zuz, zuzi, zuzia" - the longer the
+    // name, the more there was to sit through before the next letter.
+    if (cur.size() > prev.size() && cur.compare(0, prev.size(), prev) == 0) {
+        std::string added = cur.substr(prev.size());
+        if (!added.empty()) tolk::Speak(added, tolk::Priority::Ui, true);
+        return;
+    }
+
+    // Anything else is a correction, not typing - a backspace or a replacement.
+    // There the field as a whole IS the news, and it is rare enough not to be
+    // noise.
+    if (!cur.empty()) tolk::Speak(cur, tolk::Priority::Ui, true);
 }
 
 } // namespace

@@ -93,7 +93,7 @@ void ScanHostiles() { DoScan(true);  }
 // step announces "name, distance, o'clock direction". Home turns the player
 // to face the current pick; End starts/stops AutoWalk toward it.
 
-// Scanner categories (cycled with Shift+[ / Shift+]). g_scan_full holds the
+// Scanner categories (cycled with Shift+PgUp / Shift+PgDn). g_scan_full holds the
 // full unfiltered scan; g_scan_list is the current category's view.
 enum Category { Cat_All, Cat_Npc, Cat_Item, Cat_Door, Cat_Container,
                 Cat_Quest, Cat_COUNT };
@@ -148,6 +148,12 @@ int         g_aim_pstep  = 0;   // pitch step counter
 int         g_aim_wait   = 0;   // settle ticks between pitch steps
 int         g_pitch_sign = 1;   // mouse-Y direction that reduces pitch error
 float       g_pitch_prev_err = 0.0f;
+// Mouse counts per degree of error. Starts brisk and is halved on every
+// overshoot, so a big correction is fast and the last degree is gentle.
+float       g_pitch_gain = 6.0f;
+float       g_yaw_gain   = 4.0f;
+float       g_yaw_prev_err = 0.0f;
+bool        g_yaw_prev_set = false;
 bool        g_pitch_started  = false;
 
 // "Center camera" (Home): level the first-person view to horizontal. Like the
@@ -298,12 +304,14 @@ void AnnounceCurrent()
 
 bool CategoryModHeld()
 {
-    // Ctrl (grace-windowed) is the category modifier: Ctrl+PgUp / Ctrl+PgDn
-    // cycle categories, plain PgUp/PgDn cycle objects.
-    return hotkeys::CtrlActive();
+    // Shift is the category modifier: Shift+PgUp / Shift+PgDn cycle categories,
+    // plain PgUp/PgDn cycle objects. Ctrl used to do this, but Ctrl is the
+    // game's own SNEAK toggle — every category step also crouched or stood the
+    // player up. Read live, so releasing Shift counts on the very next press.
+    return hotkeys::ShiftHeldNow();
 }
 
-// Cycle the scanner category (Ctrl+PgUp / Ctrl+PgDn). Announce ONLY the
+// Cycle the scanner category (Shift+PgUp / Shift+PgDn). Announce ONLY the
 // category name — the player then uses plain PgUp/PgDn to browse objects in
 // it. (Announcing an object here made category-cycling sound like it was
 // still scrolling objects.)
@@ -457,6 +465,117 @@ void DropItem()
         return;
     }
     poll::RequestDropItem();
+}
+
+// Press the highlighted row in whatever menu is open (Insert).
+//
+// This exists for key rebinding: Fallout's controls page starts listening for a
+// new key only when the row is CLICKED, so with the keyboard alone a blind
+// player could reach the row, hear it, and then be stuck. It is deliberately
+// generic — any list that needs a click rather than Enter benefits.
+void PressRow()
+{
+    if (menu::ActiveMenu() == menu::Id::None) {
+        tolk::Speak("Ta funkcja działa w menu.", tolk::Priority::System, true);
+        return;
+    }
+    poll::RequestPressRow();
+}
+
+// Hold / release the game's aim, the same thing the right mouse button does.
+//
+// Iron sights are a hold, not a press, which is exactly what a player who
+// navigates by keyboard cannot do comfortably — so this latches it: one press
+// aims, the next lowers the weapon. Mouse BUTTON state is injected (mouse input
+// reaches FO3 reliably, unlike keys in menus), so the game sees a genuine held
+// right button and all its own logic — zoom, sway, accuracy — applies.
+bool g_aim_held = false;
+
+// The aim is held until something ends it, never on a timer — see the Home
+// handler. Negative means "until StopAimTrack()"; see RequestAimTrack.
+constexpr int kHoldAimFrames = -1;
+
+// Lock the frame-by-frame aim onto whatever the scanner has selected (or the
+// nearest actor). Defined further down, beside the target picker.
+bool LockAimOnCurrentTarget(std::string* outName);
+
+// Trim the held aim up or down.
+//
+// The engine gives us no honest answer to "is the crosshair on it": the field
+// FOSE exposes as the crosshair reference does not follow the view, and the
+// height a shot leaves the player at is a guess that is badly wrong for, say,
+// the ten-year-old of the prologue. The player, though, can hear whether a shot
+// hit. So the last word is theirs: nudge until it lands, and the correction
+// stays for every target afterwards, because the error it cancels is constant.
+constexpr float kAimTrimStep = 8.0f;
+
+void AimTrim(float units)
+{
+    if (!GameplayAndHud()) return;
+    if (!poll::AimTrackActive()) {
+        tolk::Speak("Najpierw wybierz cel klawiszem celowania.",
+                    tolk::Priority::System, true);
+        return;
+    }
+    float total = poll::NudgeAim(units);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "%s, poprawka %+.0f",
+                  units > 0 ? "Wyżej" : "Niżej", total);
+    tolk::Speak(buf, tolk::Priority::Combat, true);
+}
+
+void AimTrimUp()   { AimTrim(+kAimTrimStep); }
+void AimTrimDown() { AimTrim(-kAimTrimStep); }
+
+// Aiming follows the KEY, not a toggle: hold it and the game's aim button stays
+// down, let go and it comes up. A toggle was wrong for this — a weapon left
+// raised because a second press was missed is worse than no help at all, and it
+// does not match how a sighted player aims.
+//
+// The right mouse button is used because that IS the game's aim control and a
+// keyboard player cannot reach it; the key simply stands in for it.
+void AimHoldPress()
+{
+    if (!GameplayAndHud() || g_aim_held) return;
+    g_aim_held = true;
+    INPUT in{};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    SendInput(1, &in, sizeof(in));
+
+    // Raising the weapon also LOCKS the aim onto the target and keeps it there,
+    // frame by frame, until the weapon is lowered. That is what makes shooting
+    // possible without a mouse: the gun has to still be on the target when the
+    // trigger is pulled, not when we announced it.
+    std::string name;
+    if (!LockAimOnCurrentTarget(&name)) {
+        // Nothing to lock onto — the button still goes down, so ordinary aiming
+        // works, but there is no tracking to report.
+        F3A_INFO("AimHold: no target to lock");
+    }
+}
+
+// Release the aim if it is still latched — also called when gameplay ends, so
+// the button is never left stuck down.
+void AimHoldRelease()
+{
+    if (!g_aim_held) return;
+    g_aim_held = false;
+    poll::StopAimTrack();
+    INPUT in{};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    SendInput(1, &in, sizeof(in));
+}
+
+// The hotkey table only reports presses, so the RELEASE is polled: convert the
+// configured scancode to a virtual key and watch it while the aim is latched.
+void AimHoldPoll()
+{
+    if (!g_aim_held) return;
+    UINT vk = MapVirtualKeyA(config::Get().hotkeys.aim_hold, MAPVK_VSC_TO_VK);
+    if (!vk) return;                       // unmappable key: leave the latch alone
+    if ((GetAsyncKeyState((int)vk) & 0x8000) == 0) AimHoldRelease();
 }
 
 void AutoWalkToggle()
@@ -762,12 +881,109 @@ float AimAtPoint(const game::Vec3& tgt, float up)
     return horiz;
 }
 
+// Learn the aim from someone who can see it.
+//
+// Everything this mod knew about aiming, it had written itself: the angles read
+// back were the angles we set, so "the camera agrees with the body" proved
+// nothing at all. A sighted player putting the crosshair on a target by hand is
+// the one measurement that comes from outside — and from it the two unknowns
+// fall out by arithmetic:
+//
+//   * the height a shot leaves the player at, which we had been GUESSING and
+//     which is wildly different for the ten-year-old of the prologue, follows
+//     from the observed pitch and the known range:
+//         eye = target_z + range * tan(pitch)
+//   * whether our idea of which way is "up" and which field the view actually
+//     lives in matches the engine's, by comparing every rotation value the
+//     engine holds against the one we would have set ourselves.
+//
+// Usage: pick the target with the scanner, have the sighted player aim at it,
+// press the key. The measurement is applied at once and written to the log.
+// A correction measured from a sighted aim: the vector from a reference's
+// ORIGIN to the point a person actually puts the crosshair on. It is kept
+// against the base form, so measuring one of three identical targets fixes all
+// three — and it is the honest way round, because the origin of a placed object
+// is wherever its model happens to be anchored, not its middle.
+// Keyed by the base form's ID rather than its address, so the same corrections
+// can be written to the INI and read back on the next launch. Measuring is a
+// favour asked of someone who can see; asking for it again after every restart
+// would make the feature worthless.
+std::vector<config::AimOffset> g_aimoffs;
+
+void ApplyAimOffset(AimTarget* at)
+{
+    if (!at || !at->refr || g_aimoffs.empty()) return;
+    uint32_t id = game::BaseFormIdOf(at->refr);
+    if (!id) return;
+    for (const auto& o : g_aimoffs) {
+        if (o.base_form_id != id) continue;
+        at->pos.x += o.x;
+        at->pos.y += o.y;
+        at->pos.z += o.z;
+        return;
+    }
+}
+
+void RememberAimOffset(uint32_t id, const game::Vec3& off)
+{
+    for (auto& o : g_aimoffs) {
+        if (o.base_form_id == id) { o.x = off.x; o.y = off.y; o.z = off.z; 
+                                    config::SaveAimOffset(id, off.x, off.y, off.z);
+                                    return; }
+    }
+    g_aimoffs.push_back({ id, off.x, off.y, off.z });
+    config::SaveAimOffset(id, off.x, off.y, off.z);
+}
+
+void AimCalibrate()
+{
+    if (!GameplayAndHud()) return;
+
+    poll::StopAimTrack();   // do not force an aim while measuring
+
+    // With no target chosen, still sweep the view: "what can I shoot from
+    // here" is useful on its own, and it is the question a player stuck at a
+    // firing range actually has.
+    AimTarget at;
+    if (!PickAimTarget(&at)) {
+        poll::RequestRayScan();
+        return;
+    }
+
+    // Map what the engine's ray really finds around this target.
+    //
+    // The reference we were aiming at is never hit by ANY ray — ninety-six of
+    // them failed — which means it has no collision at all: an invisible
+    // trigger, not something a bullet can touch. Something else there IS solid,
+    // and this is how we find out what it is and where.
+    //
+    // The sweep is REQUESTED, not run here. This function is called from the
+    // key poller, which is not the game's thread, and casting the engine's rays
+    // from it took the whole game down.
+    poll::RequestRayMap(at.pos);
+    poll::RequestRayScan();
+}
+
+bool LockAimOnCurrentTarget(std::string* outName)
+{
+    AimTarget at;
+    if (!PickAimTarget(&at)) return false;
+    ApplyAimOffset(&at);
+    // A reference is preferred (it tracks a target that moves), but a bare
+    // position is enough — and it is all a quest marker or a fixed practice
+    // target ever has. Refusing those is what made the aim lock do nothing.
+    poll::RequestAimTrack(at.refr, at.refid, at.pos, at.up, kHoldAimFrames);
+    if (outName) *outName = at.name;
+    return true;
+}
+
 void TrackStop(const char* why)
 {
     if (!g_track_on) return;
     g_track_on = false;
     g_track_refr = nullptr;
     g_track_refid = 0;
+    if (!g_aim_held) poll::StopAimTrack();   // the aim key keeps its own lock
     if (why) tolk::Speak(why, tolk::Priority::Ui, true);
 }
 
@@ -797,7 +1013,12 @@ void CenterCamera()
 
     // Alt+Home = TELEPORT to the selected object (last resort when you can't walk
     // there — doors, broken navmesh). Native MoveTo to the scanner pick's ref.
+    //
+    // Logged because a plain Home once teleported the player onto the rifle
+    // range mid-session, which only makes sense if Alt was read as held. If it
+    // happens again the log says so instead of looking like magic.
     if (hotkeys::AltActive()) {
+        F3A_INFO("CenterCamera: Alt held -> TELEPORT branch.");
         // Prefer WHERE YOU'RE WALKING: if autowalk is active, teleport to its
         // destination — not the scanner selection, which drifts as DLC quests
         // auto-start/track (that's how Alt+Home landed on the Megaton bomb quest
@@ -854,10 +1075,55 @@ void CenterCamera()
                     tolk::Priority::Ui, true);
         return;
     }
+
+    // Aim at the target's BODY, using only mechanisms proven separately:
+    //   * the aim POINT comes from the object's own bounds (plain data, so a
+    //     rifle-range target is aimed at its middle and not at the foot of its
+    //     post — a fixed height offset only ever fitted one object);
+    //   * HEADING goes through the engine's actor-turning routine, which is the
+    //     part that already worked;
+    //   * ELEVATION is driven by the MOUSE in a closed loop, because the camera
+    //     follows the mouse and does NOT follow a written pitch value. That is
+    //     why the view used to report the target dead ahead while the shot went
+    //     somewhere else: the body had turned, the camera had not.
+    // Nothing is fired: when the crosshair is on the target the mod says so and
+    // the player shoots.
+    if (at.refr) {
+        game::Vec3 point{};
+        const char* how = "origin";
+        if (!game::GetAimPointFor(at.refr, &point, &how)) point = at.pos;
+
+        poll::RequestFacePoint(point);      // fast first pass on the heading
+        g_aim_on        = true;             // then close BOTH angles by mouse
+        g_aim_id        = at.refid;
+        g_aim_pos       = point;
+        g_aim_phase     = 0;                // yaw first, then pitch
+        g_aim_face_only = true;             // converge pitch, then stop
+        g_aim_budget    = 150;
+        g_aim_pstep     = 0;
+        g_aim_wait      = 2;
+        g_pitch_started = false;
+        g_pitch_sign    = 1;
+        g_pitch_gain    = 6.0f;             // fresh gain for each aim
+        g_yaw_gain      = 4.0f;
+        g_yaw_prev_set  = false;
+        g_aim_label     = at.name;
+        F3A_INFO("Home aim: '%s' point=%s (%.0f,%.0f,%.0f)",
+                 at.name.c_str(), how, point.x, point.y, point.z);
+        tolk::Speak("Celuję w: " + at.name, tolk::Priority::Ui, true);
+        return;
+    }
     // Plain GEOMETRIC aim: turn + pitch straight at the target via SetAngle (the
     // version proven on the door). No micro-scan sweep — that swung the crosshair
     // onto neighbours (wrong activation) and announced "na oko" late.
+    ApplyAimOffset(&at);   // measured correction, if one was taken
     AimAtPoint(at.pos, at.up);
+    // ...and KEEP it there. Not for a couple of seconds — until the target
+    // changes, the weapon is lowered, or a walk starts. Lining up a shot
+    // without sight takes as long as it takes, and an aim that quietly lapses
+    // in the middle of it is worse than no aim at all: you would be shooting
+    // at wherever the view had drifted to, with nothing to tell you.
+    poll::RequestAimTrack(at.refr, at.refid, at.pos, at.up, kHoldAimFrames);
     tolk::Speak("Celuję w: " + at.name, tolk::Priority::Ui, true);
     g_turn_verify_pos   = at.pos;
     g_turn_verify_name  = at.name;
@@ -887,7 +1153,14 @@ void Tick(float)
     if (g_use_hold_ticks > 0 && --g_use_hold_ticks == 0)
         SendUse(false);
 
-    TrackTick();   // Shift+Home target tracking: re-aim at a moving target
+    // No "hit!" announcement here any more: it came from our own aim routine
+    // guessing that the target reacted, not from the game reporting a hit, and
+    // it fired on misses. A wrong call-out is worse than silence.
+    poll::ConsumeAimTargetReacted();
+    poll::ConsumeAimReleased();
+
+    TrackTick();     // Shift+Home target tracking: re-aim at a moving target
+    AimHoldPoll();   // let go of the aim key -> lower the weapon
 
     // Lockpick sweet-spot cue: beep faster + higher the closer the pin is to the
     // sweet spot; a steady high tone when ON it — then hold the force key (W) to
@@ -964,7 +1237,8 @@ void Tick(float)
 
     // LOS cue: only in normal gameplay (not menus/VATS) and not while auto-aim
     // or leveling is driving the view.
-    if (config::Get().target_cue && !g_aim_on && !g_level_on && GameplayAndHud() &&
+    if (config::Get().target_cue && !g_aim_on && !g_level_on &&
+        GameplayAndHud() &&
         !game::ArePlayerControlsDisabled()) {   // silent in scripted scenes (char creation)
         if (game::IsThirdPerson()) {
             // Camera != body in 3rd person — use the short-range engine pick.
@@ -1038,21 +1312,24 @@ void Tick(float)
             F3A_INFO("AimYaw rel=%.1f curYaw=%.1f budget=%d", rel, curYaw,
                      g_aim_budget);
             if (std::fabs(rel) <= 1.2f) {
-                if (g_aim_face_only) {
-                    g_aim_on = false;
-                    tolk::Speak(g_aim_label + ". Otwórz VATS.",
-                                tolk::Priority::Ui, true);
-                } else {
-                    g_aim_phase = 1; g_aim_pstep = 0; g_aim_wait = 2;
-                    g_pitch_started = false; g_pitch_sign = 1;
-                    F3A_INFO("AimYaw converged -> pitch converge");
-                }
+                g_aim_phase = 1; g_aim_pstep = 0; g_aim_wait = 2;
+                g_pitch_started = false; g_pitch_sign = 1;
+                F3A_INFO("AimYaw converged -> pitch converge");
             } else {
-                long gain = config::Get().autowalk_turn_gain;
-                if (gain < 1) gain = 1;
-                long dx = (long)(rel * (float)gain);
+                // Same overshoot protection as the pitch loop: back the step off
+                // whenever the error flips sign, so a large turn is quick and the
+                // last degree does not bounce.
+                if (g_yaw_prev_set && rel * g_yaw_prev_err < 0.0f) {
+                    g_yaw_gain *= 0.5f;
+                    if (g_yaw_gain < 0.5f) g_yaw_gain = 0.5f;
+                }
+                g_yaw_prev_err = rel;
+                g_yaw_prev_set = true;
+
+                long dx = (long)(rel * g_yaw_gain);
                 if (dx >  200) dx =  200;
                 if (dx < -200) dx = -200;
+                if (dx > -2 && dx < 2) dx = (rel > 0 ? 2 : -2);
                 MouseMoveRel(dx, 0);
             }
         } else if (g_aim_phase == 1) {                // ---- pitch converge ----
@@ -1070,15 +1347,32 @@ void Tick(float)
                 F3A_INFO("AimPitch step=%d desired=%.1f rotX=%.1f err=%.1f sign=%d",
                          g_aim_pstep, desired, cur, err, g_pitch_sign);
 
-                // Auto-calibrate which mouse-Y direction reduces the error.
+                // Auto-calibrate which mouse-Y direction reduces the error...
                 if (g_pitch_started &&
                     std::fabs(err) > std::fabs(g_pitch_prev_err) + 0.3f) {
                     g_pitch_sign = -g_pitch_sign;
+                }
+                // ...and back off when we jumped over the target: an error that
+                // changed sign means the last move was too big.
+                if (g_pitch_started && err * g_pitch_prev_err < 0.0f) {
+                    g_pitch_gain *= 0.5f;
+                    if (g_pitch_gain < 0.6f) g_pitch_gain = 0.6f;
                 }
                 g_pitch_prev_err = err;
                 g_pitch_started  = true;
 
                 if (std::fabs(err) <= 1.5f || g_aim_pstep >= 60) {
+                    bool onTarget = std::fabs(err) <= 1.5f;
+                    if (g_aim_face_only) {
+                        // Home: aiming is the whole task. Report honestly
+                        // whether the crosshair converged or the loop ran out.
+                        g_aim_on = false;
+                        tolk::Speak(g_aim_label +
+                                    (onTarget ? ", na celu."
+                                              : ", nie mogę ustawić pionu."),
+                                    tolk::Priority::Ui, true);
+                        return;
+                    }
                     // Aimed at the target's height — start the auto-fire burst.
                     g_aim_phase    = 2;
                     g_fire_left    = kSprayCount;
@@ -1088,7 +1382,7 @@ void Tick(float)
                     tolk::Speak(g_aim_label + ", strzelam.",
                                 tolk::Priority::Ui, true);
                 } else {
-                    long mv = (long)(err * 6.0f) * g_pitch_sign;
+                    long mv = (long)(err * g_pitch_gain) * g_pitch_sign;
                     if (mv >  150) mv =  150;
                     if (mv < -150) mv = -150;
                     if (mv > -3 && mv < 3) mv = (err > 0 ? 3 : -3) * g_pitch_sign;
@@ -1132,6 +1426,11 @@ void Tick(float)
 
 void Init()
 {
+    g_aimoffs = config::LoadAimOffsets();
+    if (!g_aimoffs.empty())
+        F3A_INFO("Aim corrections loaded from the INI: %u",
+                 (unsigned)g_aimoffs.size());
+
     const auto& h = config::Get().hotkeys;
     hotkeys::Bind(h.scan_nearby,   &ScanAll);
     hotkeys::Bind(h.scan_hostiles, &ScanHostiles);
@@ -1148,6 +1447,11 @@ void Init()
     hotkeys::Bind(h.aim_target,      &AimAtTarget);
     hotkeys::Bind(h.center_camera,   &CenterCamera);
     hotkeys::Bind(h.drop_item,       &DropItem);
+    hotkeys::Bind(h.press_row,       &PressRow);
+    hotkeys::Bind(h.aim_hold,        &AimHoldPress);
+    hotkeys::Bind(h.aim_calibrate,   &AimCalibrate);
+    hotkeys::Bind(h.aim_up,          &AimTrimUp);
+    hotkeys::Bind(h.aim_down,        &AimTrimDown);
     F3A_INFO("World scan module ready.");
 }
 void Shutdown() {}
@@ -1168,6 +1472,7 @@ void ResetSession()
     g_level_on     = false;
     g_turn_verify_at    = 0;
     g_turn_correct_left = 0;
+    AimHoldRelease();
     g_track_on     = false;
     g_track_refr   = nullptr;
     g_track_refid  = 0;

@@ -6,8 +6,10 @@
 #include "f3a/polling_loop.h"
 #include "f3a/console.h"
 #include "f3a/game_access.h"
+#include "f3a/menu_dispatch.h"
 
 #include <windows.h>
+#include <map>
 #include <array>
 #include <unordered_map>
 #include <vector>
@@ -55,6 +57,10 @@ int DikToVk(uint32_t dik)
     case 0x1C: return VK_RETURN;
     case 0x0E: return VK_BACK;        // Backspace
     case 0xC7: return VK_HOME;
+    case 0xC8: return VK_UP;          // arrows: E0-prefixed, so they MUST be
+    case 0xD0: return VK_DOWN;        // listed here — MapVirtualKey hands back
+    case 0xCB: return VK_LEFT;        // the numpad keys for these, which is how
+    case 0xCD: return VK_RIGHT;       // the aim trim silently did nothing.
     case 0xC9: return VK_PRIOR;       // Page Up
     case 0xCF: return VK_END;
     case 0xD1: return VK_NEXT;        // Page Down
@@ -98,6 +104,11 @@ void ToggleMod()
 
 void SilenceAction()
 {
+    // Space is bound to Silence globally, but inside VATS it is the key that
+    // queues a shot — and the two fired together, so the mod announced "Strzał
+    // dodany" and then instantly cut itself off. In VATS the shot wins; the
+    // player can still stop speech with the repeat/other keys.
+    if (menu::IsOpen(menu::Id::VATS)) return;
     tolk::Silence();
 }
 
@@ -209,13 +220,51 @@ void Rebind()
 }
 
 int g_shift_grace = 0;   // ticks remaining where Shift "counts" as held
-int g_ctrl_grace  = 0;   // same, for Ctrl (category cycling modifier)
+
+// Keys WE press ourselves. Autowalk drives the player by injecting W/A/S/D and
+// Space, and those injections come back through GetAsyncKeyState exactly like a
+// real press — so the mod kept firing its own hotkeys at itself: a recovery
+// sidestep pressed D and triggered "read the item card", a recovery hop pressed
+// Space and triggered whatever sits on it. Keys announced here are ignored for
+// a few ticks so an injected press cannot be mistaken for the player's.
+constexpr int kSuppressTicks = 4;
+std::map<uint32_t, int> g_suppressed;
+
+// Alt, tracked by TRANSITION rather than by current state.
+//
+// Alt+Tab leaves Alt reading as held: Windows never delivers the key-up to the
+// application that lost focus, so GetAsyncKeyState keeps reporting it down long
+// after the player let go. The mod took that at face value and turned an
+// ordinary Home press into Alt+Home — teleporting the player instead of aiming,
+// which is exactly how a session at the rifle range ended up standing on the
+// targets. So Alt only counts once we have SEEN it go down while Fallout had
+// focus, and regaining focus re-primes the state instead of trusting it.
+bool g_alt_prev    = false;
+bool g_alt_genuine = false;
+bool g_had_focus   = false;
 
 void Poll()
 {
-    if (!IsForegroundFallout()) return;
+    if (!IsForegroundFallout()) { g_had_focus = false; return; }
 
-    // Track Shift/Ctrl with a short grace window so modifier+key combos
+    {
+        bool altNow = (GetAsyncKeyState(VK_MENU)  & 0x8000) ||
+                      (GetAsyncKeyState(VK_LMENU) & 0x8000) ||
+                      (GetAsyncKeyState(VK_RMENU) & 0x8000);
+        if (!g_had_focus) {
+            // First poll after the window came back: adopt whatever Alt reads
+            // as, but do not treat it as a press the player just made.
+            g_had_focus   = true;
+            g_alt_prev    = altNow;
+            g_alt_genuine = false;
+        } else {
+            if (altNow && !g_alt_prev) g_alt_genuine = true;
+            if (!altNow)               g_alt_genuine = false;
+            g_alt_prev = altNow;
+        }
+    }
+
+    // Track Shift with a short grace window so modifier+key combos
     // register even if the key edge lands a tick or two before the modifier
     // is read as down.
     bool shiftNow = (GetAsyncKeyState(VK_SHIFT)  & 0x8000) ||
@@ -224,17 +273,18 @@ void Poll()
     if (shiftNow)           g_shift_grace = 4;     // ~320 ms at the poll rate
     else if (g_shift_grace) --g_shift_grace;
 
-    bool ctrlNow = (GetAsyncKeyState(VK_CONTROL)  & 0x8000) ||
-                   (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
-                   (GetAsyncKeyState(VK_RCONTROL) & 0x8000);
-    // Short window: enough to catch Ctrl read a tick late, short enough that
-    // it doesn't linger onto a following plain PgUp/PgDn (object browse).
-    if (ctrlNow)           g_ctrl_grace = 2;
-    else if (g_ctrl_grace) --g_ctrl_grace;
+    for (auto it = g_suppressed.begin(); it != g_suppressed.end(); ) {
+        if (--it->second <= 0) it = g_suppressed.erase(it); else ++it;
+    }
 
     for (auto& b : g_bindings) {
         int vk = DikToVk(b.dik);
         if (!vk) continue;
+        if (g_suppressed.find(b.dik) != g_suppressed.end()) {
+            // Keep the edge state current so releasing it doesn't fire later.
+            b.was_down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+            continue;
+        }
         bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
         if (down && !b.was_down) {
             F3A_DEBUG("hotkey fired: dik=0x%02X vk=0x%02X", b.dik, vk);
@@ -244,26 +294,24 @@ void Poll()
     }
 }
 
+void SuppressKey(uint32_t dik) { g_suppressed[dik] = kSuppressTicks; }
+
 bool ShiftActive() { return g_shift_grace > 0; }
 
-// Ctrl is read LIVE (not via the grace window): the category modifier is held
-// down while tapping PgUp/PgDn, so the current physical state is reliable — and
-// crucially it clears the instant Ctrl is released, so the very next plain
+// Shift read LIVE, bypassing the grace window above: the category modifier is
+// HELD while tapping PgUp/PgDn, so the physical state is reliable — and
+// crucially it clears the instant Shift is released, so the very next plain
 // PgUp/PgDn reads an object/quest immediately instead of being eaten as another
 // category step (which felt like the scanner "not refreshing right away").
-bool CtrlActive()
+bool ShiftHeldNow()
 {
-    return (GetAsyncKeyState(VK_CONTROL)  & 0x8000) ||
-           (GetAsyncKeyState(VK_LCONTROL) & 0x8000) ||
-           (GetAsyncKeyState(VK_RCONTROL) & 0x8000);
+    return (GetAsyncKeyState(VK_SHIFT)  & 0x8000) ||
+           (GetAsyncKeyState(VK_LSHIFT) & 0x8000) ||
+           (GetAsyncKeyState(VK_RSHIFT) & 0x8000);
 }
 
 // Alt held — the modifier for Alt+Home = teleport (vs plain Home = aim).
-bool AltActive()
-{
-    return (GetAsyncKeyState(VK_MENU)  & 0x8000) ||
-           (GetAsyncKeyState(VK_LMENU) & 0x8000) ||
-           (GetAsyncKeyState(VK_RMENU) & 0x8000);
-}
+// See g_alt_genuine: a raw read of Alt is not trustworthy after an Alt+Tab.
+bool AltActive() { return g_alt_genuine; }
 
 } // namespace f3a::hotkeys

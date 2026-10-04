@@ -6,6 +6,7 @@
 #include "f3a/modules.h"
 #include "f3a/hotkeys.h"
 #include "f3a/config.h"
+#include "f3a/audio_beacon.h"
 #include "f3a/logger.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/strings.h"
@@ -342,7 +343,65 @@ void PollHudMessages()
     std::string msg = game::GetHudMessage();
     if (msg == g_hud_msg) return;
     g_hud_msg = msg;
-    if (!msg.empty()) tolk::Speak(msg, tolk::Priority::Ui, /*interrupt=*/false);
+    if (msg.empty()) return;
+    // Log the message VERBATIM. Tutorial hints carry the game's own control
+    // placeholders, which stay unreplaced for keyboard players and get read out
+    // as gibberish ("su act use"); seeing the raw form is the only way to know
+    // what to substitute them with.
+    F3A_INFO("HUD msg: '%s'", msg.c_str());
+    tolk::Speak(game::ExpandControlTokens(msg), tolk::Priority::Ui,
+                /*interrupt=*/false);
+}
+
+// Read the HUD's prose — tutorials, hints, "you can't do that" notices.
+//
+// These appear and disappear all over the HUD tree, so rather than hunting for
+// each tile we take everything currently visible (game_access filters out the
+// counters) and speak the lines we haven't already said.
+//
+// "Already said" used to mean only "still on screen", and that was not enough.
+// A tutorial hint blinks, or its tile is rebuilt, and every flicker counted as
+// a new line — so the game repeated "hold aim to..." at the player over and
+// over while they were trying to listen for something that mattered. A line is
+// now remembered for a good while after it is spoken, so a hint is heard once;
+// a notice that genuinely recurs much later is still read again.
+std::vector<std::string> g_hud_seen;
+
+struct HudSaid { std::string text; DWORD when; };
+std::vector<HudSaid> g_hud_said;
+constexpr DWORD kHudRepeatAfterMs = 5 * 60 * 1000;   // five minutes
+
+bool HudAlreadySaid(const std::string& line)
+{
+    DWORD now = GetTickCount();
+    for (auto& s : g_hud_said) {
+        if (s.text != line) continue;
+        if (now - s.when < kHudRepeatAfterMs) return true;
+        s.when = now;           // long enough ago to be worth hearing again
+        return false;
+    }
+    if (g_hud_said.size() >= 64) g_hud_said.erase(g_hud_said.begin());
+    g_hud_said.push_back({ line, now });
+    return false;
+}
+
+void PollHudProse()
+{
+    if (!config::Get().hud_reader) return;
+    if (!g_system_ready || !IsGameplayActive()) { g_hud_seen.clear(); return; }
+    menu::Id m = menu::ActiveMenu();
+    if (m != menu::Id::None && m != menu::Id::HUDMain) return;
+
+    std::vector<std::string> now = game::GetHudProse();
+    for (const auto& line : now) {
+        bool seen = false;
+        for (const auto& old : g_hud_seen) if (old == line) { seen = true; break; }
+        if (seen) continue;
+        if (HudAlreadySaid(line)) continue;
+        F3A_INFO("HUD: %s", line.c_str());
+        tolk::Speak(line, tolk::Priority::Ui, false);
+    }
+    g_hud_seen = std::move(now);
 }
 
 // Crosshair activate prompt (HUD "Info" tile): speak the verb + target you're
@@ -357,6 +416,7 @@ void PollActivatePrompt()
 {
     auto reset = [] { g_act_prompt.clear(); g_act_refid = 0; g_act_pending_refid = 0; };
     if (!g_system_ready || !IsGameplayActive()) { reset(); return; }
+    if (g_postload_cooldown > 0) { reset(); return; }   // HUD still settling
     menu::Id m = menu::ActiveMenu();
     if (m != menu::Id::None && m != menu::Id::HUDMain) { reset(); return; }
 
@@ -389,6 +449,7 @@ void PollActivatePrompt()
 
     g_act_refid  = t.refid;
     g_act_prompt = say;
+    F3A_INFO("Crosshair prompt: '%s'", say.c_str());
     tolk::Speak(say, tolk::Priority::Ui, /*interrupt=*/false);
 }
 
@@ -505,13 +566,24 @@ const char* g_special_names[7] = {
 int  g_special[7]      = { -1, -1, -1, -1, -1, -1, -1 };
 bool g_special_init    = false;
 int  g_special_throttle = 0;
+// ~12 Hz poll, so this is roughly four seconds of uninterrupted gameplay.
+constexpr int kSpecialSettleTicks = 48;
 
 void PollSpecialChange()
 {
+    // The post-load cooldown ends while the save is still settling: the player
+    // already exists, but equipment and perks are still being applied and the
+    // attribute values move for a second or two afterwards. Every one of those
+    // moves used to be announced — that was the "Siła 7, Percepcja 7,
+    // Charyzma 6, Charyzma 6..." the player heard. Wait out the settling
+    // before taking a baseline, and take the baseline silently.
+    static int settle = 0;
     if (!IsGameplayActive() || g_postload_cooldown > 0) {
         g_special_init = false;
+        settle = kSpecialSettleTicks;
         return;
     }
+    if (settle > 0) { --settle; return; }
     if (--g_special_throttle > 0) return;
     g_special_throttle = 6;                 // ~6 ticks between polls
 
@@ -526,9 +598,20 @@ void PollSpecialChange()
         g_special_init = true;
         return;
     }
+    // Confirm a change before speaking it: right after a load these values
+    // settle over a few polls, and announcing every intermediate reading is
+    // where "Siła 7, Percepcja 7, Charyzma 6..." came from.
+    static int  pending[7] = { -1, -1, -1, -1, -1, -1, -1 };
+    static bool pending_set[7] = {};
     for (int i = 0; i < 7; ++i) {
-        if (cur[i] == g_special[i]) continue;
+        if (cur[i] == g_special[i]) { pending_set[i] = false; continue; }
+        if (!pending_set[i] || pending[i] != cur[i]) {
+            pending[i] = cur[i];           // first sighting — wait for a repeat
+            pending_set[i] = true;
+            continue;
+        }
         g_special[i] = cur[i];
+        pending_set[i] = false;
         char buf[64];
         std::snprintf(buf, sizeof(buf), "%s %d", g_special_names[i], cur[i]);
         tolk::Speak(buf, tolk::Priority::Ui, true);
@@ -607,6 +690,10 @@ std::atomic<bool> g_skip_pending{ false };
 // VATS button click (Menu::HandleClick game call → main thread only).
 // 0 = none, 1 = body part, 2 = previous target, 3 = next target.
 std::atomic<int> g_vats_click{ 0 };
+// Queueing a shot at a specific limb: the tile is chosen on the poll thread,
+// clicked on the main one.
+const void*       g_vats_limb_tile = nullptr;
+std::atomic<bool> g_vats_limb_pending{ false };
 
 // Native SetAngle aim (the friend's lead): point the player's view via the
 // engine's own SetAngle (0x522B50 → touches the 3D node → main thread only).
@@ -619,6 +706,104 @@ std::atomic<int>  g_aim_pitch_bits{ 0 };
 // Frames left to keep re-applying the requested angle (main thread only).
 constexpr int kAimFrames = 5;
 int g_aim_frames = 0;
+
+// Aim TRACKING. A one-shot aim cannot win: the engine recomputes the view from
+// its own state every frame, so whatever we set is gone by the time the player
+// pulls the trigger. The FNV mod solves this by re-aiming every frame for as
+// long as the aim button is held, and this is that — run from the main thread,
+// where the game's own update happens, rather than from the ~12 Hz poll.
+//
+// frames > 0 counts down (a Home press: converge and hold briefly); frames < 0
+// means "until told to stop" (the aim key is latched).
+std::atomic<const void*> g_aimtrack_refr{ nullptr };
+std::atomic<uint32_t>    g_aimtrack_refid{ 0 };
+std::atomic<int>         g_aimtrack_up{ 0 };       // float bits
+std::atomic<int>         g_aimtrack_frames{ 0 };
+// Fallback aim point, for a target that has no usable reference — a quest
+// marker, most of the time. Without this the whole tracker silently did
+// nothing for exactly the targets the player most needs it for.
+std::atomic<int> g_aimtrack_x{ 0 }, g_aimtrack_y{ 0 }, g_aimtrack_z{ 0 };
+
+// Closed-loop pitch correction.
+//
+// The geometric aim has to guess where the shot leaves the player from. A guess
+// that is off by a few dozen units is a miss at any useful range, and it was:
+// the aim was landing under the practice targets even though the yaw read back
+// exactly right. So ask the engine what the crosshair is actually ON, and while
+// that is not our target, sweep a small pitch bias until it is. The bias that
+// works is then kept — the error it corrects is the same everywhere, so this
+// self-calibrates once and stays right.
+float g_aim_bias  = 0.0f;   // GAME UNITS, added to the aim point's height
+int   g_aim_probe = 0;      // position in the sweep
+int   g_aim_check = 0;      // frames until the next crosshair check
+int   g_aim_miss  = 0;      // consecutive checks that were NOT on target
+bool  g_aim_settled = false;
+constexpr int   kAimCheckEvery = 4;      // frames between crosshair checks
+// +-96 units covers every plausible combination of eye height and aim point:
+// the player's eye is somewhere between a crouching child and a tall adult,
+// and a target's origin is at its foot or at its middle. The previous sweep
+// was in degrees and reached about 11 degrees, which at two metres is only
+// some 40 units — not enough to cross a target we were aiming a metre under.
+constexpr int   kAimProbeMax   = 24;
+constexpr float kAimProbeStep  = 8.0f;
+// Two references this close in range belong to the same physical object.
+constexpr float kSameAssembly  = 60.0f;
+// How long after taking a new target the correction may still be searched for.
+// The aim itself is held indefinitely, so "search while frames remain" no
+// longer works as the window — this is it, and after it the aim stands still.
+constexpr int   kAimSearchFrames = 150;   // ~2.5 s
+int g_aim_search_left = 0;
+// Set when the target visibly reacts to being struck; read once by the module
+// that speaks it.
+std::atomic<bool> g_aim_reacted{ false };
+// A new target needs its reachable aim point worked out once, with the engine's
+// ray, on the game's own thread.
+std::atomic<bool> g_aim_solve{ false };
+// A requested ray map, carried to the game's thread.
+std::atomic<bool> g_raymap{ false };
+std::atomic<bool> g_rayscan{ false };
+std::atomic<int>  g_raymap_x{ 0 }, g_raymap_y{ 0 }, g_raymap_z{ 0 };
+// What the ray found, kept as an OFFSET from the reference's origin rather than
+// as a fixed point: a practice target never moves, but an enemy does, and
+// freezing the aim on the spot where one used to stand would be a poor trade.
+std::atomic<int> g_aim_ox{ 0 }, g_aim_oy{ 0 }, g_aim_oz{ 0 };
+// Moving the mouse hands control back. Roughly two degrees in a frame — far
+// more than the engine's own weapon sway, far less than a deliberate turn.
+constexpr float kMouseTakeover = 0.035f;
+int g_takeover = 0;
+std::atomic<bool> g_aim_released{ false };
+
+// Sweep outwards from zero, alternating sides: 0, +1, -1, +2, -2, ... so the
+// nearest correction is always tried first.
+float ProbeBias(int step)
+{
+    if (step <= 0) return 0.0f;
+    int mag  = (step + 1) / 2;
+    float v  = mag * kAimProbeStep;
+    return (step & 1) ? v : -v;
+}
+
+int g_aim_tone_ticks = 0;   // paces the "on target" tone
+
+void AimTrackReset()
+{
+    g_aim_check = 0;
+    g_aim_miss  = 0;
+    g_aim_search_left = kAimSearchFrames;
+    g_aim_solve.store(true);
+    g_aim_ox.store(0); g_aim_oy.store(0); g_aim_oz.store(0);
+    // A bias that has already put the crosshair on a target is KEPT: it
+    // corrects our estimate of where the shot leaves from, which does not
+    // change between targets. It still gets re-verified below, and the sweep
+    // resumes from it if this target says otherwise.
+    if (!g_aim_settled) { g_aim_probe = 0; g_aim_bias = 0.0f; }
+}
+// Aim at a REFERENCE's body (collision centre, measured from the camera). The
+// model reads and virtual calls make this main-thread-only.
+const void*       g_aimref_refr = nullptr;
+std::atomic<uint32_t> g_aimref_id{ 0 };
+std::atomic<bool> g_aimref_pending{ false };
+
 // Native "face this point" request (the engine's own actor-facing routine).
 std::atomic<bool> g_face_pending{ false };
 std::atomic<int>  g_face_x{ 0 }, g_face_y{ 0 }, g_face_z{ 0 };
@@ -728,14 +913,53 @@ std::atomic<bool> g_map_travel_pending{ false };
 // from the poll thread crashed the game: the player's own key press closes it on
 // the main thread, and our reader was walking its tiles as they were being freed
 // (the log ended right after the menu opened, with no click of ours involved).
+// VATS numbers, sampled on the MAIN thread for the same reason as the quantity
+// prompt: VATS closes under the player's own key press, and reading a menu the
+// main thread is freeing is what crashed the game repeatedly.
+std::atomic<bool> g_vats_valid{ false };
+std::atomic<int>  g_vats_ap{ 0 }, g_vats_maxap{ 0 }, g_vats_clip{ 0 };
+std::atomic<int>  g_vats_reserve{ 0 }, g_vats_queued{ 0 }, g_vats_chance{ 0 };
+std::atomic<bool> g_vats_has_ap{ false }, g_vats_has_ammo{ false }, g_vats_has_chance{ false };
+
 std::atomic<bool> g_qty_open{ false };
 std::atomic<int>  g_qty_amount{ 0 };
 std::atomic<int>  g_qty_max{ 0 };
+
+// Loot Menu Updated's overlay, sampled on the MAIN thread for the same reason
+// as the two above: the loot mod rebuilds those item tiles as the player
+// scrolls, and we must not be walking them while it does.
+//
+// It carries TEXT, so a plain set of atomics won't do. The writer bumps the
+// sequence before and after the copy; a reader that sees an odd number, or a
+// different number afterwards, read a half-written record and tries again.
+std::atomic<unsigned> g_loot_seq{ 0 };
+game::LootMenuInfo    g_loot_snapshot;
+
+// "Cycle the body part N times" (see the dispatch site for why N, not 1).
+// Which limb the cursor is being steered to (-1 = idle), and whether to click
+// once it arrives.
+std::atomic<int>  g_vats_point_index{ -1 };
+std::atomic<bool> g_vats_point_click{ false };
+DWORD g_vats_point_start = 0;    // main thread only
+DWORD g_vats_point_logged = 0;
+int   g_vats_last_sel = -2;      // selection at the previous nudge
+float g_vats_gain = 1.0f;        // menu units -> mouse pixels, found by trying
+int   g_vats_click_hold = 0;     // frames left holding the mouse button down
+float g_vats_sent = 0.0f;        // pixels sent by the last nudge (for calibration)
+int   g_vats_sweep = 0;          // search step while the game selects nothing
+// Which limb VATS is aimed at, sampled on the main thread. Carries text, so it
+// uses the same sequence guard as the loot overlay.
+std::atomic<unsigned> g_vats_pick_seq{ 0 };
+game::VatsPick        g_vats_pick;
 
 // Press the inventory's "Upuść" button (HandleClick → main thread only).
 std::atomic<bool> g_drop_pending{ false };
 // Track the quest highlighted in the Pip-Boy (clicks its row; main thread only).
 std::atomic<bool> g_track_quest_pending{ false };
+// Press whatever row the keyboard highlight is on, in any menu. The game's
+// controls page only enters its "press a new key" mode on a MOUSE CLICK, so
+// without this a blind player simply cannot rebind anything.
+std::atomic<bool> g_press_row_pending{ false };
 // Confirm the quantity prompt (presses its Ok; main thread only).
 // Generic "click this named tile in this menu" request (HandleClick → main
 // thread). One slot is enough: requests come from key presses, one at a time.
@@ -771,7 +995,23 @@ void PollMenuReaders()
     PollTerminal();
     PollRaceSex();
     PollHudMessages();
+    PollHudProse();
     PollActivatePrompt();
+}
+
+// Penning the pointer inside the game window while we steer it. Without this
+// the injected moves walk the desktop cursor across whatever else is on screen,
+// which is both alarming and a way to click something that isn't the game.
+void ClipToGameWindow(bool on)
+{
+    static bool clipped = false;
+    if (on == clipped) return;
+    if (!on) { ClipCursor(nullptr); clipped = false; return; }
+    HWND w = GetForegroundWindow();
+    RECT r{};
+    if (!w || !GetWindowRect(w, &r)) return;
+    ClipCursor(&r);
+    clipped = true;
 }
 
 void MainThreadWork()
@@ -801,6 +1041,37 @@ void MainThreadWork()
     // first frame, walking the menu tree during the loading screen before the
     // interface exists, and that crashed the game on startup. The menu id comes
     // from our own dispatcher state, so testing it costs nothing.
+    if (g_system_ready && menu::IsOpen(menu::Id::VATS)) {
+        game::VatsInfo v;
+        if (game::GetVatsInfo(&v)) {
+            g_vats_ap.store(v.ap); g_vats_maxap.store(v.max_ap);
+            g_vats_clip.store(v.clip_ammo); g_vats_reserve.store(v.reserve_ammo);
+            g_vats_queued.store(v.queued); g_vats_chance.store(v.hit_chance);
+            g_vats_has_ap.store(v.has_ap); g_vats_has_ammo.store(v.has_ammo);
+            g_vats_has_chance.store(v.has_chance);
+            g_vats_valid.store(true);
+        }
+        game::VatsPick pick;
+        game::GetVatsPick(&pick);
+        g_vats_pick_seq.fetch_add(1, std::memory_order_acq_rel);
+        g_vats_pick = pick;
+        g_vats_pick_seq.fetch_add(1, std::memory_order_acq_rel);
+    } else if (g_vats_valid.load()) {
+        g_vats_valid.store(false);
+    }
+
+    // The loot overlay lives ON the HUD, so there is no menu transition to hang
+    // this off — it has to be sampled whenever the player is in the world.
+    if (g_system_ready && g_in_gameplay) {
+        game::LootMenuInfo loot;
+        if (!game::GetLootMenuInfo(&loot)) loot = game::LootMenuInfo{};
+        if (loot.visible || g_loot_snapshot.visible) {
+            g_loot_seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd
+            g_loot_snapshot = loot;
+            g_loot_seq.fetch_add(1, std::memory_order_acq_rel);   // -> even
+        }
+    }
+
     if (g_system_ready && menu::ActiveMenu() == menu::Id::Quantity) {
         int a = 0, m = 0;
         bool ok = game::GetQuantityState(&a, &m);
@@ -811,6 +1082,13 @@ void MainThreadWork()
     }
     if (g_menuclick_pending.exchange(false)) {
         game::ClickMenuButton(g_menuclick_menu.load(), g_menuclick_tile, 8);
+    }
+    if (g_press_row_pending.exchange(false)) {
+        // No list filter: this is the generic "activate what I have selected".
+        if (game::ClickSelectedRowIn(nullptr))
+            tolk::Speak("Naciśnij nowy klawisz.", tolk::Priority::System, true);
+        else
+            tolk::Speak("Nie ma zaznaczonej pozycji.", tolk::Priority::System, true);
     }
     if (g_track_quest_pending.exchange(false)) {
         if (game::ClickSelectedRowIn("MM_QuestsList"))
@@ -840,8 +1118,155 @@ void MainThreadWork()
     if (int c = g_vats_click.exchange(0)) {
         const char* btn = (c == 2) ? "left_arrow"
                         : (c == 3) ? "right_arrow"
+                        : (c == 4) ? "Select_button"   // "Wybierz" = queue a shot
                                    : "BodyPart_button";
         game::ClickVatsButton(btn);   // the VATS reader announces the new pick
+    }
+    // In FO3's VATS the CURSOR picks the body part and the CURSOR queues the
+    // shot. Both on-screen buttons for it ("Część ciała", "Wybierz") are
+    // gamepad prompts — invisible tiles whose PC shortcut label is empty — and
+    // the log settled it: clicking the body-part button dozens of times never
+    // once moved the selection.
+    //
+    // Steering it is the hard part, because the engine's cursor tile carries no
+    // position (a dump shows it with width and height and no x or y), so the
+    // obvious feedback signal reads zero forever — which is exactly what the
+    // first attempt did. The signal that DOES work is the selection itself: the
+    // game marks the limb under the cursor, and we can read that. So the loop
+    // aims from the limb currently selected towards the wanted one and checks
+    // after each nudge, which self-corrects however the menu units happen to
+    // map to mouse pixels.
+    if (g_vats_point_index.load() >= 0 && menu::IsOpen(menu::Id::VATS)) {
+        ClipToGameWindow(true);
+        auto limbs = game::GetVatsLimbs();
+        int  want  = g_vats_point_index.load();
+        DWORD now  = GetTickCount();
+
+        int sel = -1;
+        for (size_t i = 0; i < limbs.size(); ++i) if (limbs[i].selected) sel = (int)i;
+
+        if (want >= (int)limbs.size()) {
+            g_vats_point_index.store(-1);
+            g_vats_point_click.store(false);
+            F3A_INFO("VATS point: limb %d is gone (list has %d)", want,
+                     (int)limbs.size());
+        } else if (sel == want) {
+            g_vats_point_index.store(-1);
+            if (g_vats_point_click.exchange(false)) {
+                // Press and HOLD. The game samples input once a frame, so a
+                // down and an up delivered together can land inside a single
+                // sample and register as no click at all — the same reason this
+                // mod has to hold keys for several frames elsewhere. The button
+                // is released a few passes later, below.
+                INPUT in{}; in.type = INPUT_MOUSE;
+                in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+                SendInput(1, &in, sizeof(in));
+                g_vats_click_hold = 6;
+                F3A_INFO("VATS point: on %s — holding the button down",
+                         limbs[want].name.c_str());
+            } else {
+                F3A_INFO("VATS point: on %s", limbs[want].name.c_str());
+            }
+        } else if (now - g_vats_point_start > 2500) {
+            g_vats_point_index.store(-1);
+            g_vats_point_click.store(false);
+            F3A_INFO("VATS point: could not reach %s (stuck on %s, gain %.2f)",
+                     limbs[want].name.c_str(),
+                     sel >= 0 ? limbs[sel].name.c_str() : "nothing",
+                     g_vats_gain);
+        } else {
+            // Nothing is selected yet, which is the normal state for the first
+            // seconds after VATS opens: the markers exist but the game has not
+            // committed to one. With no limb to measure FROM there is no
+            // direction to go, so sweep — alternating sides, growing — until
+            // the cursor crosses a marker and the game commits. A fixed little
+            // shove could search in the wrong direction forever, and that was
+            // the wait before the keys started answering.
+            float dx, dy;
+            if (sel < 0) {
+                ++g_vats_sweep;
+                float mag = 60.0f * (float)((g_vats_sweep + 1) / 2);
+                if (mag > 300.0f) mag = 300.0f;
+                float sign = (g_vats_sweep % 2) ? 1.0f : -1.0f;
+                dx = sign * mag;
+                dy = sign * mag * ((g_vats_sweep % 4 < 2) ? 0.5f : -0.5f);
+            } else {
+                g_vats_sweep = 0;
+                dx = limbs[want].x - limbs[sel].x;
+                dy = limbs[want].y - limbs[sel].y;
+            }
+
+            // Learn how far a pixel of mouse movement carries the cursor in
+            // menu units, instead of assuming they are the same. After a nudge
+            // that changed the selection we know both halves of the ratio: the
+            // pixels we sent, and the menu-space gap between the limb we were
+            // on and the one we landed on. Guessing a gain and multiplying it
+            // by 1.5 until something moved is what made it swing wildly past
+            // the target and read a different limb each time.
+            if (sel >= 0 && sel == g_vats_last_sel) {
+                g_vats_gain *= 1.4f;             // never moved: push harder
+                if (g_vats_gain > 4.0f) g_vats_gain = 4.0f;
+            } else if (sel >= 0 && g_vats_last_sel >= 0 &&
+                       g_vats_last_sel < (int)limbs.size() && g_vats_sent > 1.0f) {
+                float moved = std::sqrt(
+                    (limbs[sel].x - limbs[g_vats_last_sel].x) *
+                    (limbs[sel].x - limbs[g_vats_last_sel].x) +
+                    (limbs[sel].y - limbs[g_vats_last_sel].y) *
+                    (limbs[sel].y - limbs[g_vats_last_sel].y));
+                if (moved > 1.0f) {
+                    float measured = g_vats_sent / moved;
+                    g_vats_gain = g_vats_gain * 0.5f + measured * 0.5f;
+                    if (g_vats_gain < 0.15f) g_vats_gain = 0.15f;
+                    if (g_vats_gain > 4.0f)  g_vats_gain = 4.0f;
+                }
+            }
+            g_vats_last_sel = sel;
+
+            long mx = (long)(dx * g_vats_gain), my = (long)(dy * g_vats_gain);
+            if (mx >  250) mx =  250;  if (mx < -250) mx = -250;
+            if (my >  250) my =  250;  if (my < -250) my = -250;
+            g_vats_sent = std::sqrt((float)(mx * mx + my * my));
+            if (mx == 0 && dx != 0.0f) mx = (dx > 0 ? 1 : -1);
+            if (my == 0 && dy != 0.0f) my = (dy > 0 ? 1 : -1);
+            INPUT in{}; in.type = INPUT_MOUSE;
+            in.mi.dx = mx; in.mi.dy = my; in.mi.dwFlags = MOUSEEVENTF_MOVE;
+            SendInput(1, &in, sizeof(in));
+
+            if (g_vats_point_logged == 0 || now - g_vats_point_logged > 300) {
+                g_vats_point_logged = now;
+                F3A_INFO("VATS point: %s -> %s, nudge (%ld,%ld) gain %.2f",
+                         sel >= 0 ? limbs[sel].name.c_str() : "nothing",
+                         limbs[want].name.c_str(), mx, my, g_vats_gain);
+            }
+        }
+    }
+    if (g_vats_point_index.load() < 0 && g_vats_click_hold == 0)
+        ClipToGameWindow(false);
+
+    // Let the held mouse button up once the game has had frames to see it.
+    if (g_vats_click_hold > 0 && --g_vats_click_hold == 0) {
+        INPUT in{}; in.type = INPUT_MOUSE;
+        in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        SendInput(1, &in, sizeof(in));
+        F3A_INFO("VATS point: button released");
+    }
+
+    if (g_aimref_pending.exchange(false)) {
+        // Guard the pointer with the id it had when queued: a cell change can
+        // free it, and the address gets reused.
+        game::Vec3 pos{};
+        uint32_t want = g_aimref_id.load();
+        if (game::GetRefPosition(g_aimref_refr, want, &pos)) {
+            std::string how;
+            if (game::AimAtReference(g_aimref_refr, &how)) {
+                // The aim point tells the player how precise this is: a
+                // collision hit is exact, an origin fallback is a guess.
+                tolk::Speak(how == "collision" ? "Na celu."
+                          : how == "bounds"    ? "Na celu."
+                                               : "Celuję z grubsza.",
+                            tolk::Priority::Ui, false);
+            }
+        }
     }
     // Native facing runs before the angle writes below, so a follow-up pitch
     // adjustment lands on top of it rather than being undone by it.
@@ -854,6 +1279,11 @@ void MainThreadWork()
     // SetAngle gets overwritten by the game's own input processing before it
     // reaches the camera — the FNV accessibility mod re-applies its look-at over
     // 5 frames for exactly this reason, and pitch is the axis that suffered.
+    // Aiming normally rides the movement hook (see AimTick). Without that hook
+    // this is the only main-thread slot we have; it is the wrong point in the
+    // frame, but a weak aim beats none.
+    if (!mover::Available()) AimTick();
+
     if (g_aim_pending.exchange(false)) g_aim_frames = kAimFrames;
     if (g_aim_frames > 0) {
         --g_aim_frames;
@@ -863,6 +1293,10 @@ void MainThreadWork()
         if (g_aim_do_pitch.load())
             game::SetPlayerAngleDeg('X', BitsToF(g_aim_pitch_bits.load()));
     }
+
+    // Keep the aim ON the target, every frame, for as long as tracking is on.
+    // This is the half that was missing: aiming once and hoping is how the
+    // crosshair ended up next to the target instead of on it.
 }
 
 void Tick(float dt)
@@ -1035,9 +1469,11 @@ void Tick(float dt)
             // These search the menu tree (lockpick cue, hacking grid, map list).
             modules::worldscan::Tick(dt);
             modules::hacking::Tick(dt);
+        modules::specialbook::Tick(dt);
             modules::mapnav::Tick(dt);
         }
         modules::quantity::Tick(dt);   // sampled state only — safe
+        modules::lootmenu::Tick(dt);   // sampled state only — safe
         PollQuestChange();
         // NOTE: SPECIAL/status read game functions (GetActorValue) and so MUST
         // run on the main thread — see MainThreadWork(), invoked by the
@@ -1113,6 +1549,12 @@ void RequestSkipObjective() { g_skip_pending.store(true); }
 // Called from any thread; the VATS HandleClick runs on the main thread.
 // code: 1 = body part, 2 = previous target, 3 = next target.
 void RequestVatsClick(int code) { g_vats_click.store(code); }
+
+void RequestVatsLimbClick(const void* tile)
+{
+    g_vats_limb_tile = tile;
+    g_vats_limb_pending.store(true);
+}
 void RequestVatsBodyPart() { RequestVatsClick(1); }
 
 // Called from the F hotkey (worker thread). Announces the view IMMEDIATELY by
@@ -1153,6 +1595,13 @@ void RequestTeleport(const void* refr)
     g_teleport_pending.store(true);
 }
 
+void RequestAimAtRef(const void* refr, uint32_t refid)
+{
+    g_aimref_refr = refr;
+    g_aimref_id.store(refid);
+    g_aimref_pending.store(true);
+}
+
 void RequestFacePoint(const game::Vec3& p)
 {
     g_face_x.store(FToBits(p.x));
@@ -1174,6 +1623,59 @@ bool QuantityState(int* amount, int* maximum)
 }
 
 void RequestTrackQuest() { g_track_quest_pending.store(true); }
+
+void RequestPressRow() { g_press_row_pending.store(true); }
+
+bool LootMenuState(game::LootMenuInfo* out)
+{
+    if (!out) return false;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        unsigned before = g_loot_seq.load(std::memory_order_acquire);
+        if (before & 1u) continue;                 // a write is in progress
+        game::LootMenuInfo copy = g_loot_snapshot;
+        if (g_loot_seq.load(std::memory_order_acquire) != before) continue;
+        *out = copy;
+        return copy.visible;
+    }
+    return false;
+}
+
+bool VatsPointBusy() { return g_vats_point_index.load() >= 0; }
+
+void RequestVatsPointAt(int limbIndex, bool clickOnArrival)
+{
+    g_vats_point_start  = GetTickCount();
+    g_vats_point_logged = 0;
+    g_vats_last_sel = -2;
+    g_vats_sweep = 0;
+    g_vats_point_click.store(clickOnArrival);
+    g_vats_point_index.store(limbIndex);
+}
+
+bool VatsPickState(game::VatsPick* out)
+{
+    if (!out) return false;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        unsigned before = g_vats_pick_seq.load(std::memory_order_acquire);
+        if (before & 1u) continue;
+        game::VatsPick copy = g_vats_pick;
+        if (g_vats_pick_seq.load(std::memory_order_acquire) != before) continue;
+        *out = copy;
+        return copy.count > 0;
+    }
+    return false;
+}
+
+bool VatsState(game::VatsInfo* out)
+{
+    if (!out || !g_vats_valid.load()) return false;
+    out->ap = g_vats_ap.load();             out->max_ap = g_vats_maxap.load();
+    out->clip_ammo = g_vats_clip.load();    out->reserve_ammo = g_vats_reserve.load();
+    out->queued = g_vats_queued.load();     out->hit_chance = g_vats_chance.load();
+    out->has_ap = g_vats_has_ap.load();     out->has_ammo = g_vats_has_ammo.load();
+    out->has_chance = g_vats_has_chance.load();
+    return true;
+}
 
 
 void RequestMenuClick(uint32_t menuType, const std::string& tileName)
@@ -1202,6 +1704,404 @@ void RequestAim(bool doYaw, float yawDeg, bool doPitch, float pitchDeg)
     g_aim_do_pitch.store(doPitch);
     g_aim_pending.store(true);
 }
+
+// Hold the aim on a reference. `frames` counts main-thread frames; pass a
+// negative number to track until StopAimTrack(). Safe from any thread — the
+// aiming itself happens in MainThreadWork.
+// Put the aim on the target for this frame.
+//
+// This runs from the PLAYER MOVEMENT hook, not from the message-pump work
+// queue, and that placement is the whole point. The message pump runs at the
+// START of a frame, before the engine updates the player: everything written
+// there was recomputed and thrown away before the crosshair was ever cast, so
+// the aim was real for a fraction of a frame and gone by the time a shot left
+// the barrel. The proof was in the log — sweeping the aim point through a
+// 42-degree arc never changed what the engine reported under the crosshair,
+// which cannot happen if the view is really moving. The movement hook runs
+// inside the engine's own update, so what it writes is what the camera and the
+// shot ray actually use.
+//
+// The FNV accessibility mod sidesteps this by running from NVSE's main-loop
+// message; FOSE has no equivalent, so the movement hook is ours.
+void AimTick()
+{
+    // Has the view moved on its own since we set it last frame? Two things can
+    // cause that, and both matter.
+    //
+    // A LOT of movement means somebody is steering with the mouse — and they
+    // must be allowed to. A held aim rewrites the view every single frame, so
+    // while it is on, the mouse is dead: a sighted player could not aim at all,
+    // which is exactly the wrong way round for a mod whose whole purpose is to
+    // let people play together. So the mouse wins: moving it releases the lock.
+    //
+    // A LITTLE movement is the engine quietly undoing us, which is worth a line
+    // in the log but not a handover.
+    {
+        float dyaw = 0.0f, dpitch = 0.0f;
+        if (g_aimtrack_frames.load() != 0 &&
+            game::AimDriftSinceLast(&dyaw, &dpitch)) {
+            float moved = std::fabs(dyaw) > std::fabs(dpitch) ? std::fabs(dyaw)
+                                                              : std::fabs(dpitch);
+            if (moved > kMouseTakeover) {
+                if (++g_takeover >= 2) {        // two frames: not a stray spike
+                    g_takeover = 0;
+                    StopAimTrack();
+                    F3A_INFO("AimTrack: released — the view moved %+.3f yaw / "
+                             "%+.3f pitch, so the mouse has it.", dyaw, dpitch);
+                    g_aim_released.store(true);
+                }
+            } else {
+                g_takeover = 0;
+                if (moved > 0.03f) {
+                    static DWORD s_last = 0;
+                    DWORD now = GetTickCount();
+                    if (now - s_last > 1000) {
+                        s_last = now;
+                        F3A_INFO("Aim: the engine moved the view %+.3f yaw / "
+                                 "%+.3f pitch since we set it last frame.",
+                                 dyaw, dpitch);
+                    }
+                }
+            }
+        } else {
+            g_takeover = 0;
+        }
+    }
+
+    // One line a second, while a target is held, with every value that decides
+    // where the shot goes: whether the camera orbits independently (third
+    // person), where the body points, and where the RENDERER thinks it points.
+    // If the body faces the target and the camera does not, that is the answer.
+    if (g_aimtrack_frames.load() != 0) {
+        static DWORD s_last = 0;
+        DWORD now = GetTickCount();
+        if (now - s_last > 1000) {
+            s_last = now;
+            const float R2D = 57.2957795f;
+            float camP = 0.0f, camY = 0.0f;
+            bool haveCam = game::GetCameraAngles(&camP, &camY);
+            auto* pl = fose_rt::Player();
+            game::CrosshairTarget ct;
+            bool haveCt = game::GetCrosshairTarget(&ct);
+            // The player's own position and the range to the target go in
+            // too: with those and a dump of what is nearby, the line of fire
+            // can be reconstructed on paper — which is the one thing left to
+            // check now that the aim itself is known to be steady and correct.
+            float tx = BitsToF(g_aimtrack_x.load());
+            float ty = BitsToF(g_aimtrack_y.load());
+            float tz = BitsToF(g_aimtrack_z.load());
+            float tdist = 0.0f;
+            if (pl) {
+                float ax = tx - pl->posX, ay = ty - pl->posY;
+                tdist = std::sqrt(ax * ax + ay * ay);
+            }
+            F3A_INFO("AimState: 3rd=%d body yaw=%.1f pitch=%.1f | camera yaw=%.1f "
+                     "pitch=%.1f (%s) | player=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) "
+                     "range=%.0f trim=%+.0f | crosshair=%08X dist=%.0f",
+                     game::IsThirdPerson() ? 1 : 0,
+                     pl ? pl->rotZ * R2D : 0.0f, pl ? pl->rotX * R2D : 0.0f,
+                     haveCam ? camY * R2D : 0.0f, haveCam ? camP * R2D : 0.0f,
+                     haveCam ? "read" : "unavailable",
+                     pl ? pl->posX : 0.0f, pl ? pl->posY : 0.0f, pl ? pl->posZ : 0.0f,
+                     tx, ty, tz, tdist, g_aim_bias,
+                     haveCt ? ct.refid : 0u, haveCt ? ct.dist : 0.0f);
+        }
+    }
+
+    // A requested ray map runs HERE, on the game's own thread. Casting these
+    // from the polling thread took the whole game down.
+    // "What can I actually shoot, and where is it?"
+    //
+    // Every other answer in this mod comes from the game's records, and those
+    // record where an object's ORIGIN is — which can be inside a wall, behind
+    // scenery, or nowhere near the part you are meant to hit. Rays report what
+    // a bullet would really meet. This is the tool for a player who is aiming
+    // correctly and still hitting nothing.
+    if (g_rayscan.exchange(false)) {
+        auto hits = game::RayScanAhead(45.0f, 25.0f, 2.5f, 4000.0f);
+        F3A_INFO("RayScan: %u distinct things in front:", (unsigned)hits.size());
+        std::string say;
+        int spoken = 0;
+        for (const auto& h : hits) {
+            F3A_INFO("RayScan:   %08X '%s' %.0f units, %+.0f deg side, "
+                     "%+.0f deg up/down, %d rays",
+                     h.refid, h.name.c_str(), h.dist, h.yaw, h.pitch, h.samples);
+            if (spoken >= 3) continue;
+            // Skip the room shell: it swallows most of the rays and is never
+            // what the player is looking for.
+            if (h.samples > 200 && h.name.empty()) continue;
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "%s, %.0f jednostek, %.0f stopni %s. ",
+                          h.name.empty() ? "obiekt" : h.name.c_str(),
+                          h.dist, std::fabs(h.yaw),
+                          h.yaw < -1.0f ? "w lewo" : (h.yaw > 1.0f ? "w prawo"
+                                                                  : "na wprost"));
+            say += buf;
+            ++spoken;
+        }
+        // Lock the aim onto the nearest thing that is NOT the room shell, so
+        // the player can simply raise the weapon and fire at whatever is
+        // actually there. Chasing a quest marker's coordinates is what failed;
+        // this aims at something a bullet can reach, by construction.
+        const game::RayHit* pick = nullptr;
+        for (const auto& h : hits) {
+            if (h.samples > 200 && h.name.empty()) continue;   // the room itself
+            pick = &h;
+            break;
+        }
+        if (pick) {
+            auto* pl = fose_rt::Player();
+            game::Vec3 eye{};
+            if (pl) {
+                eye = { pl->posX, pl->posY, pl->posZ };
+                game::GetCameraPos(&eye);
+            }
+            const float D2R = 0.01745329f;
+            float yaw   = (pl ? pl->rotZ : 0.0f) + pick->yaw * D2R;
+            float pitch = (pl ? pl->rotX : 0.0f) + pick->pitch * D2R;
+            float cp = std::cos(pitch);
+            game::Vec3 at{ eye.x + std::sin(yaw) * cp * pick->dist,
+                           eye.y + std::cos(yaw) * cp * pick->dist,
+                           eye.z - std::sin(pitch) * pick->dist };
+            // Deliberately WITHOUT the reference id.
+            //
+            // `at` is the exact spot on the object where a ray already landed —
+            // the one point we know for certain a shot can reach. Passing the
+            // reference too would make the tracker look the object up and aim
+            // at its ORIGIN instead, which for these statics is buried inside
+            // the geometry, and then re-solve its way to some other surface.
+            // That is how a lock that was exactly right drifted to "nearly".
+            RequestAimTrack(nullptr, 0, at, 0.0f, -1);
+            g_aim_solve.store(false);   // nothing to solve: the ray already did
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "Celuję w najbliższy obiekt: %.0f jednostek, %.0f stopni %s.",
+                          pick->dist, std::fabs(pick->yaw),
+                          pick->yaw < -1.0f ? "w lewo"
+                                            : (pick->yaw > 1.0f ? "w prawo" : "na wprost"));
+            say += buf;
+        }
+        if (say.empty()) say = "Nic, w co dałoby się trafić.";
+        tolk::Speak(say, tolk::Priority::Ui, true);
+    }
+
+    if (g_raymap.exchange(false)) {
+        game::Vec3 c{ BitsToF(g_raymap_x.load()), BitsToF(g_raymap_y.load()),
+                      BitsToF(g_raymap_z.load()) };
+        game::RayMapAround(c);
+    }
+
+    int trackFrames = g_aimtrack_frames.load();
+    // A held aim must not reach into menus, dialogue or a load screen: forcing
+    // the view while the player is reading their Pip-Boy fights the game for no
+    // benefit. Skipped, not cancelled — the lock resumes when play does.
+    if (trackFrames != 0 && !IsGameplayActive()) trackFrames = 0;
+    if (trackFrames != 0) {
+        // Live reference position when there is one (it may be walking away),
+        // otherwise the point we were given.
+        game::Vec3 tp{};
+        if (!game::GetRefPosition(g_aimtrack_refr.load(),
+                                  g_aimtrack_refid.load(), &tp)) {
+            tp.x = BitsToF(g_aimtrack_x.load());
+            tp.y = BitsToF(g_aimtrack_y.load());
+            tp.z = BitsToF(g_aimtrack_z.load());
+        }
+        // Apply the solved offset to wherever the target is NOW.
+        tp.x += BitsToF(g_aim_ox.load());
+        tp.y += BitsToF(g_aim_oy.load());
+        tp.z += BitsToF(g_aim_oz.load());
+
+        game::AimPlayerAtPoint(tp, BitsToF(g_aimtrack_up.load()), g_aim_bias);
+        if (trackFrames > 0) g_aimtrack_frames.store(trackFrames - 1);
+
+        if (g_aim_search_left > 0) --g_aim_search_left;
+
+        // Did the target react? A rifle target turns, falls or is switched off
+        // when it is struck, so ANY change to its placement is the hit we could
+        // not otherwise see. This is the only honest feedback available: the
+        // engine's crosshair reference does not follow the view (proved in the
+        // log — the aim swung through 24 degrees and it never changed), and
+        // FOSE has no hit event to listen to.
+        {
+            static const void* s_watch = nullptr;
+            static float s_rx = 0.0f, s_ry = 0.0f, s_rz = 0.0f, s_pz = 0.0f;
+            static uint32_t s_flags = 0;
+            const void* r = g_aimtrack_refr.load();
+            if (r && !IsBadReadPtr(r, 0x40)) {
+                auto* ref = reinterpret_cast<const TESObjectREFR*>(r);
+                if (r != s_watch) {
+                    s_watch = r;
+                } else if (std::fabs(ref->rotX - s_rx) > 0.01f ||
+                           std::fabs(ref->rotY - s_ry) > 0.01f ||
+                           std::fabs(ref->rotZ - s_rz) > 0.01f ||
+                           std::fabs(ref->posZ - s_pz) > 1.0f ||
+                           ref->flags != s_flags) {
+                    g_aim_reacted.store(true);
+                    F3A_INFO("AimTrack: target %08X REACTED (rot %.3f/%.3f/%.3f "
+                             "z %.1f flags %08X) — that is a hit.",
+                             g_aimtrack_refid.load(), ref->rotX, ref->rotY,
+                             ref->rotZ, ref->posZ, ref->flags);
+                }
+                s_rx = ref->rotX; s_ry = ref->rotY; s_rz = ref->rotZ;
+                s_pz = ref->posZ; s_flags = ref->flags;
+            }
+        }
+
+        // Once per target: ask the engine's ray where on this object we can
+        // actually put a shot, and aim THERE from then on.
+        if (g_aim_solve.exchange(false)) {
+            game::Vec3 solved{};
+            uint32_t want = g_aimtrack_refid.load();
+            if (game::SolveAimPoint(tp, want, &solved)) {
+                g_aim_ox.store(FToBits(solved.x - tp.x));
+                g_aim_oy.store(FToBits(solved.y - tp.y));
+                g_aim_oz.store(FToBits(solved.z - tp.z));
+                // Only the offset is kept. The stored point stays the
+                // reference's ORIGIN, so the correction is applied exactly once
+                // — adding it to an already-corrected point would double it.
+                F3A_INFO("AimSolve: %08X reachable at (%.0f,%.0f,%.0f), "
+                         "%+.0f,%+.0f,%+.0f from its origin.", want,
+                         solved.x, solved.y, solved.z,
+                         solved.x - tp.x, solved.y - tp.y, solved.z - tp.z);
+            } else {
+                F3A_INFO("AimSolve: nothing on %08X could be reached by the "
+                         "engine's ray — something is in the way.", want);
+            }
+        }
+
+        // How far the aim point is from the player, for the "is this the same
+        // object" test below.
+        float ourDist = 0.0f;
+        if (auto* pl = fose_rt::Player()) {
+            float ax = tp.x - pl->posX, ay = tp.y - pl->posY;
+            float az = (tp.z + BitsToF(g_aimtrack_up.load())) - pl->posZ;
+            ourDist = std::sqrt(ax * ax + ay * ay + az * az);
+        }
+
+        // Is the crosshair actually on it? The engine's own pick answers that,
+        // and it is the only honest measure of whether we are aiming or only
+        // claiming to.
+        uint32_t want = g_aimtrack_refid.load();
+        if (want && --g_aim_check <= 0) {
+            g_aim_check = kAimCheckEvery;
+            game::CrosshairTarget ct;
+            // The engine names ONE reference under the crosshair, and a rifle
+            // target is built from several: a stand, a board, and the activator
+            // that scores the hit. Demanding the exact reference meant the
+            // first target could never confirm — its board sits in front of its
+            // activator, so the pick kept naming the board while we were
+            // pointing squarely at the thing. Anything at the same RANGE is the
+            // same object as far as a bullet is concerned, and that is the test
+            // that matters here.
+            bool on = game::GetCrosshairTarget(&ct) &&
+                      (ct.refid == want ||
+                       (ct.dist > 0.0f && ourDist > 0.0f &&
+                        std::fabs(ct.dist - ourDist) <= kSameAssembly));
+            if (on) {
+                g_aim_miss = 0;
+                if (!g_aim_settled) {
+                    g_aim_settled = true;
+                    F3A_INFO("AimTrack: crosshair ON target after %d probe(s), "
+                             "aim-point correction %+.0f units.",
+                             g_aim_probe, g_aim_bias);
+                }
+                // A TONE says the shot is lined up — not speech. While the
+                // weapon is up the player needs a signal they can act on
+                // instantly and that does not talk over the game; a sentence
+                // arrives too late and buries the moment it describes.
+                if (--g_aim_tone_ticks <= 0) {
+                    audio::Cue(config::Get().target_cue_hz + 200, 55);
+                    g_aim_tone_ticks = 30;
+                }
+            } else {
+                g_aim_tone_ticks = 0;     // re-arm, so re-acquiring sounds again
+                if (g_aim_miss == 0)
+                    F3A_INFO("AimTrack: crosshair on %08X ('%s'), want %08X — "
+                             "probing (correction %+.0f units).", ct.refid,
+                             ct.name.c_str(), want, g_aim_bias);
+            }
+            // Searching happens ONLY during the brief window after the aim
+            // key centres on a target — never while the weapon is raised and
+            // held (frames < 0). Sweeping the aim point through ±96 units
+            // takes well over a second, and doing that under a player who is
+            // pulling the trigger throws their shots away. By then the
+            // correction has already been found; hold it still and shoot.
+            // The sweep is DISABLED while the crosshair reading is in doubt.
+            // In the last session the engine reported the same reference under
+            // the crosshair through a 42-degree swing of the aim, which either
+            // means the view is not moving or means this field is not a live
+            // pick — and until that is settled, letting it steer the aim only
+            // wobbles the gun under a player trying to shoot. The check below
+            // still runs, so the log keeps telling us what it sees.
+            const bool searching = false && (g_aim_search_left > 0);
+            const int  needed    = g_aim_settled ? 3 : 1;
+            if (searching && !on && ++g_aim_miss >= needed) {
+                // Off target for a while — resume the sweep.
+                g_aim_settled = false;
+                if (g_aim_probe < kAimProbeMax) {
+                    ++g_aim_probe;
+                    g_aim_bias = ProbeBias(g_aim_probe);
+                } else if (g_aim_probe == kAimProbeMax) {
+                    ++g_aim_probe;          // report once, then hold still
+                    g_aim_bias = 0.0f;
+                    F3A_INFO("AimTrack: swept +-%.0f units without the crosshair "
+                             "ever reporting refid %08X — either it is out of "
+                             "the engine's pick range or it is not pickable at "
+                             "all; holding the plain geometric aim.",
+                             kAimProbeMax / 2 * kAimProbeStep, want);
+                }
+                g_aim_miss = 0;
+            }
+        }
+    }
+}
+
+void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
+                     float up, int frames)
+{
+    g_aimtrack_refr.store(refr);
+    g_aimtrack_refid.store(refid);
+    g_aimtrack_x.store(FToBits(at.x));
+    g_aimtrack_y.store(FToBits(at.y));
+    g_aimtrack_z.store(FToBits(at.z));
+    g_aimtrack_up.store(FToBits(up));
+    g_aimtrack_frames.store(frames);
+    AimTrackReset();   // a new target: start the crosshair search over
+    F3A_INFO("AimTrack: refr=%p refid=%08X at=(%.0f,%.0f,%.0f) up=%.0f frames=%d",
+             refr, refid, at.x, at.y, at.z, up, frames);
+}
+
+void StopAimTrack() { g_aimtrack_frames.store(0); }
+
+float NudgeAim(float units)
+{
+    g_aim_bias += units;
+    if (g_aim_bias >  400.0f) g_aim_bias =  400.0f;
+    if (g_aim_bias < -400.0f) g_aim_bias = -400.0f;
+    // Whatever the player settles on is kept: it corrects our estimate of the
+    // eye height and of where a target's aim point sits, and neither of those
+    // changes from one target to the next.
+    g_aim_settled = true;
+    F3A_INFO("AimTrim: correction now %+.0f units.", g_aim_bias);
+    return g_aim_bias;
+}
+
+float AimCorrection() { return g_aim_bias; }
+
+void RequestRayScan() { g_rayscan.store(true); }
+
+void RequestRayMap(const game::Vec3& centre)
+{
+    g_raymap_x.store(FToBits(centre.x));
+    g_raymap_y.store(FToBits(centre.y));
+    g_raymap_z.store(FToBits(centre.z));
+    g_raymap.store(true);
+}
+
+bool ConsumeAimTargetReacted()  { return g_aim_reacted.exchange(false); }
+bool ConsumeAimReleased()       { return g_aim_released.exchange(false); }
+
+bool AimTrackActive() { return g_aimtrack_frames.load() != 0; }
 
 // --- Diagnostic dump --------------------------------------------------------
 //

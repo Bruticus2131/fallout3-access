@@ -20,8 +20,10 @@ void InitAll()
     message::Init();
     intro::Init();
     hacking::Init();
+    specialbook::Init();
     mapnav::Init();
     quantity::Init();
+    lootmenu::Init();
     F3A_INFO("Modules initialized.");
 }
 
@@ -40,8 +42,10 @@ void ShutdownAll()
     message::Shutdown();
     intro::Shutdown();
     hacking::Shutdown();
+    specialbook::Shutdown();
     mapnav::Shutdown();
     quantity::Shutdown();
+    lootmenu::Shutdown();
 }
 
 } // namespace f3a::modules

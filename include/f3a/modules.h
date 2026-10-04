@@ -20,11 +20,16 @@ namespace nav      { void Init(); void Shutdown(); void Tick(float dt); }
 namespace worldscan{ void Init(); void Shutdown(); void Tick(float dt); void ResetSession(); }
 namespace intro    { void Init(); void Shutdown(); void Tick(float dt); void Start(); }
 namespace hacking  { void Init(); void Shutdown(); void Tick(float dt); }
+// The vault's SPECIAL book: reads the page, the selected stat and its text.
+namespace specialbook { void Init(); void Shutdown(); void Tick(float dt); }
 // World-map navigation: browse the map's location markers, travel, or set one
 // as a walking destination.
 namespace mapnav   { void Init(); void Shutdown(); void Tick(float dt); }
 // The "how many?" prompt for stacks: arrows pick the amount, Enter confirms.
 namespace quantity { void Init(); void Shutdown(); void Tick(float dt); }
+// Loot Menu Updated's container overlay. Not a menu — it is drawn on the HUD,
+// so it is ticked from the polling loop like the world scanner.
+namespace lootmenu { void Init(); void Shutdown(); void Tick(float dt); bool IsOpen(); }
 
 // AutoWalk: walks the player to a scanner-selected target. Ticked from the
 // polling loop while in gameplay.

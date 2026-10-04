@@ -6,6 +6,7 @@
 
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
 
 namespace f3a::menu {
 namespace {
@@ -17,19 +18,29 @@ struct Slot {
 };
 
 std::unordered_map<uint32_t, Slot> g_slots;
+
+// Open menus, in the order the engine opened them; the last one is the active
+// one. A single "active" field was wrong: the VATS tutorial pops up a second
+// AFTER VATS, and when it closed it cleared the field while VATS was still on
+// screen — so VATS stopped getting ticks and its keys went dead.
+std::vector<Id> g_stack;
 Id g_active = Id::None;
+
+void Recompute() { g_active = g_stack.empty() ? Id::None : g_stack.back(); }
 
 } // namespace
 
 void Init()
 {
     g_slots.clear();
+    g_stack.clear();
     g_active = Id::None;
 }
 
 void Shutdown()
 {
     g_slots.clear();
+    g_stack.clear();
     g_active = Id::None;
 }
 
@@ -71,7 +82,10 @@ static bool SuppressOpenAnnouncement(Id id)
 
 void OnMenuOpen(Id id)
 {
-    g_active = id;
+    auto at = std::find(g_stack.begin(), g_stack.end(), id);
+    if (at != g_stack.end()) g_stack.erase(at);   // re-open = move to the top
+    g_stack.push_back(id);
+    Recompute();
     F3A_DEBUG("Menu open: %u", (unsigned)id);
 
     if (config::Get().speak_on_menu_open && !SuppressOpenAnnouncement(id)) {
@@ -93,17 +107,34 @@ void OnMenuClose(Id id)
     F3A_DEBUG("Menu close: %u", (unsigned)id);
     auto it = g_slots.find((uint32_t)id);
     if (it != g_slots.end() && it->second.on_close) it->second.on_close();
-    if (g_active == id) g_active = Id::None;
+    auto at = std::find(g_stack.begin(), g_stack.end(), id);
+    if (at != g_stack.end()) g_stack.erase(at);
+    Recompute();   // whatever is still open underneath takes over again
 }
 
 void OnTick(float dt)
 {
-    if (g_active == Id::None) return;
-    auto it = g_slots.find((uint32_t)g_active);
-    if (it != g_slots.end() && it->second.on_tick) it->second.on_tick(dt);
+    // Give the tick to the topmost menu that actually HANDLES one, not simply
+    // to the topmost menu. The game drops a tutorial hint over VATS a second
+    // after it opens and takes it away a second later; nothing handles that
+    // hint, so dispatching to it only meant VATS went deaf for the time it was
+    // up — which is exactly the pause before the body-part keys start working.
+    for (auto it = g_stack.rbegin(); it != g_stack.rend(); ++it) {
+        auto slot = g_slots.find((uint32_t)*it);
+        if (slot != g_slots.end() && slot->second.on_tick) {
+            slot->second.on_tick(dt);
+            return;
+        }
+    }
 }
 
 Id ActiveMenu() { return g_active; }
+
+bool IsOpen(Id id)
+{
+    for (Id open : g_stack) if (open == id) return true;
+    return false;
+}
 
 std::string_view DisplayName(Id id)
 {

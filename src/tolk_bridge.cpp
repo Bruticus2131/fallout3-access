@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <vector>
 #include <mutex>
 #include <string>
 
@@ -184,11 +185,46 @@ const char* ActiveReaderName()
     return g_reader_name_a.empty() ? "SAPI" : g_reader_name_a.c_str();
 }
 
+// Recently spoken, for suppressing ambient repetition.
+//
+// The game re-announces the same tutorial hint over and over — its tiles blink,
+// they are rebuilt, several readers can see the same text — and the player is
+// left listening to "hold aim to..." on a loop while trying to hear something
+// that matters. Deduplicating inside each reader only fixes the reader you
+// happen to think of; this catches the lot.
+//
+// The rule is deliberately narrow: only speech that does NOT interrupt is
+// suppressed. Anything the player asked for by pressing a key interrupts, and
+// pressing a key twice to hear the same thing twice must always work. (The FNV
+// accessibility mod does the same at its own notification hook, with a
+// two-second window; ambient hints here recur for far longer than that, so the
+// window is minutes rather than seconds.)
+struct RecentLine { std::string text; std::chrono::steady_clock::time_point at; };
+std::vector<RecentLine> g_recent;
+constexpr int kRecentKeep = 32;
+const auto kRepeatAfter = std::chrono::minutes(5);
+
+bool SaidRecently(std::string_view text)
+{
+    auto now = std::chrono::steady_clock::now();
+    for (auto& r : g_recent) {
+        if (r.text != text) continue;
+        if (now - r.at < kRepeatAfter) return true;
+        r.at = now;
+        return false;
+    }
+    if ((int)g_recent.size() >= kRecentKeep) g_recent.erase(g_recent.begin());
+    g_recent.push_back({ std::string(text), now });
+    return false;
+}
+
 void Speak(std::string_view text, Priority prio, bool interrupt)
 {
     if (text.empty()) return;
 
     std::lock_guard<std::mutex> lk(g_mutex);
+
+    if (!interrupt && SaidRecently(text)) return;
 
     // Remember the last thing we actually spoke so RepeatLast can replay it.
     g_last_text.assign(text);

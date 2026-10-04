@@ -155,6 +155,11 @@ static void OnFoseMessage(FOSEMessagingInterface::Message* msg)
         break;
 
     case FOSEMessagingInterface::kMessage_LoadGame:
+        // Sent when the load BEGINS; PostLoadGame follows when it finishes.
+        // Announcing on both is where the doubled "Wczytane." came from.
+        F3A_INFO("Game load started.");
+        break;
+
     case FOSEMessagingInterface::kMessage_PostLoadGame:
         F3A_INFO("Game loaded.");
         f3a::OnGameLoaded();
