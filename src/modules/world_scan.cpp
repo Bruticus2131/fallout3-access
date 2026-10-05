@@ -490,6 +490,10 @@ void PressRow()
 // reaches FO3 reliably, unlike keys in menus), so the game sees a genuine held
 // right button and all its own logic — zoom, sway, accuracy — applies.
 bool g_aim_held = false;
+uint32_t g_hold_target = 0;    // the reference the held aim is locked onto
+int  g_hold_cue_timer  = 0;    // ticks to the next on-target blip
+int  g_hold_los_timer  = 0;    // ticks to the next ray check
+bool g_hold_on_target  = false;// was the target on the crosshair last tick
 
 // The aim is held until something ends it, never on a timer — see the Home
 // handler. Negative means "until StopAimTrack()"; see RequestAimTrack.
@@ -547,6 +551,9 @@ void AimHoldPress()
     // frame by frame, until the weapon is lowered. That is what makes shooting
     // possible without a mouse: the gun has to still be on the target when the
     // trigger is pulled, not when we announced it.
+    g_hold_target = 0;
+    g_hold_on_target = false;
+    g_hold_cue_timer = 0;
     std::string name;
     if (!LockAimOnCurrentTarget(&name)) {
         // Nothing to lock onto — the button still goes down, so ordinary aiming
@@ -561,6 +568,9 @@ void AimHoldRelease()
 {
     if (!g_aim_held) return;
     g_aim_held = false;
+    g_hold_target = 0;
+    g_hold_on_target = false;
+    g_hold_cue_timer = 0;
     poll::StopAimTrack();
     INPUT in{};
     in.type = INPUT_MOUSE;
@@ -973,6 +983,11 @@ bool LockAimOnCurrentTarget(std::string* outName)
     // position is enough — and it is all a quest marker or a fixed practice
     // target ever has. Refusing those is what made the aim lock do nothing.
     poll::RequestAimTrack(at.refr, at.refid, at.pos, at.up, kHoldAimFrames);
+    // Then let the engine's rays have the last word on WHERE on the target a
+    // shot can land. Only for a real reference: a bare quest-marker position
+    // has nothing for a ray to confirm.
+    if (at.refid) poll::RequestRayAimRefine(at.refid);
+    g_hold_target = at.refid;
     if (outName) *outName = at.name;
     return true;
 }
@@ -1235,9 +1250,48 @@ void Tick(float)
         }
     }
 
+    // While the aim key is HELD, the cue answers one question only: would a
+    // shot fired now hit what I locked onto? That is asked with a RAY along the
+    // view - the same thing the New Vegas mod does (it calls JIP's raycast for
+    // this, not the crosshair field).
+    //
+    // The crosshair field was tried here first and was wrong: a log caught it
+    // reporting the same reference at the same 170 units through a 21-degree
+    // swing of the aim. It does not follow the view, so the "target obscured,
+    // 170 units" this announced the instant the key went down was not an
+    // obstruction at all - it was a stale value, repeated every time.
+    if (g_aim_held && g_hold_target != 0 && config::Get().target_cue &&
+        GameplayAndHud()) {
+        // ~20 Hz, like the FNV mod's LOS loop: fast enough to notice the target
+        // stepping behind cover, cheap enough to run while the gun is up.
+        if (--g_hold_los_timer <= 0) {
+            g_hold_los_timer = 2;
+            uint32_t hitId = 0;
+            float    hitDist = 0.0f;
+            bool     have = game::RayPickAhead(&hitId, &hitDist);
+            bool     on = have && hitId == g_hold_target;
+            if (on != g_hold_on_target) {
+                F3A_INFO("AimHold: ray %s %08X (hit %08X at %.0f units)",
+                         on ? "ON" : "off", g_hold_target, hitId, hitDist);
+                g_hold_on_target = on;
+            }
+        }
+        if (g_hold_on_target) {
+            // Keep sounding for as long as it stays true, so the player can
+            // hold and squeeze rather than catch a single blip.
+            if (--g_hold_cue_timer <= 0) {
+                audio::Cue(config::Get().target_cue_hz, 55);
+                g_hold_cue_timer = 3;
+            }
+        } else {
+            g_hold_cue_timer = 0;   // silent the moment it stops being true
+        }
+    }
+
     // LOS cue: only in normal gameplay (not menus/VATS) and not while auto-aim
-    // or leveling is driving the view.
-    if (config::Get().target_cue && !g_aim_on && !g_level_on &&
+    // or leveling is driving the view. Suppressed while the aim key is held —
+    // that case is answered above, by the game rather than by a cone.
+    if (config::Get().target_cue && !g_aim_on && !g_level_on && !g_aim_held &&
         GameplayAndHud() &&
         !game::ArePlayerControlsDisabled()) {   // silent in scripted scenes (char creation)
         if (game::IsThirdPerson()) {

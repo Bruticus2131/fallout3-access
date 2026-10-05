@@ -762,6 +762,10 @@ std::atomic<bool> g_aim_solve{ false };
 // A requested ray map, carried to the game's thread.
 std::atomic<bool> g_raymap{ false };
 std::atomic<bool> g_rayscan{ false };
+// Refine a held aim with the engine's rays: the reference to confirm, and a
+// few frames' grace so the geometric aim has been applied first.
+std::atomic<uint32_t> g_rayrefine_id{ 0 };
+int g_rayrefine_delay = 0;
 std::atomic<int>  g_raymap_x{ 0 }, g_raymap_y{ 0 }, g_raymap_z{ 0 };
 // What the ray found, kept as an OFFSET from the reference's origin rather than
 // as a fixed point: a practice target never moves, but an enemy does, and
@@ -1808,6 +1812,58 @@ void AimTick()
         }
     }
 
+    // Confirm the held aim against the engine's own rays, and re-lock onto the
+    // exact spot one of them reached.
+    //
+    // Everything else the mod knows about a target comes from the game's
+    // RECORDS, which say where an object's origin is - and an origin can sit
+    // inside the floor, inside a wall, or at a radroach's feet. That is the
+    // difference between "the mod says it is aiming at the enemy" and a shot
+    // that lands. A ray is the one measurement that answers the real question:
+    // if a bullet went this way, what would it hit? So aim by geometry first to
+    // bring the target into the sweep, then ask the rays and trust them over
+    // our own arithmetic.
+    if (g_rayrefine_id.load() != 0 && menu::ActiveMenu() != menu::Id::VATS) {
+        if (--g_rayrefine_delay <= 0) {
+            uint32_t want = g_rayrefine_id.exchange(0);
+            // A narrow cone: the geometric aim has already pointed the view at
+            // the target, so this only has to find exactly where on it a shot
+            // can land, not search the room.
+            auto hits = game::RayScanAhead(12.0f, 12.0f, 1.5f, 4000.0f);
+            const game::RayHit* pick = nullptr;
+            for (const auto& h : hits) if (h.refid == want) { pick = &h; break; }
+            if (!pick) {
+                F3A_INFO("AimRefine: no ray reached %08X (%u thing(s) in the "
+                         "cone) - keeping the computed aim", want,
+                         (unsigned)hits.size());
+            } else {
+                auto* pl = fose_rt::Player();
+                game::Vec3 eye{};
+                if (pl) {
+                    eye = { pl->posX, pl->posY, pl->posZ };
+                    game::GetCameraPos(&eye);
+                }
+                const float D2R = 0.01745329f;
+                float yaw   = (pl ? pl->rotZ : 0.0f) + pick->yaw * D2R;
+                float pitch = (pl ? pl->rotX : 0.0f) + pick->pitch * D2R;
+                float cp = std::cos(pitch);
+                game::Vec3 at{ eye.x + std::sin(yaw) * cp * pick->dist,
+                               eye.y + std::cos(yaw) * cp * pick->dist,
+                               eye.z - std::sin(pitch) * pick->dist };
+                // No reference id on purpose: `at` is the measured spot a ray
+                // actually reached. Handing over the reference as well would
+                // make the tracker look it up and go back to aiming at its
+                // origin, undoing the measurement.
+                RequestAimTrack(nullptr, 0, at, 0.0f, -1);
+                g_aim_solve.store(false);
+                F3A_INFO("AimRefine: ray hit %08X '%s' at %.0f units, "
+                         "%+.1f deg side, %+.1f deg up/down - locked on that spot",
+                         pick->refid, pick->name.c_str(), pick->dist,
+                         pick->yaw, pick->pitch);
+            }
+        }
+    }
+
     // A requested ray map runs HERE, on the game's own thread. Casting these
     // from the polling thread took the whole game down.
     // "What can I actually shoot, and where is it?"
@@ -1984,19 +2040,23 @@ void AimTick()
         uint32_t want = g_aimtrack_refid.load();
         if (want && --g_aim_check <= 0) {
             g_aim_check = kAimCheckEvery;
-            game::CrosshairTarget ct;
-            // The engine names ONE reference under the crosshair, and a rifle
-            // target is built from several: a stand, a board, and the activator
-            // that scores the hit. Demanding the exact reference meant the
-            // first target could never confirm — its board sits in front of its
-            // activator, so the pick kept naming the board while we were
-            // pointing squarely at the thing. Anything at the same RANGE is the
-            // same object as far as a bullet is concerned, and that is the test
-            // that matters here.
-            bool on = game::GetCrosshairTarget(&ct) &&
-                      (ct.refid == want ||
-                       (ct.dist > 0.0f && ourDist > 0.0f &&
-                        std::fabs(ct.dist - ourDist) <= kSameAssembly));
+            // Asked with a RAY along the view, not with the crosshair field.
+            // That field was measured holding one value through a 21-degree
+            // swing of the aim, so it answers a different question than "what
+            // am I pointing at" — and every probe decision made from it was
+            // being made on noise.
+            //
+            // Same-RANGE still counts as the same thing: a rifle target is
+            // built from a stand, a board and the activator that scores the
+            // hit, and demanding the exact reference meant one could never
+            // confirm. As far as a bullet is concerned they are one object.
+            uint32_t hitId = 0;
+            float    hitDist = 0.0f;
+            bool     have = game::RayPickAhead(&hitId, &hitDist);
+            bool on = have &&
+                      (hitId == want ||
+                       (hitDist > 0.0f && ourDist > 0.0f &&
+                        std::fabs(hitDist - ourDist) <= kSameAssembly));
             if (on) {
                 g_aim_miss = 0;
                 if (!g_aim_settled) {
@@ -2016,9 +2076,9 @@ void AimTick()
             } else {
                 g_aim_tone_ticks = 0;     // re-arm, so re-acquiring sounds again
                 if (g_aim_miss == 0)
-                    F3A_INFO("AimTrack: crosshair on %08X ('%s'), want %08X — "
-                             "probing (correction %+.0f units).", ct.refid,
-                             ct.name.c_str(), want, g_aim_bias);
+                    F3A_INFO("AimTrack: the ray hits %08X at %.0f units, want "
+                             "%08X at %.0f — probing (correction %+.0f units).",
+                             hitId, hitDist, want, ourDist, g_aim_bias);
             }
             // Searching happens ONLY during the brief window after the aim
             // key centres on a target — never while the weapon is raised and
@@ -2087,6 +2147,16 @@ float NudgeAim(float units)
 }
 
 float AimCorrection() { return g_aim_bias; }
+
+void RequestRayAimRefine(uint32_t refid)
+{
+    // Logged on the way IN as well: the last run produced no AimRefine line at
+    // all, and without this there is no way to tell "the request never arrived"
+    // from "the rays found nothing".
+    F3A_INFO("AimRefine: requested for %08X", refid);
+    g_rayrefine_delay = 8;      // let the computed aim settle first
+    g_rayrefine_id.store(refid);
+}
 
 void RequestRayScan() { g_rayscan.store(true); }
 

@@ -1693,6 +1693,40 @@ namespace {
 //
 // Returns false when nothing on the object can be reached — which is itself
 // worth knowing, because it means something is in the way.
+// What the player is actually looking at: one ray from the camera, straight
+// down the view. This is the honest answer to "is my shot going to hit it",
+// and it replaces the InterfaceManager crosshair field for that purpose.
+//
+// That field had to go. A log showed it naming the SAME reference at the SAME
+// distance (170 units) through a 21-degree swing of the aim - it does not track
+// the view, so every conclusion drawn from it, including a cheerful "target
+// obscured" the instant the aim key went down, was noise. The New Vegas mod
+// does not use its equivalent either: it calls a raycast (JIP's
+// GetCrosshairRefEx) for exactly this check.
+bool RayPickAhead(uint32_t* outRefId, float* outDist)
+{
+    if (outRefId) *outRefId = 0;
+    if (outDist)  *outDist  = 0.0f;
+    auto* p = rt::Player();
+    if (!p) return false;
+
+    Vec3 eye{ p->posX, p->posY, p->posZ + 100.0f };
+    GetCameraPos(&eye);                 // the real muzzle height when available
+
+    // Camera direction: yaw 0 = +Y, and a POSITIVE rotX looks down.
+    float yaw = GetPlayerYaw() * 0.01745329f;
+    float pit = GetPlayerPitch() * 0.01745329f;
+    float cp = std::cos(pit);
+    Vec3 dir{ std::sin(yaw) * cp, std::cos(yaw) * cp, -std::sin(pit) };
+
+    uint32_t id = 0;
+    float dist = 0.0f;
+    if (!RayCastView(eye, dir, 4096.0f, &id, &dist)) return false;
+    if (outRefId) *outRefId = id;
+    if (outDist)  *outDist  = dist;
+    return true;
+}
+
 bool SolveAimPoint(const Vec3& origin, uint32_t wantRefId, Vec3* out)
 {
     if (!out) return false;
@@ -2355,11 +2389,89 @@ bool BaseFormCenterOffset(TESForm* base, float* ox, float* oy, float* oz)
     return true;
 }
 
+// The aim point from the target's own SKELETON — the upper torso, the neck, the
+// spine, in that order. This is how the New Vegas accessibility mod resolves it,
+// and reading its source is what settled the question here: it does NOT aim at
+// a model's middle. The difference matters because a base form's centre is
+// derived from the object's bounding box, which for a creature low to the ground
+// sits near its feet, and a shot sent there meets the floor or whatever is
+// standing between — which is precisely what a log of a missed pistol shot
+// showed (crosshair on an object at 170 units, target at 258).
+//
+// Unlike the collision-shape route this is plain data: node names and world
+// positions, no Havok virtuals, nothing that can call into the wrong slot. The
+// offsets come from the same Gamebryo layout, so each result is still checked
+// against the reference's own position before it is believed.
+namespace {
+constexpr const char* kBoneCandidates[] = {
+    "Bip01 Spine2",   // upper torso — the best aim point on a humanoid
+    "Bip01 Neck",
+    "Bip01 Spine1",
+    "Bip01 Spine",
+    "Bip01 Pelvis",
+    "Bip01 Head",
+    "Bip01",          // root — last resort for skinned creatures
+};
+
+bool FindBoneWorldPos(TESObjectREFR* r, Vec3* out, const char** boneName)
+{
+    void* root = RefNiNode(r);
+    if (!root) return false;
+
+    for (const char* want : kBoneCandidates) {
+        void* stack[96];
+        int   top = 0;
+        stack[top++] = root;
+        while (top > 0) {
+            UInt8* node = reinterpret_cast<UInt8*>(stack[--top]);
+            if (!node || IsBadReadPtr(node, kNiAV_WorldTranslate + 12)) continue;
+
+            const char* nm = *reinterpret_cast<const char**>(node + 0x08);
+            if (nm && !IsBadReadPtr((void*)nm, 1) && _stricmp(nm, want) == 0) {
+                float* wt = reinterpret_cast<float*>(node + kNiAV_WorldTranslate);
+                // Believe it only if it is actually ON this reference. A wrong
+                // offset would hand back coordinates from somewhere else
+                // entirely, and aiming at those is worse than not aiming.
+                float dx = wt[0] - r->posX, dy = wt[1] - r->posY,
+                      dz = wt[2] - r->posZ;
+                if (dx * dx + dy * dy + dz * dz > 400.0f * 400.0f) break;
+                *out = { wt[0], wt[1], wt[2] };
+                if (boneName) *boneName = want;
+                return true;
+            }
+
+            // Only an NiNode has children; the vtable slot says whether it is.
+            void** vt = *reinterpret_cast<void***>(node);
+            if (!vt || IsBadReadPtr(vt, (kNiAV_GetAsNiNode + 1) * 4)) continue;
+            using AsNode = void* (__thiscall*)(void*);
+            void* asNode = reinterpret_cast<AsNode>(vt[kNiAV_GetAsNiNode])(node);
+            if (!asNode || IsBadReadPtr(asNode, kNiNode_Children + 0xC)) continue;
+            UInt8* arr = reinterpret_cast<UInt8*>(asNode) + kNiNode_Children;
+            void** kids = *reinterpret_cast<void***>(arr + 0x4);
+            UInt16  n   = *reinterpret_cast<UInt16*>(arr + 0xA);
+            if (!kids || n > 512 || IsBadReadPtr(kids, (size_t)n * 4)) continue;
+            for (UInt16 i = 0; i < n && top < 96; ++i)
+                if (kids[i]) stack[top++] = kids[i];
+        }
+    }
+    return false;
+}
+} // namespace
+
 bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
 {
     if (how) *how = "none";
     auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
     if (!r || IsBadReadPtr(r, 0x40) || !out) return false;
+
+    // Bones first: this is the point a sighted player's crosshair ends up on.
+    const char* bone = nullptr;
+    if (config::Get().aim_bones && FindBoneWorldPos(r, out, &bone)) {
+        if (how) *how = bone;
+        F3A_INFO("AimPoint: bone '%s' at (%.0f,%.0f,%.0f), origin (%.0f,%.0f,%.0f)",
+                 bone, out->x, out->y, out->z, r->posX, r->posY, r->posZ);
+        return true;
+    }
 
     // The collision centre would be ideal, but reaching it requires calling into
     // the model, and BOTH attempts at that crashed the game on this build: first
@@ -2978,6 +3090,17 @@ bool DoorLeadsToCellSpace(const void* doorRefr, const void* cellPtr)
 // another interior)? Cross-worldspace autowalk uses this to head toward the open
 // world — where a distant target building lives — instead of wandering into
 // random interiors (Craterside, houses...) that aren't the goal.
+// Is the player inside? An interior cell has no worldspace, and that single
+// fact decides whether fast travel exists at all: in Vault 101 there is no
+// world map and no marker to travel to, so advising it there is advice that
+// cannot be followed.
+bool PlayerIsInInterior()
+{
+    auto* c = reinterpret_cast<const TESObjectCELL*>(GetPlayerCell());
+    if (!c || IsBadReadPtr((void*)c, 0xC4)) return false;
+    return c->worldSpace == nullptr;
+}
+
 bool DoorLeadsToExterior(const void* doorRefr)
 {
     const TESObjectREFR* linked = DoorLinkedRef(doorRefr);

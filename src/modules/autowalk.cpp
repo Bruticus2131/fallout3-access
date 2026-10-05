@@ -469,6 +469,16 @@ void CrossFallbackTeleport()
 {
     mover::Clear();
     Move(false, false, false, false);
+    // Indoors there IS no fast travel: an interior has no world map and no
+    // marker to travel to, so sending the player to the map was advice they
+    // could not act on — in the Vault 101 prologue, where the target is simply
+    // a few doors away, it was the worst possible thing to say. Point at the
+    // doors instead, which is what the route actually needs.
+    if (game::PlayerIsInInterior()) {
+        StopWalking("Nie mogę dojść pieszo. Cel jest w innej części tej lokacji — "
+                    "poszukaj drzwi klawiszem X i przejdź przez nie.");
+        return;
+    }
     StopWalking("Nie mogę dojść pieszo. Otwórz mapę świata i użyj szybkiej podróży.");
 }
 

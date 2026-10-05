@@ -129,6 +129,7 @@ bool Load(const wchar_t* ini_path)
     s.native_face         = ReadBool(L"Voice", L"NativeFace",       true, ini_path);
     s.native_walk         = ReadBool(L"Voice", L"NativeWalk",       true, ini_path);
     s.aim_collision       = ReadBool(L"Voice", L"AimCollision",     false, ini_path);
+    s.aim_bones           = ReadBool(L"Voice", L"AimBones",         true,  ini_path);
     s.autowalk_speed      = ReadInt (L"Voice", L"AutoWalkSpeed",    160,  ini_path);
     s.quest_arrive_dist   = ReadInt (L"Voice", L"QuestArriveDist",  0,    ini_path);
     s.footstep_cue        = ReadBool(L"Voice", L"FootstepCue",       true, ini_path);

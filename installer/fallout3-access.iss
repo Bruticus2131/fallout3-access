@@ -9,7 +9,7 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.3.0"
+#define AppVersion   "0.3.1"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
 
@@ -61,17 +61,137 @@ var
 // find it themselves. A previous run of this installer is asked FIRST: that is
 // the folder the user actually chose, which matters on a machine with more than
 // one copy of the game, and it turns an update into clicking Next.
+function LooksLikeGame(const Dir: String): Boolean;
+begin
+  Result := (Dir <> '') and FileExists(AddBackslash(Dir) + 'Fallout3.exe');
+end;
+
+// Steam keeps its library roots in steamapps\libraryfolders.vdf. Reading that
+// matters because the game is very often NOT on the system drive, and neither
+// the Bethesda registry key nor a guess at Program Files finds it there.
+function DetectSteamPath(): String;
+var
+  SteamDir, Vdf: String;
+  Lines: TArrayOfString;
+  i, q1, q2: Integer;
+  Root, Candidate, Line: String;
+  Roots: TArrayOfString;
+  RootCount, r: Integer;
+  Names: TArrayOfString;
+begin
+  Result := '';
+  if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamPath', SteamDir) then
+    if not RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath', SteamDir) then
+      if not RegQueryStringValue(HKLM, 'SOFTWARE\Valve\Steam', 'InstallPath', SteamDir) then
+        Exit;
+  StringChangeEx(SteamDir, '/', '', True);
+
+  SetArrayLength(Roots, 1);
+  Roots[0] := SteamDir;
+  RootCount := 1;
+
+  Vdf := AddBackslash(SteamDir) + 'steamapps\libraryfolders.vdf';
+  if FileExists(Vdf) and LoadStringsFromFile(Vdf, Lines) then
+  begin
+    for i := 0 to GetArrayLength(Lines) - 1 do
+    begin
+      Line := Lines[i];
+      // Every library root appears as:   "path"   "D:\SteamLibrary"
+      if Pos('"path"', LowerCase(Line)) > 0 then
+      begin
+        q1 := Pos('"path"', LowerCase(Line)) + 6;
+        Line := Copy(Line, q1, Length(Line));
+        q1 := Pos('"', Line);
+        if q1 > 0 then
+        begin
+          Line := Copy(Line, q1 + 1, Length(Line));
+          q2 := Pos('"', Line);
+          if q2 > 1 then
+          begin
+            Root := Copy(Line, 1, q2 - 1);
+            StringChangeEx(Root, '\', '', True);
+            SetArrayLength(Roots, RootCount + 1);
+            Roots[RootCount] := Root;
+            RootCount := RootCount + 1;
+          end;
+        end;
+      end;
+    end;
+  end;
+
+  // The GOTY edition and the base game use different folder names, and a
+  // localised install can use yet another, so try the known ones and then fall
+  // back to looking for anything with Fallout in the name.
+  SetArrayLength(Names, 3);
+  Names[0] := 'Fallout 3 goty';
+  Names[1] := 'Fallout 3';
+  Names[2] := 'Fallout3';
+
+  for r := 0 to RootCount - 1 do
+    for i := 0 to GetArrayLength(Names) - 1 do
+    begin
+      Candidate := AddBackslash(Roots[r]) + 'steamapps\common' + Names[i];
+      if LooksLikeGame(Candidate) then
+      begin
+        Result := Candidate;
+        Exit;
+      end;
+    end;
+end;
+
+// GOG records each game under its own numeric key, and the number differs
+// between the base game and the GOTY bundle. Rather than hard-code ids that
+// might be wrong, walk the keys and accept the first whose folder really holds
+// Fallout3.exe - the file is the evidence, not the id.
+function DetectGogPath(): String;
+var
+  Keys: TArrayOfString;
+  Base, Path: String;
+  i, h: Integer;
+  Hives: array[0..2] of Integer;
+begin
+  Result := '';
+  Hives[0] := HKLM; Hives[1] := HKLM32; Hives[2] := HKCU;
+  for h := 0 to 2 do
+  begin
+    Base := 'SOFTWARE\GOG.com\Games';
+    if not RegGetSubkeyNames(Hives[h], Base, Keys) then Continue;
+    for i := 0 to GetArrayLength(Keys) - 1 do
+      if RegQueryStringValue(Hives[h], Base + '' + Keys[i], 'path', Path) then
+        if LooksLikeGame(Path) then
+        begin
+          Result := Path;
+          Exit;
+        end;
+  end;
+end;
+
 function DetectGamePath(): String;
 var
   Path: String;
 begin
   Result := '';
-  if RegQueryStringValue(HKLM, 'Software\Fallout3Access', 'GamePath', Path) and (Path <> '') then
-    Result := Path
-  else if RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Bethesda Softworks\Fallout3', 'Installed Path', Path) then
-    Result := Path
-  else if RegQueryStringValue(HKLM, 'SOFTWARE\Bethesda Softworks\Fallout3', 'Installed Path', Path) then
+  // A previous run of this installer is asked FIRST: that is the folder the
+  // user actually chose, which matters on a machine with more than one copy,
+  // and it turns an update into clicking Next.
+  if RegQueryStringValue(HKLM, 'Software\Fallout3Access', 'GamePath', Path) and LooksLikeGame(Path) then
+  begin
     Result := Path;
+    Exit;
+  end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Bethesda Softworks\Fallout3', 'Installed Path', Path) and LooksLikeGame(Path) then
+  begin
+    Result := Path;
+    Exit;
+  end;
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Bethesda Softworks\Fallout3', 'Installed Path', Path) and LooksLikeGame(Path) then
+  begin
+    Result := Path;
+    Exit;
+  end;
+  Result := DetectSteamPath();
+  if Result <> '' then Exit;
+  Result := DetectGogPath();
 end;
 
 // Is this build already the one FOSE supports? The executable carries no

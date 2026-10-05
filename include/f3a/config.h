@@ -103,6 +103,11 @@ struct Settings {
     // that crashed FO3 outright with no log line. The default aim point is the
     // model's render bound, which is a plain memory read.
     bool   aim_collision      = false;
+    // Aim at the target's skeleton (upper torso) instead of its bounding-box
+    // centre. On by default because it is what makes a shot land, but switchable
+    // from the INI: reading a reference's 3D has crashed this game once before,
+    // and nobody should have to wait for a new build to get playing again.
+    bool   aim_bones          = true;
     // A quest marker is a PLACE, not a thing you walk into: it can sit inside
     // scenery, on a firing line you are meant to stand behind, or above a floor
     // you cannot climb. Getting this close to one ends the walk, with no other

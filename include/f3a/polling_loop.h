@@ -175,6 +175,12 @@ bool ConsumeAimReleased();
 // is the rule this mod has broken once before and should not break again.
 void RequestRayMap(const game::Vec3& centre);
 
+// Check a held aim against the engine's own rays and re-lock onto the exact
+// spot one of them reached on that reference. The records say where an object's
+// ORIGIN is, which can be inside the floor or at a creature's feet; a ray says
+// where a bullet would actually land. Runs on the game's thread.
+void RequestRayAimRefine(uint32_t refid);
+
 // Sweep the rays across the view and report what can actually be shot. Runs on
 // the game's thread; the result is spoken and logged.
 void RequestRayScan();

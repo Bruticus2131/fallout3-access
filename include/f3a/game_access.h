@@ -424,6 +424,12 @@ bool RayCastView(const Vec3& from, const Vec3& dir, float maxDist,
                  uint32_t* outRefId, float* outDist,
                  const void** outRef = nullptr);
 
+// What one ray straight down the view hits: its reference id (0 for scenery
+// with no reference) and the range. Use THIS to ask "am I on target", never the
+// InterfaceManager crosshair field - that field was measured holding the same
+// value through a 21-degree swing of the aim, so it does not follow the view.
+bool RayPickAhead(uint32_t* outRefId, float* outDist);
+
 // A point on the object at `origin` that the view can actually reach, found
 // with the engine's own ray. An object's origin is not its middle, and asking a
 // sighted player to measure that for every kind of object in the game is not an
@@ -555,6 +561,11 @@ bool SetIniSettingInt(const char* name, uint32_t value);
 // player moves to another cell or a different save is loaded. Used to drop a
 // stale scan list. nullptr if there is no player.
 const void* GetPlayerCell();
+
+// True while the player is in an interior cell (no worldspace). Interiors have
+// no world map and no fast travel, so anything that suggests travelling must
+// check this first.
+bool PlayerIsInInterior();
 
 // All refs sharing the base object of the currently-marked quest target, within
 // `radius` (game units), nearest first. For "shoot the N targets" objectives:
