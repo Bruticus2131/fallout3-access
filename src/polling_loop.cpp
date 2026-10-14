@@ -231,6 +231,11 @@ void PollActiveTile()
     // that echoes typed characters; the generic focus poller would double it up
     // by re-reading the prompt/field every tick. Let the dedicated one own it.
     if (menu::ActiveMenu() == menu::Id::TextEdit) return;
+    // The container screen is read by its own module, column by column. The
+    // game's own arrows move the active tile through YOUR column even while
+    // the container's is in use, and reading that tile here is what made the
+    // other column's items cut in.
+    if (menu::ActiveMenu() == menu::Id::Container) return;
 
     InterfaceManager* ifm = fose_rt::IFM();
     if (!ifm) return;
@@ -469,6 +474,7 @@ void PollKeyboardSelection()
 {
     if (!g_system_ready) return;
     if (menu::ActiveMenu() == menu::Id::TextEdit) return;   // TextEdit reader owns it
+    if (menu::ActiveMenu() == menu::Id::Container) return;  // the container module owns it
 
     auto sel = game::GetKeyboardSelection();
     if (!sel || (sel->label.empty() && sel->value.empty())) {

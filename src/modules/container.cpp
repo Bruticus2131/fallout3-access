@@ -91,7 +91,9 @@ void OnTick(float)
             return;
         }
     }
-    if (!sel) sel = game::GetKeyboardSelection();
+    // Only in the menus that share this tick (quantity, sleep/wait): in the
+    // container screen a generic reader can land on the other column.
+    if (!sel && !inContainer) sel = game::GetKeyboardSelection();
     if (sel && (!sel->label.empty() || !sel->value.empty())) {
         std::string text = sel->label;
         if (!sel->value.empty())
@@ -125,7 +127,9 @@ void OnTick(float)
         return;
     }
 
-    // Fallback: the mouse/activeTile label (unchanged old behavior).
+    // Fallback: the mouse/activeTile label — never in the container screen,
+    // where the active tile can sit in the column the player is not using.
+    if (inContainer) return;
     auto m = game::GetActiveMenuSelectionText();
     if (!m || m->empty() || *m == g_last) return;
     g_last     = *m;

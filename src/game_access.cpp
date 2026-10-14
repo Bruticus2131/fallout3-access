@@ -4326,6 +4326,8 @@ int ContainerFocusSide()
     return m ? FocusSideOf(m) : -1;
 }
 
+Tile* SelectedRowOf(UInt8* list);   // defined below
+
 std::optional<MenuSelection> GetContainerSelection(int* out_side)
 {
     if (out_side) *out_side = -1;
@@ -4339,25 +4341,60 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side)
     // equally well, and the wrong one kept winning.
     int side = FocusSideOf(m);
     if (side < 0) return std::nullopt;
-    const UInt8* list = m + (side == 1 ? 0xB4 : 0x84);
-    if (!Readable(list, 0x18)) return std::nullopt;
+    UInt8* list = m + (side == 1 ? 0xB4 : 0x84);
+    Tile* row = SelectedRowOf(list);
+    if (!row) return std::nullopt;
     Tile* box = *reinterpret_cast<Tile* const*>(list + 0x0C);
-    Tile* row = *reinterpret_cast<Tile* const*>(list + 0x10);
-    if (!Readable(box, sizeof(Tile)) || !Readable(row, sizeof(Tile)))
-        return std::nullopt;
-    bool inside = false;                 // the row must belong to that list
-    int depth = 0;
-    for (Tile* p = row; p && depth < 12; p = p->parent, ++depth) {
-        if (!Readable(p, sizeof(Tile))) break;
-        if (p == box) { inside = true; break; }
-    }
-    if (!inside) return std::nullopt;
     MenuSelection sel;
     DescribeRowParts(row, sel.label, sel.value);
     if (sel.label.empty() && sel.value.empty()) return std::nullopt;
     sel.container = box;
     if (out_side) *out_side = side;
     return sel;
+}
+
+// The row a container column has selected.
+//
+// The game marks it with mouseover=1 (the interface's active tile) — the
+// in-game dump shows exactly one such row, the one the arrows put the
+// selection on. ListBox+0x10 looked like the "selected" pointer and is read
+// that way by the game's own column switch, but the list's select routine
+// clears it again straight after selecting (0x00633278: vtable[0](0)), so
+// after a keyboard step it is null and the row names went unread. Order of
+// trust: the mouseover row, then +0x10, then the row whose list index is the
+// list's saved index (+0x24). Always a visible row inside this list's tile.
+Tile* SelectedRowOf(UInt8* list)
+{
+    if (!Readable(list, 0x28)) return nullptr;
+    Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
+    if (!Readable(box, sizeof(Tile))) return nullptr;
+    if (Tile* mo = FindMouseoverRow(box, 0)) return mo;
+
+    Tile* row = *reinterpret_cast<Tile**>(list + 0x10);
+    if (Readable(row, sizeof(Tile)) && !TileHiddenExplicitly(row)) {
+        int depth = 0;
+        for (Tile* p = row; p && depth < 12; p = p->parent, ++depth) {
+            if (!Readable(p, sizeof(Tile))) break;
+            if (p == box) return row;
+        }
+    }
+
+    float saved = *reinterpret_cast<float*>(list + 0x24);
+    if (!std::isfinite(saved) || saved < 0.0f) return nullptr;
+    int want = (int)(saved + 0.5f);
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&box->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        if (!Readable(node, sizeof(Node))) break;
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+        Tile* c = cn->child;
+        if (TileNum(c, kTileValue_id) == 15.0f && !TileHiddenExplicitly(c) &&
+            (int)TileNum(c, kTileValue_listindex) == want)
+            return c;
+    }
+    return nullptr;
 }
 
 // Visible rows of a container column (row tiles carry id 15; rows filtered
@@ -4400,9 +4437,8 @@ int StepContainerSelection(bool container_side, int delta)
     if (!Readable(box, sizeof(Tile))) return -1;
     int n = CountVisibleRows(box);
     if (n <= 0) return 0;
-    Tile* row = *reinterpret_cast<Tile**>(list + 0x10);
-    int cur = Readable(row, sizeof(Tile)) ? (int)TileNum(row, kTileValue_listindex)
-                                          : -1;
+    Tile* row = SelectedRowOf(list);
+    int cur = row ? (int)TileNum(row, kTileValue_listindex) : -1;
     if (cur < 0 || cur >= n) {
         float saved = *reinterpret_cast<float*>(list + 0x24);
         cur = std::isfinite(saved) ? (int)saved : 0;
