@@ -23,6 +23,10 @@ void DumpActiveMenuTree();
 // silent in the main menu / loading screens.
 bool IsGameplayActive();
 
+// True while ANY menu is open — including menus this mod does not handle, which
+// is the point: world hotkeys must stay quiet inside them.
+bool MenuModeActive();
+
 // Request an HP/AP/radiation readout (the H hotkey). The actual actor-value
 // reads run on the main thread; safe to call from the poll/hotkey thread.
 void RequestStatus();
@@ -47,21 +51,30 @@ void RequestVatsBodyPart();
 // target, 3 = next target.
 void RequestVatsClick(int code);
 
+// Request a container category-filter step on the main thread (Shift+Left /
+// Shift+Right). Safe from the poll thread, like every other request here.
+void RequestContainerFilter(bool container_side, bool next);
+
+// Request a container column switch on the main thread (Left = your items,
+// Right = the container's). Runs the menu's own Shift+Left/Right handler.
+void RequestContainerSide(bool container_side);
+
+// Request one Up/Down step in a container column on the main thread.
+void RequestContainerStep(bool container_side, int delta);
+
 // Click a VATS limb tile on the main thread (selects it and queues a shot).
 void RequestVatsLimbClick(const void* tile);
 
-// Cycle the VATS body part `steps` times on the main thread. The menu's button
-// only moves forward, so going back one means going round the rest of the way.
-// Steer the game's cursor onto a limb marker (index into GetVatsLimbs order),
-// optionally clicking it on arrival. In FO3's VATS the cursor is what picks the
-// body part AND what queues the shot; the on-screen buttons for both are
-// gamepad prompts that do nothing on a PC. Ignored unless VATS is open.
-void RequestVatsPointAt(int limbIndex, bool clickOnArrival);
+// Queue a shot in VATS: hold the attack button for a few frames. The game
+// queues it at whatever body part is currently selected, and the selecting is
+// the engine's own job (W/S for body parts, A/D for targets) — the mod does
+// not move the cursor for any of it.
+void RequestVatsAttack();
 
-// True while that steering is still under way. The cursor passes OVER other
-// limbs on its way, and the game selects each one as it goes — announcing them
-// all would bury the limb the player actually asked for.
-bool VatsPointBusy();
+// Put the engine's own menu cursor on a VATS body-part marker, which is how
+// Fallout 3 chooses the part. No system mouse movement is involved.
+void RequestVatsCursorTo(int limbIndex);
+
 
 // Which limb VATS is aimed at, sampled on the main thread. False when VATS
 // isn't showing any. Read from the game's own state, so it follows the player's
@@ -167,8 +180,32 @@ float AimCorrection();
 // feedback was missing.
 bool ConsumeAimTargetReacted();
 
+// True once, when the held target's health has just gone DOWN — that is, when
+// a shot landed. The engine gives us no hit event, so this is the evidence.
+bool ConsumeTargetHit();
+
+// The watched target's health reached zero. Read from the game, not inferred
+// from our own shooting.
+bool ConsumeTargetDown();
+
+// True once, when the engine's ray says there is NO line of fire to the held
+// target: `outDist` is how far the obstacle is, `outHeight` how high it sits
+// above the player's feet. The solver sweeps points around the target, so an
+// empty result means the blockage is near the shooter — which no angle can fix
+// and only moving can.
+bool ConsumeNoLineOfFire(float* outDist, float* outHeight);
+
 // True once, when a held aim was released because the mouse took over.
 bool ConsumeAimReleased();
+
+// Watch whether a shot would land on `refid` (0 = stop watching). The ray is
+// cast on the GAME's thread for the reason stated below, and the answer is read
+// back with AimLosHit — modules must never cast it themselves.
+void WatchAimLos(uint32_t refid);
+
+// The last line-of-sight answer: what the view ray hit and how far. False when
+// nothing is being watched.
+bool AimLosHit(uint32_t* outHit, float* outDist);
 
 // Ask for a ray map around a point. The sweep itself runs on the GAME's thread
 // — casting the engine's rays from the polling thread crashed the game, which

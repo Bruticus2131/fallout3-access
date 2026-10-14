@@ -24,6 +24,7 @@ void InitAll()
     mapnav::Init();
     quantity::Init();
     lootmenu::Init();
+    if (c.enable_worldscan) sonar::Init();
     F3A_INFO("Modules initialized.");
 }
 
@@ -46,6 +47,7 @@ void ShutdownAll()
     mapnav::Shutdown();
     quantity::Shutdown();
     lootmenu::Shutdown();
+    sonar::Shutdown();
 }
 
 } // namespace f3a::modules

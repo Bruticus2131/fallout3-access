@@ -16,7 +16,11 @@ std::string g_last_selection;
 std::string g_last_tab;
 std::string g_last_subtab;
 
-void AnnounceSelection(bool force)
+// mute = work out what WOULD be said and remember it, without saying it. Used
+// right after a page switch so the page's first row does not get read on top
+// of the page name, while still counting as "already announced" so the next
+// real move of the selection speaks normally.
+void AnnounceSelection(bool force, bool mute = false)
 {
     auto item = game::GetSelectedInventoryItem();
     if (!item) {
@@ -24,7 +28,7 @@ void AnnounceSelection(bool force)
         if (!text || text->empty()) return;
         if (!force && *text == g_last_selection) return;
         g_last_selection = *text;
-        tolk::Speak(*text, tolk::Priority::Ui, true);
+        if (!mute) tolk::Speak(*text, tolk::Priority::Ui, true);
         return;
     }
 
@@ -51,13 +55,13 @@ void AnnounceSelection(bool force)
                                            item->name.c_str(), extra);
     if (!force && line == g_last_selection) return;
     g_last_selection = line;
-    tolk::Speak(line, tolk::Priority::Ui, true);
+    if (!mute) tolk::Speak(line, tolk::Priority::Ui, true);
 }
 
-void AnnounceTabIfChanged()
+bool AnnounceTabIfChanged()
 {
     std::string tab = game::GetActivePipBoyTabName();
-    if (tab.empty() || tab == g_last_tab) return;
+    if (tab.empty() || tab == g_last_tab) return false;
     bool first_time = g_last_tab.empty();
     g_last_tab = tab;
     // First announcement after Pip-Boy opens gets the "Pip-Boy: " prefix
@@ -68,6 +72,7 @@ void AnnounceTabIfChanged()
     } else {
         tolk::Speak(tab, tolk::Priority::Ui, true);
     }
+    return true;
 }
 
 // Announce the active sub-tab strip selection (Status / SPECIAL / Skills...,
@@ -101,8 +106,33 @@ void AnnounceSubTabIfChanged(bool queue_after_tab)
     tolk::Speak(fresh, tolk::Priority::Ui, !queue_after_tab);
 }
 
+// How many Pip-Boy pages are up right now. Switching page OPENS the new page
+// before it CLOSES the old one, so for a moment two are open — and treating
+// each open as "the Pip-Boy just came up" and each close as "it went away" is
+// what produced "Przedmioty, Pip-Boy, Przedmioty, Ubiór, Pip-Boy, Przedmioty"
+// for one press: the old page said the page, the new one said it again with
+// the prefix and the sub-tab, and the old page's close wiped the memory so
+// the new page said it all a third time. (The dispatcher lists a menu as open
+// already in its open handler and still in its close handler.)
+int OpenPages()
+{
+    int n = 0;
+    for (auto id : { menu::Id::PipBoy, menu::Id::Inventory, menu::Id::Stats,
+                     menu::Id::Map })
+        if (menu::IsOpen(id)) ++n;
+    return n;
+}
+
 void OnOpen()
 {
+    if (OpenPages() >= 2) {
+        // A page switch, not the Pip-Boy opening: the page name once (unless
+        // the old page already said it), nothing else — as OnTick does.
+        AnnounceTabIfChanged();
+        g_last_subtab = game::GetActivePipBoySubTabName();
+        AnnounceSelection(/*force*/true, /*mute*/true);
+        return;
+    }
     g_last_selection.clear();
     g_last_tab.clear();
     g_last_subtab.clear();
@@ -118,6 +148,7 @@ void OnOpen()
 
 void OnClose()
 {
+    if (OpenPages() >= 2) return;   // another page is taking over: keep the memory
     g_last_selection.clear();
     g_last_tab.clear();
     g_last_subtab.clear();
@@ -125,7 +156,19 @@ void OnClose()
 
 void OnTick(float)
 {
-    AnnounceTabIfChanged();
+    // Switching page with F1/F2/F3 says the PAGE, full stop.
+    //
+    // It used to say three things at once: the page, then the sub-tab strip it
+    // landed on, then whatever row happened to be selected there. Pressing F1,
+    // F2, F3 in a row — which is how you look for something — buried the one
+    // word you were listening for under two you were not. The other two are
+    // still CAPTURED, so they are treated as already announced and the next
+    // real move of the selection reads normally.
+    if (AnnounceTabIfChanged()) {
+        g_last_subtab = game::GetActivePipBoySubTabName();
+        AnnounceSelection(/*force*/true, /*mute*/true);
+        return;
+    }
     AnnounceSubTabIfChanged(false);
     AnnounceSelection(false);
 }

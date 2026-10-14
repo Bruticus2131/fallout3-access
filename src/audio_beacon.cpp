@@ -198,4 +198,134 @@ void Cue(int freqHz, int ms)
     EmitLocked(pcm);
 }
 
+namespace {
+// One voice of the sonar, mixed into L/R starting at sample `start`.
+// The whole sweep is built as ONE buffer: waveOut plays queued buffers one
+// after another, never together, so separate blips could not overlap and the
+// timing would drift with every one of them.
+void SweepVoice(std::vector<float>& L, std::vector<float>& R, int start,
+                float azimuth_deg, float amp, int kind)
+{
+    const float az = azimuth_deg * 0.01745329252f;
+    float lr = std::sin(az);
+    if (lr < -1.0f) lr = -1.0f; else if (lr > 1.0f) lr = 1.0f;
+    const float t  = (lr + 1.0f) * 0.5f * 1.57079632679f;
+    const float gL = std::cos(t), gR = std::sin(t);
+    // Behind: quieter and a touch lower, so front and back don't sound alike.
+    const float front = std::cos(az);
+    const float pitch = front < 0.0f ? 1.0f + 0.15f * front : 1.0f;
+    if (front < 0.0f) amp *= 1.0f + 0.35f * front;
+
+    const float sr = (float)kSampleRate;
+    const float twoPi = 6.2831853f;
+    int len = 0;
+    switch (kind) {
+        case kSweepHostile:   len = 230; break;
+        case kSweepPerson:    len = 120; break;
+        case kSweepContainer: len = 320; break;
+        case kSweepDoor:      len = 150; break;
+        default:              len = 40;  break;   // item
+    }
+    const int n = kSampleRate * len / 1000;
+    const int attack = kSampleRate * 4 / 1000;
+    for (int i = 0; i < n; ++i) {
+        int k = start + i;
+        if (k < 0 || k >= (int)L.size()) break;
+        float ts = (float)i / sr;
+        float env = (i < attack) ? (float)i / attack : 1.0f;
+        float s = 0.0f;
+        switch (kind) {
+        case kSweepHostile: {           // a low growl: buzzy, with tremolo
+            float f = 150.0f * pitch;
+            float x = std::sin(twoPi * f * ts);
+            s = std::tanh(3.0f * x) * (0.6f + 0.4f * std::sin(twoPi * 25.0f * ts));
+            env *= std::exp(-ts / 0.12f);
+            break; }
+        case kSweepPerson: {            // a soft, round tone
+            float f = 520.0f * pitch;
+            s = std::sin(twoPi * f * ts);
+            env *= std::exp(-ts / 0.05f);
+            break; }
+        case kSweepContainer: {         // a small bell: loot here
+            float f1 = 1046.5f * pitch, f2 = 1568.0f * pitch;
+            s = 0.6f * std::sin(twoPi * f1 * ts) + 0.4f * std::sin(twoPi * f2 * ts);
+            env *= std::exp(-ts / 0.09f);
+            break; }
+        case kSweepDoor: {              // two knocks
+            float local = ts < 0.075f ? ts : ts - 0.075f;
+            float f = 220.0f * pitch;
+            s = 0.7f * std::sin(twoPi * f * local) + 0.3f * std::sin(twoPi * 2.0f * f * local);
+            env *= std::exp(-local / 0.012f);
+            break; }
+        default: {                      // a tick: a loose item
+            float f = 2000.0f * pitch;
+            s = std::sin(twoPi * f * ts);
+            env *= std::exp(-ts / 0.01f);
+            break; }
+        }
+        float v = amp * env * s;
+        L[k] += v * gL;
+        R[k] += v * gR;
+    }
+}
+
+// A quiet orientation tick (12/3/6/9 o'clock): short, panned, distinct for
+// "ahead".
+void SweepTick(std::vector<float>& L, std::vector<float>& R, int start,
+               float azimuth_deg)
+{
+    const float az = azimuth_deg * 0.01745329252f;
+    float lr = std::sin(az);
+    const float t  = (lr + 1.0f) * 0.5f * 1.57079632679f;
+    const float gL = std::cos(t), gR = std::sin(t);
+    const float f = azimuth_deg == 0.0f ? 1400.0f
+                  : (std::cos(az) < -0.5f ? 500.0f : 900.0f);
+    const int n = kSampleRate * 25 / 1000;
+    for (int i = 0; i < n; ++i) {
+        int k = start + i;
+        if (k < 0 || k >= (int)L.size()) break;
+        float ts = (float)i / kSampleRate;
+        float v = 0.10f * std::exp(-ts / 0.006f) * std::sin(6.2831853f * f * ts);
+        L[k] += v * gL;
+        R[k] += v * gR;
+    }
+}
+} // namespace
+
+void Sweep(const std::vector<SweepBlip>& blips, int total_ms)
+{
+    if (total_ms < 500)  total_ms = 500;
+    if (total_ms > 6000) total_ms = 6000;
+    const int body = kSampleRate * total_ms / 1000;
+    const int tail = kSampleRate * 350 / 1000;     // let the last voice ring out
+    std::vector<float> L((size_t)(body + tail), 0.0f), R((size_t)(body + tail), 0.0f);
+
+    auto at = [&](float azimuth_deg) {
+        float a = azimuth_deg < 0.0f ? azimuth_deg + 360.0f : azimuth_deg;
+        if (a >= 360.0f) a -= 360.0f;
+        return (int)(a / 360.0f * body);
+    };
+    for (float a : { 0.0f, 90.0f, 180.0f, -90.0f }) SweepTick(L, R, at(a), a);
+    SweepTick(L, R, body, 0.0f);                   // back at 12: the sweep is done
+    for (const auto& b : blips) {
+        float d = b.distance01 < 0.0f ? 0.0f : (b.distance01 > 1.0f ? 1.0f : b.distance01);
+        float amp = 0.25f + 0.75f * (1.0f - d);
+        if (!std::isfinite(b.azimuth_deg)) continue;
+        SweepVoice(L, R, at(b.azimuth_deg), b.azimuth_deg, amp, b.kind);
+    }
+
+    float peak = 0.0f;
+    for (size_t i = 0; i < L.size(); ++i)
+        peak = std::fmax(peak, std::fmax(std::fabs(L[i]), std::fabs(R[i])));
+    const float scale = peak > 0.9f ? 0.9f / peak : 1.0f;
+    std::vector<short> pcm(L.size() * 2);
+    for (size_t i = 0; i < L.size(); ++i) {
+        pcm[i * 2 + 0] = (short)(L[i] * scale * 30000.0f);
+        pcm[i * 2 + 1] = (short)(R[i] * scale * 30000.0f);
+    }
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_wave && !OpenLocked()) return;
+    EmitLocked(pcm);
+}
+
 } // namespace f3a::audio

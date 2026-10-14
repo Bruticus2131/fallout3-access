@@ -75,16 +75,25 @@ std::atomic<bool> g_stop_pending{ false };
 // treat silence as "stop". This is the backstop that makes self-walking
 // impossible regardless of which caller forgot to clean up.
 // Frames of "brake" after a stop: see the stop path in the hook.
-constexpr int kBrakeFrames = 20;   // ~1/3 s — long enough to outlast a hitch
+// Short enough that the coast after a stop is a step, not a stride: at walking
+// speed 20 frames carried the player ~50 units past the point where the mod
+// said it had stopped, which is far enough to walk into whatever you stopped
+// to avoid. Still long enough to outlast a frame hitch.
+constexpr int kBrakeFrames = 10;
 int g_brake = 0;
 
-// Drift check. Neither of us can watch the screen, so "it said I arrived and
-// then kept walking" has to become a measurement rather than a guess: after a
-// stop, watch the player's position for a second and write to the log if they
-// are still travelling. A log line either names the bug or rules this out.
-constexpr float kDriftWindow = 1.0f;    // seconds to watch
-constexpr float kDriftLimit  = 40.0f;   // units; walking covers far more
+// Post-stop probe. Neither of us can watch the screen, so "it said stopped and
+// kept walking" has to become a measurement rather than a guess — and it has to
+// be an UNCONDITIONAL one. The first version only wrote a line when the player
+// had travelled more than 40 units, so silence meant either "stood still" or
+// "the probe never got that far", and a log that ends before the window closes
+// cannot tell those apart. Now every stop writes three lines whatever happens,
+// which also settles the other half of the question: a walk animation left
+// looping sounds EXACTLY like walking to a player who cannot see the screen,
+// and distance-moved is what separates real motion from a phantom.
+constexpr float kWatchAt[3] = { 0.5f, 1.5f, 3.0f };   // seconds after the stop
 float g_watch = 0.0f;
+int   g_watch_stage = 3;                // 3 = finished / not watching
 float g_watch_x = 0.0f, g_watch_y = 0.0f;
 
 std::atomic<uint32_t> g_goal_stamp{ 0 };   // bumped by every SetGoal
@@ -100,6 +109,8 @@ constexpr float kGoalTimeout = 0.40f;      // ~5 autowalk ticks
 // the rhythm follows real speed and stops dead when the player wedges.
 constexpr float kFootstepEvery = 55.0f;   // game units between steps
 float g_step_accum = 0.0f;
+float g_anim_refresh = 0.0f;              // seconds since the walk anim was issued
+constexpr float kAnimRefreshSecs = 1.5f;  // long enough not to stutter the anim
 bool  g_step_alt = false;                 // alternate pitch: left/right feel
 
 // Animation groups the engine itself uses (same ids as the PlayGroup command).
@@ -179,30 +190,95 @@ void ActorMove(void* actor, float dt, float disp[3])
 // the game's FOOTSTEP SOUNDS, and for a player who cannot see the screen those
 // sounds ARE the message "you are still walking". Leaving them running after a
 // walk has ended is indistinguishable, by ear, from the walk never stopping.
+// The mover's own movement DIRECTION, and the byte that says it has one.
+//
+// Clearing the flag words and calling the engine's stop was not enough: the
+// player kept walking after the mod had said "stopped", and only pressing W
+// halted them — which is the tell, because W is what rewrites these fields
+// through the normal input path. The New Vegas mod zeroes exactly these on its
+// own stop, and the two flag words either side of them (+0x34, +0x94) already
+// match this build, so the layout is shared.
+//
+// Checked before written, not assumed: a direction vector is small and finite,
+// and the flag byte is 0 or 1. Anything else means the offsets are not what we
+// think on this build, and then nothing is written at all.
+constexpr uintptr_t kMoverDirX   = 0x10;
+constexpr uintptr_t kMoverHasDir = 0x77;
+
+void ClearMoveDirection(void* mover)
+{
+    if (!mover || IsBadWritePtr(mover, 0x98)) return;
+    auto* m = reinterpret_cast<uint8_t*>(mover);
+    auto* d = reinterpret_cast<float*>(m + kMoverDirX);
+    auto* hasDir = m + kMoverHasDir;
+
+    bool sane = std::isfinite(d[0]) && std::isfinite(d[1]) && std::isfinite(d[2]) &&
+                std::fabs(d[0]) <= 4.0f && std::fabs(d[1]) <= 4.0f &&
+                std::fabs(d[2]) <= 4.0f && *hasDir <= 1;
+    if (!sane) {
+        F3A_INFO("Mover: direction fields look wrong (%.3f,%.3f,%.3f hasDir=%u)"
+                 " — leaving them alone.", d[0], d[1], d[2], (unsigned)*hasDir);
+        return;
+    }
+    if (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f && *hasDir == 0) return;
+    F3A_INFO("Mover: clearing direction (%.3f,%.3f,%.3f hasDir=%u)",
+             d[0], d[1], d[2], (unsigned)*hasDir);
+    d[0] = d[1] = d[2] = 0.0f;
+    *hasDir = 0;
+}
+
+// Re-issues of the idle animation left to make during the brake. One call on
+// the stop frame is not enough: the engine re-evaluates the player's animation
+// inside the same update we are about to hand the frame back to, and can put
+// the walk cycle straight back. The walk cycle is what plays the game—s own
+// FOOTSTEPS, so one that outlives the walk is not cosmetic: it is the sound of
+// walking, continuing, after the mod has announced that it stopped.
+int g_idle_left = 0;
+constexpr int kIdleReissues = 4;
+
 void StopNow(void* mover)
 {
     SetMoverFlags(mover, false, false);
     EngineStopMover(mover);
-    if (g_current_anim != kAnimIdle) {
-        bool idled = false;
-        if (auto* p = rt::Player()) idled = game::PlayActorAnimGroup(p, kAnimIdle);
+    ClearMoveDirection(mover);
+    // Unconditionally, not "only if we think the walk animation is up". That
+    // bookkeeping is our note about what we last asked for, not what the engine
+    // is actually playing, and the periodic re-issue above deliberately lies to
+    // it. Asking for idle when idle is already playing costs nothing.
+    {
+        bool killed = false, idled = false;
+        if (auto* p = rt::Player()) {
+            // Order matters: take the walk cycle out of its own slot FIRST,
+            // then put the idle up. The other way round the idle lands while
+            // the walk is still running beside it, which is the state that was
+            // producing footsteps on a stationary player.
+            killed = game::StopActorMovementAnim(p);
+            idled  = game::PlayActorAnimGroup(p, kAnimIdle);
+        }
         g_current_anim = kAnimIdle;
-        F3A_INFO("Mover: stop — flags cleared, idle animation %s.",
+        g_idle_left    = kIdleReissues;
+        F3A_INFO("Mover: stop — flags cleared, walk animation %s, idle %s.",
+                 killed ? "stopped" : "NOT STOPPED",
                  idled ? "played" : "REFUSED");
-    } else {
-        F3A_INFO("Mover: stop — flags cleared.");
     }
     g_step_accum = 0.0f;
+    g_anim_refresh = 0.0f;
 
     if (auto* p = rt::Player()) {
-        g_watch   = kDriftWindow;
-        g_watch_x = p->posX;
-        g_watch_y = p->posY;
+        g_watch       = 0.0f;
+        g_watch_stage = 0;
+        g_watch_x     = p->posX;
+        g_watch_y     = p->posY;
     }
 }
 
+// The live mover, captured for the path probe. Set inside the engine's own
+// update, so it is always the object the game is actually using.
+void* g_last_mover = nullptr;
+
 void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
 {
+    g_last_mover = mover;
     // Aiming rides along on this hook. It has nothing to do with walking; it is
     // here because this is the one place we already run INSIDE the engine's
     // per-frame update, which is where a view change has to happen to survive
@@ -229,23 +305,33 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
             --g_brake;
             SetMoverFlags(mover, false, false);
             EngineStopMover(mover);
+            ClearMoveDirection(mover);
+            // Spread across the brake rather than fired in one burst, so each
+            // re-issue lands on a DIFFERENT frame of the engine's own animation
+            // update and one of them survives it.
+            if (g_idle_left > 0 && (g_brake % 5) == 0) {
+                --g_idle_left;
+                if (auto* p = rt::Player()) {
+                    game::StopActorMovementAnim(p);
+                    game::PlayActorAnimGroup(p, kAnimIdle);
+                }
+            }
             float clamped = dt;
             if (clamped > 0.033f) clamped = 0.033f;
             if (clamped < 0.0f)   clamped = 0.0f;
             float zero[3] = { 0.0f, 0.0f, 0.0f };
             if (auto* p = rt::Player()) ActorMove(p, clamped, zero);
         }
-        if (g_watch > 0.0f) {
-            g_watch -= dt;
-            if (g_watch <= 0.0f) {
+        if (g_watch_stage < 3) {
+            g_watch += dt;
+            while (g_watch_stage < 3 && g_watch >= kWatchAt[g_watch_stage]) {
                 if (auto* p = rt::Player()) {
                     float dx = p->posX - g_watch_x, dy = p->posY - g_watch_y;
-                    float moved = std::sqrt(dx * dx + dy * dy);
-                    if (moved > kDriftLimit)
-                        F3A_INFO("Mover: player STILL MOVING %.0f units in the "
-                                 "second after the stop.", moved);
+                    F3A_INFO("Mover: %.1f s after the stop the player has moved "
+                             "%.0f units (anim=%u).", kWatchAt[g_watch_stage],
+                             std::sqrt(dx * dx + dy * dy), g_current_anim);
                 }
-                g_watch = 0.0f;
+                ++g_watch_stage;
             }
         }
         if (g_original) g_original(mover, dt);
@@ -329,6 +415,17 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     // restart the animation continuously.
     if (g_anim_works && config::Get().walk_animation) {
         uint32_t want = running ? kAnimFastForward : kAnimForward;
+        // Re-issue periodically, not only on change. Whether the animation is
+        // still playing is the ENGINE's business — a collision or a posture
+        // change can drop it — and our own note saying "already playing" then
+        // goes stale. The footsteps stop with it, and since the synthesized
+        // clicks are suppressed while the real ones are expected, the walk goes
+        // silent while the player is still moving. That is the gap you hear.
+        g_anim_refresh += clamped;
+        if (g_anim_refresh >= kAnimRefreshSecs) {
+            g_anim_refresh = 0.0f;
+            g_current_anim = 0;          // force the re-issue below
+        }
         if (want != g_current_anim) {
             if (game::PlayActorAnimGroup(player, want)) {
                 g_current_anim = want;
@@ -359,6 +456,53 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
 }
 
 } // namespace
+
+// Does the player's own mover already hold a PathingSolution?
+//
+// This is the question the whole engine-pathfinding plan turns on, and it is
+// cheaper to ASK THE GAME than to disassemble for it. The solution object is
+// recognisable: its first word is the PathingSolution vtable. So walk the
+// mover's fields and report any pointer to such an object, with the offset it
+// sits at — the New Vegas mod reads waypoints out of exactly this.
+//
+// Read-only, bounds-checked, and logged once per walk. If nothing turns up, the
+// answer is equally useful: the player's mover does not path on its own and the
+// goal has to be set first.
+void ProbeForPathingSolution(void* mover)
+{
+    constexpr uintptr_t kPathingSolutionVtable = 0x00E0272C;
+    if (!mover || IsBadReadPtr(mover, 0x200)) {
+        F3A_INFO("PathProbe: mover unreadable");
+        return;
+    }
+    auto* base = reinterpret_cast<UInt8*>(mover);
+    int found = 0;
+    for (uintptr_t off = 0; off + 4 <= 0x200; off += 4) {
+        void* cand = *reinterpret_cast<void**>(base + off);
+        if (!cand || IsBadReadPtr(cand, 0x44)) continue;
+        uintptr_t vt = *reinterpret_cast<uintptr_t*>(cand);
+        if (vt != kPathingSolutionVtable) continue;
+        // The +0x20 sub-array is the waypoint list: data at +0x24, count at
+        // +0x28 (worked out earlier from the follow-math that reads it).
+        void*  data = *reinterpret_cast<void**>(reinterpret_cast<UInt8*>(cand) + 0x24);
+        UInt32 n    = *reinterpret_cast<UInt32*>(reinterpret_cast<UInt8*>(cand) + 0x28);
+        F3A_INFO("PathProbe: PathingSolution at mover+0x%02X -> %p, waypoints "
+                 "data=%p count=%u", (unsigned)off, cand, data, n);
+        ++found;
+    }
+    if (!found)
+        F3A_INFO("PathProbe: no PathingSolution anywhere in the player's mover "
+                 "(first 0x200 bytes) — it does not path on its own.");
+}
+
+void ProbePath()
+{
+    if (!g_installed.load()) {
+        F3A_INFO("PathProbe: the mover hook is not installed (NativeWalk=0?)");
+        return;
+    }
+    ProbeForPathingSolution(g_last_mover);
+}
 
 bool Install()
 {
@@ -418,12 +562,19 @@ void SetGoal(float x, float y, bool run)
         g_heading_seeded = false;   // seed on next frame
         g_step_accum = 0.0f;
         g_current_anim = kAnimIdle;  // force the walk anim to be issued
+        g_watch_stage  = 3;          // a new walk ends the previous stop's probe
     }
 }
 
 void Clear()
 {
-    if (!g_active.exchange(false)) return;
+    // No early-out when we were already inactive. The watchdog in the hook
+    // clears g_active by itself when a goal stops being refreshed, and after
+    // that this function used to do NOTHING — so a walk that ended that way,
+    // and then a player pressing the stop key, cleared no flags, played no idle
+    // animation and ran no brake. The mod said "Zatrzymano" and nothing in the
+    // game was told to stop. A stop request is cheap; swallowing one is not.
+    g_active.store(false);
     // Hand the actual stopping to the hook: it runs on the game's thread and is
     // given the engine's own mover, so nothing here has to guess an offset or
     // call into the game from the polling thread. The very next frame clears the

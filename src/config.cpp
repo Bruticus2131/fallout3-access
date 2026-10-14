@@ -125,11 +125,13 @@ bool Load(const wchar_t* ini_path)
     s.target_cue_hz       = ReadInt (L"Voice", L"TargetCueHz",     880,  ini_path);
     s.hud_reader          = ReadBool(L"Voice", L"HudReader",        true, ini_path);
     s.crosshair_names     = ReadBool(L"Voice", L"CrosshairNames",   true, ini_path);
-    s.crosshair_distance  = ReadBool(L"Voice", L"CrosshairDistance",true, ini_path);
+    s.crosshair_distance  = ReadBool(L"Voice", L"CrosshairDistance",false, ini_path);
     s.native_face         = ReadBool(L"Voice", L"NativeFace",       true, ini_path);
     s.native_walk         = ReadBool(L"Voice", L"NativeWalk",       true, ini_path);
     s.aim_collision       = ReadBool(L"Voice", L"AimCollision",     false, ini_path);
-    s.aim_bones           = ReadBool(L"Voice", L"AimBones",         true,  ini_path);
+    s.aim_bones           = ReadBool(L"Voice", L"AimBones",         false, ini_path);
+    s.hostile_from_combat = ReadBool(L"Voice", L"HostileFromCombat", true, ini_path);
+    s.aim_mouse_takeover  = ReadBool(L"Voice", L"AimMouseTakeover",  true, ini_path);
     s.autowalk_speed      = ReadInt (L"Voice", L"AutoWalkSpeed",    160,  ini_path);
     s.quest_arrive_dist   = ReadInt (L"Voice", L"QuestArriveDist",  0,    ini_path);
     s.footstep_cue        = ReadBool(L"Voice", L"FootstepCue",       true, ini_path);
@@ -137,6 +139,7 @@ bool Load(const wchar_t* ini_path)
     s.barter_warn_loss_caps = ReadInt (L"Voice", L"BarterWarnLossCaps", 10, ini_path);
     s.nearby_scan_radius    = ReadInt (L"Voice", L"NearbyScanRadius",   1200, ini_path);
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
+    s.hide_empty_containers = ReadBool(L"Voice", L"HideEmptyContainers", true, ini_path);
     s.compass_units         = ReadInt (L"Voice", L"CompassUnits",       0, ini_path);
     s.autowalk_turn_gain    = ReadInt (L"Voice", L"AutoWalkTurnGain",   4, ini_path);
     s.activate_pick_radius  = ReadInt (L"Voice", L"ActivatePickRadius", 150, ini_path);
@@ -164,6 +167,7 @@ bool Load(const wchar_t* ini_path)
     h.intro_describe   = ReadKey(L"Hotkeys", L"IntroDescribe",   h.intro_describe,   ini_path);
     h.menu_back        = ReadKey(L"Hotkeys", L"MenuBack",        h.menu_back,        ini_path);
     h.restore_defaults = ReadKey(L"Hotkeys", L"RestoreDefaults", h.restore_defaults, ini_path);
+    h.lock_enemy       = ReadKey(L"Hotkeys", L"LockEnemy",        h.lock_enemy,       ini_path);
     h.skip_objective   = ReadKey(L"Hotkeys", L"SkipObjective",   h.skip_objective,   ini_path);
     h.vats_body_part   = ReadKey(L"Hotkeys", L"VatsBodyPart",    h.vats_body_part,   ini_path);
     h.center_camera    = ReadKey(L"Hotkeys", L"CenterCamera",    h.center_camera,    ini_path);
@@ -180,6 +184,7 @@ bool Load(const wchar_t* ini_path)
     h.aim_target       = ReadKey(L"Hotkeys", L"AimTarget",       h.aim_target,       ini_path);
     h.attack_key       = ReadKey(L"Hotkeys", L"AttackKey",       h.attack_key,       ini_path);
     h.drop_item        = ReadKey(L"Hotkeys", L"DropItem",        h.drop_item,        ini_path);
+    h.sonar            = ReadKey(L"Hotkeys", L"Sonar",           h.sonar,            ini_path);
     h.press_row        = ReadKey(L"Hotkeys", L"PressRow",        h.press_row,        ini_path);
     h.aim_hold         = ReadKey(L"Hotkeys", L"AimHold",         h.aim_hold,         ini_path);
     h.container_side   = ReadKey(L"Hotkeys", L"ContainerSide",   h.container_side,   ini_path);

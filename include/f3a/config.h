@@ -46,6 +46,7 @@ struct Hotkeys {
     uint32_t aim_target       = 0x33; // , — aim view at the selected/nearest target
     uint32_t attack_key       = 0x2F; // V (DIK) — weapon attack, used by the aim burst
     uint32_t drop_item        = 0xD3; // Delete — drop the selected item (inventory)
+    uint32_t sonar            = 0x31; // N — Pip-Boy sonar sweep of the surroundings
     uint32_t press_row        = 0xD2; // Insert — press the highlighted row (rebinding keys)
     uint32_t aim_hold         = 0x1B; // ] — hold/release the game's aim (right mouse)
     // Trim the held aim up/down. The mod cannot see where the shot lands, but
@@ -56,6 +57,9 @@ struct Hotkeys {
     // [ — in a container, jump between the container's list and your own.
     uint32_t container_side   = 0x1A;
     uint32_t aim_calibrate    = 0x43; // F9
+    // T — turn to face the nearest enemy, so VATS and a shot have something
+    // in front of them even when the ordinary aim has lost the target.
+    uint32_t lock_enemy       = 0x14;
     uint32_t aim_up           = 0xC8; // Up arrow   — raise the aim point
     uint32_t aim_down         = 0xD0; // Down arrow — lower the aim point
 };
@@ -89,7 +93,7 @@ struct Settings {
     // the extra talking gets in the way.
     bool   hud_reader         = true;
     bool   crosshair_names    = true;
-    bool   crosshair_distance = true;
+    bool   crosshair_distance = false;
     // Turn toward targets with the engine's own actor-facing routine (the one
     // Command Extender's FaceObject uses) instead of writing angle fields.
     bool   native_face        = true;
@@ -104,10 +108,26 @@ struct Settings {
     // model's render bound, which is a plain memory read.
     bool   aim_collision      = false;
     // Aim at the target's skeleton (upper torso) instead of its bounding-box
-    // centre. On by default because it is what makes a shot land, but switchable
-    // from the INI: reading a reference's 3D has crashed this game once before,
-    // and nobody should have to wait for a new build to get playing again.
-    bool   aim_bones          = true;
+    // centre. OFF by default: it crashed the game the first time it ran for
+    // real, on a reference whose own position read as garbage. The guard that
+    // let that through is fixed, but "fixed" is not "proven", and this is not
+    // a feature worth risking a session over until it has been tested.
+    // OFF by default, and the reason is NOT the one that was fixed. The guards
+    // inside the bone walk were wrong once (NaN slipping through a "reject if
+    // beyond" test) and that is corrected — but the walk also makes dozens of
+    // VIRTUAL CALLS INTO THE ENGINE, and the hotkey that triggers it runs on
+    // the polling thread. This project already wrote that rule down after the
+    // second crash and it was broken again anyway. Until the aim point is
+    // resolved on the game's own thread, this stays off.
+    bool   aim_bones          = false;
+    // Ask the engine who is fighting the player (a virtual call) rather than
+    // treating the nearest actor as the enemy. Switchable because it calls
+    // into the game.
+    bool   hostile_from_combat = true;
+    // Moving the mouse while the aim is held hands control back to the player.
+    // Turn off if you play without a mouse: then nothing but releasing the aim
+    // can break the lock.
+    bool   aim_mouse_takeover  = true;
     // A quest marker is a PLACE, not a thing you walk into: it can sit inside
     // scenery, on a firing line you are meant to stand behind, or above a floor
     // you cannot climb. Getting this close to one ends the walk, with no other
@@ -124,6 +144,8 @@ struct Settings {
     int    barter_warn_loss_caps = 10; // warn when transaction loses player >=N caps
     int    nearby_scan_radius   = 1200; // game units (~ 1 meter = 64 units)
     int    nearby_scan_max_items = 8;
+    // Leave containers with nothing in them out of the object scanner.
+    bool   hide_empty_containers = true;
     int    compass_units = 0;           // 0 = clock face ("godzina trzecia"), 1 = degrees
     // AutoWalk mouse-turn gain: mouse counts injected per degree of heading
     // error. Higher = turns faster (may overshoot/spin), lower = gentler/slower.

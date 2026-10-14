@@ -125,6 +125,11 @@ Explore and travel without sight:
 | End | **activate** the selected object without aiming — opens the door, reads the book, loots the container |
 | Alt + Home | last resort: teleport to the selected object when it cannot be reached on foot |
 | G | say what is under the crosshair |
+| N | **Pip-Boy sonar**: one sweep of sound travels round you, clockwise from straight ahead, and everything nearby answers from its own direction — an enemy growls, a container with loot rings, a door knocks, a person hums, an item ticks; louder when close, quieter and lower behind you. Then a short count of what was heard. |
+
+The scanner leaves **empty containers** out (`HideEmptyContainers`), so every
+container it lists has something in it. Auto-walk opens ordinary closed doors on
+its route by itself, and stops at a locked one to tell you which lock it is.
 
 Auto-walk steers the player directly rather than holding the movement keys, so
 it controls speed precisely and slows into turns instead of skidding off ledges.
@@ -149,13 +154,24 @@ your way, the walk retargets instead of finishing at a stale marker.
 | Delete | drop the selected item |
 | Arrows, then **A** / **E** | in the "how many?" prompt: set the amount, then confirm / cancel (these are the game's own keys; the mod reads the number aloud) |
 
+### Containers (open one with End)
+
+| Key | Action |
+| --- | --- |
+| Left / Right | switch between **your items** and the **container's** |
+| Up / Down | move through the items of that column (in the container's column the mod moves the selection itself — the game's keys only ever reach yours) |
+| Shift + Left / Right | previous / next item category in that column |
+| Enter | the game's own take / put — stealing, karma and the "how many?" prompt behave as in the game |
+| `[` | toggle between the two columns |
+
 ### Combat
 
 | Key | Action |
 | --- | --- |
 | V.A.T.S. key | enter VATS; the mod reads target, body part and hit chance |
 | A / D | in VATS: previous / next target |
-| W / S / B | in VATS: cycle the targeted body part |
+| W / S | in VATS: next / previous body part, read at once with its hit chance |
+| `]` | hold to aim (free aim): locks onto the nearest enemy fighting you and says who and how far |
 | `,` (comma) | aim the view at the selected or nearest target (free aim, no VATS) |
 | `=` | skip an objective that cannot be completed blind (advances the quest stage — use deliberately) |
 
@@ -176,7 +192,8 @@ Useful `[Voice]` settings:
 | Key | Meaning |
 | --- | --- |
 | `CrosshairNames` | say the NAME of what you are looking at, not just the verb |
-| `CrosshairDistance` | add the distance to that announcement |
+| `CrosshairDistance` | add the distance to that announcement (off by default) |
+| `HideEmptyContainers` | leave empty containers out of the scanner (`0` lists them, marked "pusty") |
 | `TargetCue`, `TargetCueHz` | audio cue when an enemy is under the crosshair, and its pitch |
 | `NativeWalk` | auto-walk drives the player directly (`0` falls back to holding the movement keys) |
 | `AutoWalkSpeed` | auto-walk speed in game units per second |

@@ -89,7 +89,30 @@ struct WorldEntity {
     uint32_t    form_id  = 0;
     const void* refr     = nullptr;   // live TESObjectREFR* (stale after cell change)
     int         lock_level = -1;      // -1 = no lock; 0-100 pick difficulty; >=250 = needs key
+    // Doors only: 1 = leads to another place (load door), 0 = an ordinary
+    // door, -1 = couldn't tell. Open state: 1 = open, 0 = closed, -1 = unknown.
+    int         load_door  = -1;
+    int         open_state = -1;
 };
+
+// Is this reference an actor currently fighting the PLAYER? Asked of the
+// engine (Actor::GetCombatTarget, a virtual slot), not guessed from a field.
+bool IsHostileToPlayer(const void* refr);
+
+// The engine's OWN menu cursor (InterfaceManager::cursor, a Tile). Positions
+// are in the same coordinate space as the tile positions we read elsewhere.
+// Setting it moves the game's cursor WITHOUT touching the system mouse.
+// SetMenuCursorPos calls into the game: main thread only.
+bool SetMenuCursorPos(float x, float y);
+
+// Move the GAME's own cursor to a point in tile coordinates, exactly as a
+// mouse move would: the engine picks it up next frame, flags the cursor as
+// moved and re-tests what is under it (which is how VATS picks a body part).
+// Writing the cursor TILE's x/y — SetMenuCursorPos — does not do that; the
+// engine keeps the real position elsewhere and never reads those traits.
+// Self-checks the layout against the engine's own numbers first and refuses
+// (false) if they disagree. MAIN THREAD ONLY.
+bool MoveEngineCursorTo(float x, float y);
 
 // Within `radius` game units of the player; up to `max_results` closest.
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
@@ -129,12 +152,19 @@ bool IsThirdPerson();
 // Calls the engine's GetActorValue via the avOwner vtable.
 float GetPlayerAV(uint32_t avCode);
 
+// The same, for any actor (16 = Health). -1 when it cannot be read. MUST run on
+// the main thread: it calls into the engine.
+float GetRefAV(const void* refr, uint32_t avCode);
+
 // Name of the reference currently under the crosshair (InterfaceManager+0xFC),
 // "" if none. out_form_id receives its refID, out_type_id its base form type
 // (both 0 if none). This is exactly what the game would activate with Use —
 // invaluable for debugging whether we're aimed at the right object.
+// out_known (optional) is false when the name is only the generic "obiekt" —
+// the game gave the thing no name and it is no door, container or person.
 std::string GetCrosshairRefName(uint32_t* out_form_id = nullptr,
-                                uint32_t* out_type_id = nullptr);
+                                uint32_t* out_type_id = nullptr,
+                                bool* out_known = nullptr);
 
 // refID of the reference under the crosshair (0 if none); out_type (optional)
 // gets its base form type. Cheap enough to poll every frame — feedback for aim.
@@ -212,6 +242,17 @@ bool GetVatsInfo(VatsInfo* out);
 // guards rejected this build.
 bool PlayActorAnimGroup(void* actor, uint32_t animGroup);
 
+// The scancode the player has bound to Activate/Use, or 0 if it is on a mouse
+// button or unbound. E is only the default binding, not the answer.
+uint8_t GetUseKeyScancode();
+
+
+// Stop the walk/run animation outright. Playing the idle group does NOT do
+// this: movement animations live in a different sequence slot, and a walk cycle
+// left looping keeps the game's footstep sounds playing on a player who has
+// stopped — which, without a screen, IS the sound of still walking.
+bool StopActorMovementAnim(void* actor);
+
 // ---- Aiming at an object's real body ----
 //
 // The centre of a reference's COLLISION shape, in world coordinates — the point
@@ -246,7 +287,8 @@ struct VatsLimb {
     std::string chance;    // "95%"
     int  part_id = 0;      // the game's own body-part id, stable per limb
     bool selected = false; // this is the limb VATS is currently aimed at
-    float x = 0.0f, y = 0.0f;
+    float x = 0.0f, y = 0.0f;   // top-left, absolute tile coordinates
+    float w = 0.0f, h = 0.0f;   // size, so the centre can be aimed at
 };
 std::vector<VatsLimb> GetVatsLimbs();
 
@@ -267,6 +309,7 @@ struct VatsPick {
     // if the game ever stops marking a selection, the reader still has to say
     // SOMETHING rather than go silent, and it says this list's entry instead.
     char names[8][48] = {};
+    char chances[8][16] = {};   // each part's own hit chance, same order
 };
 bool GetVatsPick(VatsPick* out);
 
@@ -370,6 +413,7 @@ struct CrosshairTarget {
     std::string name;
     float       dist = 0.0f;
     bool        is_actor = false;
+    bool        known = false;   // false: `name` is only the generic "obiekt"
 };
 bool GetCrosshairTarget(CrosshairTarget* out);
 
@@ -389,6 +433,11 @@ void InstallMainThreadHook();
 // Queue an activation from any thread; it runs on the main thread next message
 // dispatch. expectedRefID guards against a stale pointer.
 void QueueActivate(const void* refr, uint32_t expectedRefID);
+
+// A door's open state as the game's own GetOpenState reads it: 1 = open,
+// 0 = closed, -1 = unknown (bad/stale pointer). Memory reads only — safe from
+// the poll thread. Validates the refID like QueueActivate.
+int DoorOpenState(const void* refr, uint32_t expectedRefID);
 
 // Register a callback run every frame ON THE MAIN THREAD (from the DispatchMessageA
 // hook), so it can safely call game functions like GetActorValue. Pass nullptr
@@ -567,6 +616,11 @@ const void* GetPlayerCell();
 // check this first.
 bool PlayerIsInInterior();
 
+// Is this reference in an interior cell? Routing needs it: a target outdoors is
+// reached by heading for an exterior door, while a target deeper inside a
+// building is reached by going through more interiors.
+bool RefIsInInterior(const void* refr);
+
 // All refs sharing the base object of the currently-marked quest target, within
 // `radius` (game units), nearest first. For "shoot the N targets" objectives:
 // the targets are unnamed (scanner-invisible) but identical placements, so this
@@ -613,9 +667,27 @@ std::optional<MenuSelection> GetKeyboardSelection();
 struct ContainerSide { std::string title; int rows = 0; };
 bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs);
 
-// Move the keyboard focus to the other list by pressing its first row the way
-// a mouse click would. Returns false when that list is empty.
-bool FocusContainerList(bool container_side);
+// Move the keyboard focus to one column of the container menu through the
+// menu's OWN Shift+Left / Shift+Right handler. MAIN THREAD ONLY.
+// Returns 1 = focus is now on that column, 0 = the menu refused (that column
+// is empty), -1 = no container menu / unknown game build.
+int SwitchContainerSide(bool container_side);
+
+// Which column the container menu itself has focused: 1 = the container's,
+// 0 = yours, -1 = unknown. Memory reads only — safe from the poll thread.
+int ContainerFocusSide();
+
+// The row the container menu itself has selected in its focused column —
+// the column's ListBox "selected" tile — described like GetKeyboardSelection.
+// out_side: 1 = the container's column, 0 = yours. nullopt when it can't be
+// read (the caller falls back to the highlight scan). Memory reads only.
+std::optional<MenuSelection> GetContainerSelection(int* out_side = nullptr);
+
+// Move the selection in one container column by `delta` rows through the
+// menu's own select routine (taking the focus back to that column first if
+// the game's own arrows moved it away). MAIN THREAD ONLY. Returns 1 = moved,
+// 2 = already at that end, 0 = nothing to select there, -1 = no menu.
+int StepContainerSelection(bool container_side, int delta);
 
 // Convenience: the focused row as one string ("label" or "label, value").
 // Used by the diagnostic dump.
@@ -704,6 +776,11 @@ bool ClickVatsButton(const char* btnName);
 // MUST run on the main thread (it runs game code / opens dialogs).
 bool ClickMenuButton(uint32_t menuType, const char* btnName, int depth = 6);
 
+// Step the category filter on one side of the container menu, by pressing the
+// little arrow beside that column's title. container_side picks the column,
+// next picks the direction. MUST run on the main thread.
+bool ClickContainerFilter(bool container_side, bool next);
+
 // Click a button by id but WITHOUT handing the engine the tile — the form
 // Command Extender uses. Needed for buttons that close a menu or move items;
 // passing the tile there crashed the game. MUST run on the main thread.
@@ -736,6 +813,10 @@ std::optional<std::string> GetTerminalText();
 // HUD corner-notification text (the "Messages" tile: quest updates, items, XP,
 // discovered locations). Empty when nothing is showing.
 std::string GetHudMessage();
+
+// The level-up banner on the HUD's XP meter ("NASTĘPNY POZIOM"), empty unless
+// the game is showing it right now.
+std::string GetHudLevelUpText();
 
 // The crosshair activate prompt (HUD "Info" tile): the verb + target you'd
 // interact with — "Rozmawiaj", "Weź", "Okradnij", "Otwórz"… Empty when nothing

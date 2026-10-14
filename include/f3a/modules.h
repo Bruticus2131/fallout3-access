@@ -31,6 +31,10 @@ namespace quantity { void Init(); void Shutdown(); void Tick(float dt); }
 // so it is ticked from the polling loop like the world scanner.
 namespace lootmenu { void Init(); void Shutdown(); void Tick(float dt); bool IsOpen(); }
 
+// Pip-Boy sonar: one key plays a sweep round the player in which every nearby
+// enemy, person, crate, door and item answers from its own direction.
+namespace sonar { void Init(); void Shutdown(); void Tick(float dt); }
+
 // AutoWalk: walks the player to a scanner-selected target. Ticked from the
 // polling loop while in gameplay.
 namespace autowalk {

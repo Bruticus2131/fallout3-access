@@ -28,6 +28,12 @@ void Shutdown();
 // True when the hook is in place and steering is available.
 bool Available();
 
+// Diagnostic, logged once per walk: does the player's own mover already hold a
+// PathingSolution we could read waypoints from? This is the question the whole
+// engine-pathfinding plan turns on, and the game can answer it far more cheaply
+// than a disassembler can.
+void ProbePath();
+
 // Steer toward a world point this frame. Call every tick while walking; the
 // goal is consumed by the next engine movement update. `run` picks run speed.
 //

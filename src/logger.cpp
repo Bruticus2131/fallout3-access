@@ -38,6 +38,11 @@ void Init()
 {
     char path[MAX_PATH];
     if (!GetFosePath(path, sizeof(path), "fallout3_access.log")) return;
+    // Keep the previous session as fallout3_access.prev.log. Starting the game
+    // again used to wipe the log of the session that had the problem in it.
+    char prev[MAX_PATH];
+    if (GetFosePath(prev, sizeof(prev), "fallout3_access.prev.log"))
+        MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
     g_file = std::fopen(path, "w");
     if (g_file) {
         std::fprintf(g_file,

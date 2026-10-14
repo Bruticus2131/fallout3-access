@@ -42,6 +42,7 @@ void SpeakWhereAmI()
 void SpeakPlayerStatus()
 {
     if (SkipIfNotInGame()) return;
+    if (poll::MenuModeActive()) return;   // the world only — silent in VATS/menus
     auto s = game::GetPlayerStatus();
     char hp[16], ap[16], rad[16], caps[16];
     std::snprintf(hp,   sizeof(hp),   "%d", s.health);

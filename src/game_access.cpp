@@ -335,11 +335,16 @@ const char* BaseFormName(TESForm* base)
     if (!base) return nullptr;
     UInt32 off;
     switch (base->typeID) {
+    // A container carries its TESContainer (0x0C) between TESBoundAnimObject
+    // and the name, so its TESFullName sits at 0x3C, not 0x30. Reading 0x30
+    // landed on the item list and every container came out as "Pojemnik".
+    case kFormType_Container:
+        off = 0x3C;
+        break;
     // TESBoundAnimObject children — TESFullName directly after TESBoundObject.
     case kFormType_Activator:
     case kFormType_TalkingActivator:
     case kFormType_Terminal:
-    case kFormType_Container:
     case kFormType_Door:
     case kFormType_Light:
     case kFormType_Furniture:
@@ -420,6 +425,44 @@ int ReadLockLevel(const TESObjectREFR* r, int* out_flags)
 // TESObjectREFR* in the destination cell). The name is that cell's fullName, or
 // its worldspace name for exterior doors. Empty if not a load door / unreadable.
 // Memory reads only (no native call) so it's safe from the poll thread.
+// Walk a ref's extra-data list for one type. Returns the node, nullptr when
+// the whole list was walked without it, or `bad` when the list could not be
+// read to the end — so "no such data" is never confused with "unreadable".
+const UInt8* const kExtraUnreadable = reinterpret_cast<const UInt8*>(1);
+const UInt8* FindExtra(const TESObjectREFR* r, UInt8 type)
+{
+    if (!Readable(r, 0x48)) return kExtraUnreadable;
+    const UInt8* node = *reinterpret_cast<const UInt8* const*>(
+                            reinterpret_cast<const UInt8*>(r) + 0x44);
+    for (int i = 0; node; ++i) {
+        if (i >= 128 || !Readable(node, 0x10)) return kExtraUnreadable;
+        if (node[0x04] == type) return node;
+        node = *reinterpret_cast<const UInt8* const*>(node + 0x08);   // next
+    }
+    return nullptr;
+}
+
+// Door open state, read the way the game's GetOpenState does it (FO3
+// 0x0044DF30 → ExtraDataList flag test 0x0040BAF0): bit 0x04 of the
+// ExtraAction (type 0x0E) flags byte at +0x0C; a door with no ExtraAction has
+// flags 1, i.e. shut. 1 = open, 0 = closed, -1 = couldn't read. (The swing
+// animation part of GetOpenState reads the 3D and is left out.)
+int ReadDoorOpenState(const TESObjectREFR* r)
+{
+    const UInt8* x = FindExtra(r, 0x0E);
+    if (x == kExtraUnreadable) return -1;
+    if (!x) return 0;
+    return (x[0x0C] & 0x04) ? 1 : 0;
+}
+
+// 1 = a load door (ExtraTeleport, type 0x2B), 0 = ordinary, -1 = unknown.
+int ReadIsLoadDoor(const TESObjectREFR* r)
+{
+    const UInt8* x = FindExtra(r, 0x2B);
+    if (x == kExtraUnreadable) return -1;
+    return x ? 1 : 0;
+}
+
 std::string DoorDestinationName(const TESObjectREFR* r)
 {
     if (!Readable(r, 0x48)) return {};
@@ -451,65 +494,90 @@ std::string DoorDestinationName(const TESObjectREFR* r)
     return {};
 }
 
-// Is a container currently empty? Its live contents = the base default item list
-// (TESContainer.formCountList) adjusted by the ref's ExtraContainerChanges deltas
-// (what's been looted / added since it spawned). Sum both — base counts are
-// positive, a change's countDelta can be negative — and total 0 means empty.
-// Returns: 1 = has items, 0 = empty, -1 = couldn't tell (label stays neutral;
-// we NEVER claim "empty" on an unreliable read, so real loot is never hidden).
-//
-// TESObjectCONT isn't laid out in the FOSE headers. BaseFormName puts its
-// TESFullName at +0x30, and TESContainer (size 0x0C) sits directly before it, so
-// formCountList (a tList head: item@0, next@+0x04) is at +0x28. That +0x28 is an
-// INFERENCE — every read is guarded, and the F3A_INFO line lets us confirm it
-// against a known-full vs known-empty container in-game. All memory reads (no
-// native call), so it's safe from the poll thread.
-int ContainerItemState(TESForm* base, const TESObjectREFR* r)
-{
-    long total  = 0;
-    bool baseOk = false;
+// What ContainerItemState saw, for the log line that lets us check it in play.
+struct ContainerTally {
+    int  forms    = 0;      // distinct item forms with a positive count
+    bool levelled = false;  // base list holds a leveled list (rolled at runtime)
+    bool changes  = false;  // the ref has ExtraContainerChanges
+};
 
-    if (Readable(base, 0x30)) {
-        const UInt8* node = reinterpret_cast<const UInt8*>(base) + 0x28;   // list head
-        baseOk = true;
-        for (int i = 0; node && i < 256; ++i) {
-            if (!Readable(node, 0x08)) { baseOk = false; break; }
-            const UInt8* fc = *reinterpret_cast<const UInt8* const*>(node); // FormCount*
-            if (fc) {
-                if (!Readable(fc, 0x08)) { baseOk = false; break; }
-                SInt32 cnt = *reinterpret_cast<const SInt32*>(fc);          // count @0
-                if (cnt > 0) total += cnt;
-            }
-            node = *reinterpret_cast<const UInt8* const*>(node + 0x04);     // next
+// Is a container currently empty? Counted the way FOSE's own GetNumItems does
+// it: per item form, the base default count (TESContainer.formCountList) plus
+// the ref's ExtraContainerChanges countDelta (what's been looted or added since
+// it spawned). Leveled lists in the base list are not items — what they rolled
+// shows up as positive deltas in the changes instead. Per form, so a looted
+// stimpak can't cancel out a different item still inside.
+// Returns: 1 = has items, 0 = empty, -1 = couldn't tell. The scanner HIDES
+// empty containers, so anything doubtful must come back -1, never 0.
+//
+// TESObjectCONT isn't laid out in the FOSE headers. It is TESBoundAnimObject
+// (0x30), then TESContainer (vtable @0x30, formCountList head @0x34 — item@0,
+// next@+0x04), then TESFullName @0x3C, as in New Vegas. The TESContainer
+// vtable must point into the game image or the layout guess is wrong. All
+// memory reads (no native call), so it's safe from the poll thread.
+int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* out)
+{
+    ContainerTally t;
+    if (!Readable(base, 0x48)) return -1;
+    const UInt8* b = reinterpret_cast<const UInt8*>(base);
+    UInt32 vt = *reinterpret_cast<const UInt32*>(b + 0x30);
+    if (!(vt >= 0x00400000 && vt < 0x01200000)) return -1;
+
+    struct Count { const void* form; long n; };
+    std::vector<Count> counts;
+    auto add = [&](const void* form, long n) {
+        for (auto& c : counts) if (c.form == form) { c.n += n; return; }
+        counts.push_back({ form, n });
+    };
+
+    const UInt8* node = b + 0x34;                                       // list head
+    for (int i = 0; node; ++i) {
+        if (i >= 256 || !Readable(node, 0x08)) return -1;
+        const UInt8* fc = *reinterpret_cast<const UInt8* const*>(node); // FormCount*
+        if (fc) {
+            if (!Readable(fc, 0x08)) return -1;
+            SInt32 cnt = *reinterpret_cast<const SInt32*>(fc);          // count @0
+            auto* f = *reinterpret_cast<TESForm* const*>(fc + 0x04);     // form @4
+            if (!Readable(f, 0x08)) return -1;
+            if (f->typeID == kFormType_LeveledItem) t.levelled = true;
+            else if (cnt > 0) add(f, cnt);
         }
+        node = *reinterpret_cast<const UInt8* const*>(node + 0x04);     // next
     }
-    if (!baseOk) return -1;   // base unreadable → don't risk a false "empty"
 
     // ExtraContainerChanges (type 0x15): Data*@+0x0C; Data->objList@+0x00 is a
-    // tList<EntryData>*; each EntryData has countDelta @ +0x04.
-    if (Readable(r, 0x48)) {
-        const UInt8* xn = *reinterpret_cast<const UInt8* const*>(
-                              reinterpret_cast<const UInt8*>(r) + 0x44);
-        for (int i = 0; xn && i < 128; ++i) {
-            if (!Readable(xn, 0x10)) break;
-            if (xn[0x04] == 0x15) {                        // kExtraData_ContainerChanges
-                const UInt8* data = *reinterpret_cast<const UInt8* const*>(xn + 0x0C);
-                if (Readable(data, 0x04)) {
-                    const UInt8* list = *reinterpret_cast<const UInt8* const*>(data);
-                    for (int j = 0; Readable(list, 0x08) && j < 512; ++j) {
-                        const UInt8* ed = *reinterpret_cast<const UInt8* const*>(list);
-                        if (ed && Readable(ed, 0x08))
-                            total += *reinterpret_cast<const SInt32*>(ed + 0x04);
-                        list = *reinterpret_cast<const UInt8* const*>(list + 0x04);
-                    }
+    // tList<EntryData>*; each EntryData has countDelta @+0x04, form @+0x08.
+    if (!Readable(r, 0x48)) return -1;
+    const UInt8* xn = *reinterpret_cast<const UInt8* const*>(
+                          reinterpret_cast<const UInt8*>(r) + 0x44);
+    for (int i = 0; xn && i < 128; ++i) {
+        if (!Readable(xn, 0x10)) return -1;
+        if (xn[0x04] == 0x15) {                            // kExtraData_ContainerChanges
+            const UInt8* data = *reinterpret_cast<const UInt8* const*>(xn + 0x0C);
+            if (!Readable(data, 0x04)) return -1;
+            t.changes = true;
+            const UInt8* list = *reinterpret_cast<const UInt8* const*>(data);
+            for (int j = 0; list; ++j) {
+                if (j >= 512 || !Readable(list, 0x08)) return -1;
+                const UInt8* ed = *reinterpret_cast<const UInt8* const*>(list);
+                if (ed) {
+                    if (!Readable(ed, 0x0C)) return -1;
+                    add(*reinterpret_cast<const void* const*>(ed + 0x08),
+                        *reinterpret_cast<const SInt32*>(ed + 0x04));
                 }
-                break;
+                list = *reinterpret_cast<const UInt8* const*>(list + 0x04);
             }
-            xn = *reinterpret_cast<const UInt8* const*>(xn + 0x08);
+            break;
         }
+        xn = *reinterpret_cast<const UInt8* const*>(xn + 0x08);
     }
 
-    return total > 0 ? 1 : 0;
+    for (const auto& c : counts) if (c.n > 0) ++t.forms;
+    if (out) *out = t;
+    if (t.forms > 0) return 1;
+    // A leveled list with no changes yet may simply not have been rolled.
+    if (t.levelled && !t.changes) return -1;
+    return 0;
 }
 
 // Scan one cell's reference list into `out`.
@@ -559,13 +627,20 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
             }
         }
 
-        // Containers: tell the player if it's empty so they don't bother opening
-        // it. Only tag "pusty" when we're sure — a -1 (unknown) keeps the plain
-        // name so real loot is never hidden behind a false "empty".
+        // Containers: a blind player can't see that a crate is empty, so the
+        // scanner leaves empty ones out (or tags them "pusty" if the INI turns
+        // hiding off). Only a sure 0 counts — a -1 (unknown) stays listed under
+        // its plain name so real loot is never hidden.
         if (kind == WorldEntity::Kind::Container) {
-            int st = ContainerItemState(base, r);
-            F3A_INFO("Cont: '%s' state=%d (1=full 0=empty -1=?)", label.c_str(), st);
-            if (st == 0) label += ", pusty";
+            ContainerTally tally;
+            int st = ContainerItemState(base, r, &tally);
+            F3A_INFO("Cont: '%s' state=%d (1=full 0=empty -1=?) forms=%d lvl=%d changes=%d",
+                     label.c_str(), st, tally.forms, (int)tally.levelled,
+                     (int)tally.changes);
+            if (st == 0) {
+                if (config::Get().hide_empty_containers) continue;
+                label += ", pusty";
+            }
         }
 
         WorldEntity e;
@@ -574,6 +649,10 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         e.position = { r->posX, r->posY, r->posZ };
         e.form_id  = r->refID;
         e.refr     = r;            // for crosshair-forced activation
+        if (kind == WorldEntity::Kind::Door) {
+            e.load_door  = ReadIsLoadDoor(r);
+            e.open_state = ReadDoorOpenState(r);
+        }
         if (kind == WorldEntity::Kind::Door ||
             kind == WorldEntity::Kind::Container) {
             int flags = -1;
@@ -593,8 +672,41 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
 
 } // namespace
 
+// Is this reference an actor that is fighting the PLAYER?
+//
+// "Nearest enemy" used to mean "nearest actor", which in a vault full of
+// neighbours is almost never the enemy. The engine already knows the answer:
+// its own GetCombatTarget script command (0x00529960) resolves the actor and
+// then calls a VIRTUAL method at vtable +0x420, reading the form id at +0x0C
+// off whatever comes back. So that slot is Actor::GetCombatTarget(), and an
+// actor whose combat target is the player is hostile to the player — the same
+// test the FNV accessibility mod uses, by a different route (it reads a raw
+// field, which would be a guess on this build; a virtual slot is not).
+//
+// A virtual call into the engine, so: every pointer checked before use, and an
+// INI switch to turn the whole thing off if it ever misbehaves.
+bool IsHostileToPlayer(const void* refr)
+{
+    if (!refr || !config::Get().hostile_from_combat) return false;
+    auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
+    if (IsBadReadPtr(r, 0x70)) return false;
+    auto* bf = r->baseForm;
+    if (!bf || IsBadReadPtr(bf, 0x10)) return false;
+    if (KindOf(bf->typeID) != WorldEntity::Kind::Actor) return false;
+
+    void** vt = *reinterpret_cast<void***>(r);
+    if (!vt || IsBadReadPtr(vt, 0x424)) return false;
+    void* fn = vt[0x420 / 4];
+    if (!fn || IsBadReadPtr(fn, 1)) return false;
+
+    using GetTargetFn = void* (__thiscall*)(void* self);
+    void* tgt = reinterpret_cast<GetTargetFn>(fn)(r);
+    if (!tgt || IsBadReadPtr(tgt, 0x10)) return false;
+    return tgt == (void*)rt::Player();
+}
+
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
-                                    bool actors_only, bool /*hostiles_only*/)
+                                    bool actors_only, bool hostiles_only)
 {
     std::vector<WorldEntity> out;
     auto* p = rt::Player();
@@ -610,6 +722,19 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     // it. Walk the worldspace cell map and also scan the loaded cells around
     // the player (objectList non-empty = loaded). Uses only FOSE-defined
     // layouts; heavily guarded.
+    // Mark the hostiles, and drop everything else when only those were asked
+    // for. Done here rather than inside the cell walk so the virtual call is
+    // made once per candidate, on a list that is already distance-filtered.
+    auto MarkHostiles = [&]() {
+        for (auto& e : out)
+            if (e.kind == WorldEntity::Kind::Actor)
+                e.hostile = IsHostileToPlayer(e.refr);
+        if (!hostiles_only) return;
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [](const WorldEntity& e) { return !e.hostile; }),
+                  out.end());
+    };
+
     auto* ws = reinterpret_cast<UInt8*>(pcell->worldSpace);
     auto* pcoords = reinterpret_cast<UInt8*>(pcell->coords);   // cell+0x44
     if (Readable(ws, 0x34) && Readable(pcoords, 8)) {
@@ -1169,7 +1294,7 @@ bool GetCrosshairTarget(CrosshairTarget* out)
     if (!out) return false;
     *out = CrosshairTarget{};
     uint32_t type = 0;
-    std::string nm = GetCrosshairRefName(&out->refid, &type);   // handles the name fallbacks
+    std::string nm = GetCrosshairRefName(&out->refid, &type, &out->known);   // handles the name fallbacks
     if (!out->refid) return false;
     out->name     = std::move(nm);
     out->is_actor = KindOf(type) == WorldEntity::Kind::Actor;
@@ -1302,6 +1427,13 @@ void QueueActivate(const void* refr, uint32_t expectedRefID)
     g_pending_refr.store(refr);
 }
 
+int DoorOpenState(const void* refr, uint32_t expectedRefID)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x48) || r->refID != expectedRefID) return -1;
+    return ReadDoorOpenState(r);
+}
+
 void SetMainThreadCallback(void (*cb)())
 {
     g_mainThreadCb.store(cb);
@@ -1320,10 +1452,12 @@ bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID)
     return true;
 }
 
-std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id)
+std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id,
+                                bool* out_known)
 {
     if (out_form_id) *out_form_id = 0;
     if (out_type_id) *out_type_id = 0;
+    if (out_known) *out_known = false;
     auto* ifm = rt::IFM();
     if (!ifm) return {};
     UInt8* base = reinterpret_cast<UInt8*>(ifm);
@@ -1336,12 +1470,15 @@ std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id)
     if (!Readable(bf, 0x08)) return std::string("obiekt");
     if (out_type_id) *out_type_id = bf->typeID;
     const char* nm = BaseFormName(bf);
+    if (out_known) *out_known = true;
     if (nm) return GameStrToUtf8(nm);
     switch (KindOf(bf->typeID)) {
         case WorldEntity::Kind::Door:      return "drzwi";
         case WorldEntity::Kind::Container: return "pojemnik";
         case WorldEntity::Kind::Actor:     return "postać";
-        default:                           return "obiekt";
+        default:
+            if (out_known) *out_known = false;
+            return "obiekt";
     }
 }
 
@@ -1406,6 +1543,29 @@ float GetPlayerAV(uint32_t avCode)
     if (IsBadReadPtr(vtbl, 0x10) || IsBadReadPtr(vtbl[3], 1)) return -1.0f;
     typedef float (__thiscall* GetAVFn)(void* thisptr, UInt32 code);
     return reinterpret_cast<GetAVFn>(vtbl[3])(avOwner, avCode);
+}
+
+// The same call as GetPlayerAV, but for any actor. Used to notice that a shot
+// landed: the engine has no event we can hook here, so the evidence is the
+// target's own health going down.
+float GetRefAV(const void* refr, uint32_t avCode)
+{
+    auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
+    if (!r || IsBadReadPtr(r, 0xA0)) return -1.0f;
+    // Only an ACTOR has actor values. Everything else — a door, a quest marker,
+    // a crate — has something else entirely at +0x9C, and calling through it
+    // would be the same mistake that crashed this game on the skeleton path:
+    // readable memory is not proof of the expected structure.
+    TESForm* bf = r->baseForm;
+    if (!Readable(bf, 0x08)) return -1.0f;
+    if (KindOf(bf->typeID) != WorldEntity::Kind::Actor) return -1.0f;
+    UInt8* avOwner = reinterpret_cast<UInt8*>(r) + 0x9C;
+    if (IsBadReadPtr(avOwner, 4)) return -1.0f;
+    void** vtbl = *reinterpret_cast<void***>(avOwner);
+    if (!vtbl || IsBadReadPtr(vtbl, 0x10) || IsBadReadPtr(vtbl[3], 1)) return -1.0f;
+    typedef float (__thiscall* GetAVFn)(void* thisptr, UInt32 code);
+    float v = reinterpret_cast<GetAVFn>(vtbl[3])(avOwner, avCode);
+    return std::isfinite(v) ? v : -1.0f;
 }
 
 bool IsThirdPerson()
@@ -1664,13 +1824,15 @@ bool RayCastView(const Vec3& from, const Vec3& dir, float maxDist,
     TESObjectREFR* ref = reinterpret_cast<PickFn>(kViewPickFn)(
         caster, f, d, maxDist, &hitDist, &hit);
 
-    // Havok works in metres, the game in its own units — about seven to one.
-    // The pick reports its distance in HAVOK units, so a hit 340 units away
-    // comes back as roughly 48, and comparing that against a range in game
-    // units makes every hit look like a miss. That is what made the ray report
-    // "nothing reachable" at a target the shots were visibly striking.
-    constexpr float kHavokToGame = 6.999125f;
-    if (outDist) *outDist = hitDist * kHavokToGame;
+    // NO conversion. The comment that used to stand here said the pick reports
+    // Havok units and multiplied by seven — and the log says otherwise: a
+    // target measured at 97 units away came back as 704, and another at 97 as
+    // 638. Divide those by seven and you get 100 and 91, which is the true
+    // range give or take the difference between an object's surface and its
+    // origin. The multiplication was the error, and it poisoned every
+    // comparison the solver made between "how far the ray went" and "how far
+    // the target is".
+    if (outDist) *outDist = hitDist;
     if (!ref || IsBadReadPtr(ref, 0x20)) return hit;
     if (outRefId) *outRefId = ref->refID;
     if (outRef)   *outRef   = ref;
@@ -1953,6 +2115,22 @@ bool AimPlayerAtRad(float pitchRad, float yawRad)
         }
     }
 
+    // THE PUBLIC ROTATION FIELDS. This is the layer that was missing, and it
+    // is the one the WEAPON reads.
+    //
+    // The comment above lists three places the aim has to land, and we were
+    // writing two: the engine's internal aim state (the calls above) and the
+    // camera globals (below). The fields the FNV mod labels "used by weapon hit
+    // raycasts" were left alone, because an early experiment wrote ONLY them,
+    // saw the first-person camera ignore it, and concluded they were useless.
+    // They are not useless — they are insufficient on their own. Written
+    // together with the other two, in this order, they are what points the gun
+    // where the camera is already looking. Without them the mod announces the
+    // target, the view is on it, and the shot goes somewhere else — which is
+    // exactly what a magazine emptied into an officer looked like.
+    player->rotX = pitchRad;
+    player->rotZ = yawRad;
+
     // Camera probe.
     //
     // Every value we have been reading back is a value we wrote ourselves,
@@ -2223,6 +2401,56 @@ bool PlayActorAnimGroup(void* actor, uint32_t animGroup)
     return true;
 }
 
+// Stop the walk/run animation. This is NOT the same thing as playing the idle
+// one, and the difference is the whole bug.
+//
+// The movement animations (Forward = 3, FastForward = 7) run in SEQUENCE SLOT 1.
+// The idle runs in slot 0. Asking for the idle therefore does not touch the walk
+// cycle at all — it keeps looping on a player who is standing perfectly still.
+// The game hangs its own FOOTSTEP SOUNDS off that cycle, so to a player who
+// cannot see the screen this is indistinguishable from the walk never stopping:
+// the mod announces "Zatrzymano" and the footsteps carry on. Measured, not
+// guessed — the post-stop probe reported the player moving 0 units while the
+// walking was still audible. The FNV accessibility mod hit this same wall and
+// says so in its own comment; this is that fix on Fallout 3's addresses.
+//
+// AnimData::DeactivateSequence(int slot, float blendOut) at 0x0045DB50, found by
+// matching New Vegas's 0x00496080 structurally rather than by guesswork: the
+// same slot special cases (4 / 0x14 / 0x15), the same recursion into slots
+// 7/0/1, the same member layout — sequence array at this+0xE0 over 8 slots, and
+// the slot's group id at this+0x9C, which is the very array PlayActorAnimGroup
+// above already writes through. Blend 0 = stop now, which is what silences the
+// footsteps on the spot instead of fading them out.
+namespace {
+bool DeactivateAddrOk()
+{
+    // mov eax,[esp+4]; push esi; push edi
+    static const unsigned char kSig[] = { 0x8B, 0x44, 0x24, 0x04, 0x56, 0x57 };
+    static int cached = -1;
+    if (cached < 0) {
+        auto* q = reinterpret_cast<const unsigned char*>(0x0045DB50);
+        bool ok = !IsBadReadPtr((void*)q, sizeof(kSig));
+        for (size_t i = 0; ok && i < sizeof(kSig); ++i) ok = (q[i] == kSig[i]);
+        cached = ok ? 1 : 0;
+        if (!ok) F3A_INFO("Anim: DeactivateSequence signature mismatch at "
+                          "0x0045DB50 " "— not stopping movement animations.");
+    }
+    return cached == 1;
+}
+constexpr int kSequenceMovement = 1;   // the slot Forward/FastForward play in
+} // namespace
+
+bool StopActorMovementAnim(void* actor)
+{
+    if (!actor || !DeactivateAddrOk()) return false;
+    void* animData = ActorAnimData(actor);
+    // The function writes as far as this+0x100, so demand that much.
+    if (!animData || IsBadReadPtr(animData, 0x104)) return false;
+    using DeactivateFn = void (__thiscall*)(void* self, int slot, float blendOut);
+    reinterpret_cast<DeactivateFn>(0x0045DB50)(animData, kSequenceMovement, 0.0f);
+    return true;
+}
+
 // ---- Aiming at a reference's real body ------------------------------------
 //
 // Pointing the crosshair at a thing means pointing it at the thing's BODY, not
@@ -2413,8 +2641,24 @@ constexpr const char* kBoneCandidates[] = {
     "Bip01",          // root — last resort for skinned creatures
 };
 
+// A coordinate we are willing to act on. NaN is the dangerous case, not a big
+// number: every comparison against NaN is false, so a plain "reject if too far"
+// test PASSES it. That is how a bone position of (0,0,0) on a reference whose
+// own origin read as 869108023296 got through and took the game down.
+bool SanePos(float x, float y, float z)
+{
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+    const float kWorldLimit = 4.0e6f;      // far beyond any real cell coordinate
+    return std::fabs(x) < kWorldLimit && std::fabs(y) < kWorldLimit &&
+           std::fabs(z) < kWorldLimit;
+}
+
 bool FindBoneWorldPos(TESObjectREFR* r, Vec3* out, const char** boneName)
 {
+    // Nothing is read off the model until the REFERENCE itself looks real. If
+    // its own position is nonsense then the pointer is not a reference at all,
+    // and walking its 3D is walking arbitrary memory.
+    if (!r || !SanePos(r->posX, r->posY, r->posZ)) return false;
     void* root = RefNiNode(r);
     if (!root) return false;
 
@@ -2429,12 +2673,14 @@ bool FindBoneWorldPos(TESObjectREFR* r, Vec3* out, const char** boneName)
             const char* nm = *reinterpret_cast<const char**>(node + 0x08);
             if (nm && !IsBadReadPtr((void*)nm, 1) && _stricmp(nm, want) == 0) {
                 float* wt = reinterpret_cast<float*>(node + kNiAV_WorldTranslate);
-                // Believe it only if it is actually ON this reference. A wrong
-                // offset would hand back coordinates from somewhere else
-                // entirely, and aiming at those is worse than not aiming.
+                // Believe it only if it is a real coordinate AND actually ON
+                // this reference. Written as an explicit "must be within" test,
+                // never as "reject if beyond": the second form lets NaN pass.
+                if (!SanePos(wt[0], wt[1], wt[2])) break;
                 float dx = wt[0] - r->posX, dy = wt[1] - r->posY,
                       dz = wt[2] - r->posZ;
-                if (dx * dx + dy * dy + dz * dz > 400.0f * 400.0f) break;
+                float d2 = dx * dx + dy * dy + dz * dz;
+                if (!(std::isfinite(d2) && d2 <= 400.0f * 400.0f)) break;
                 *out = { wt[0], wt[1], wt[2] };
                 if (boneName) *boneName = want;
                 return true;
@@ -2463,6 +2709,14 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
     if (how) *how = "none";
     auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
     if (!r || IsBadReadPtr(r, 0x40) || !out) return false;
+    // IsBadReadPtr only proves the memory is readable, not that a reference
+    // lives there. A log caught this function being handed something whose
+    // position read as (0,0,869108023296) — readable, and not a reference.
+    if (!SanePos(r->posX, r->posY, r->posZ)) {
+        F3A_INFO("AimPoint: refusing %p — its position is not a real coordinate "
+                 "(%.0f,%.0f,%.0f)", (void*)r, r->posX, r->posY, r->posZ);
+        return false;
+    }
 
     // Bones first: this is the point a sighted player's crosshair ends up on.
     const char* bone = nullptr;
@@ -2498,6 +2752,32 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
         out->z = r->posZ + oz;
         if (how) *how = "bounds";
         return true;
+    }
+
+    // The model's own world bound: centre and radius of the sphere the
+    // renderer uses for the loaded 3D. It is model-derived, so unlike a fixed
+    // height it is right for a dog, a child and a Super Mutant alike — the FNV
+    // mod uses exactly this as its own last fallback. Thirty per cent of the
+    // radius above the centre lands on the upper body rather than the middle
+    // of the bounding sphere, which for a standing figure is the waist.
+    // Behind the same switch as the bone walk, and for the same reason: it
+    // reaches the model through a virtual call, which is only safe on the
+    // game's own thread.
+    if (void* root = config::Get().aim_bones ? RefNiNode(r) : nullptr) {
+        if (!IsBadReadPtr(root, 0x24)) {
+            auto* wb = *reinterpret_cast<float**>(reinterpret_cast<UInt8*>(root) + 0x20);
+            if (wb && !IsBadReadPtr(wb, 16)) {
+                float cx = wb[0], cy = wb[1], cz = wb[2], rad = wb[3];
+                // "Must be within", never "reject if beyond": NaN passes the
+                // second form, and a NaN aim point crashed this game twice.
+                if (SanePos(cx, cy, cz) && std::isfinite(rad) &&
+                    rad >= 0.0f && rad <= 2000.0f) {
+                    *out = { cx, cy, cz + rad * 0.3f };
+                    if (how) *how = "model-bound";
+                    return true;
+                }
+            }
+        }
     }
 
     // Last resort: the origin, lifted to roughly chest height. A guess, and
@@ -2608,6 +2888,8 @@ constexpr UInt32 kTrait_VatsBodyPartId = 0x27D4;
 // and not the name label, which turned out not to be set at all in play.
 constexpr UInt32 kTrait_VatsLimbSelected = 0x27D6;
 
+int g_limb_tiles_seen = 0;   // all limb_percent tiles, before the visible filter
+
 void CollectVatsLimbs(Tile* t, int depth, std::vector<VatsLimb>& out)
 {
     if (!t || depth > 10 || out.size() >= 32) return;
@@ -2617,11 +2899,20 @@ void CollectVatsLimbs(Tile* t, int depth, std::vector<VatsLimb>& out)
     // dump settled it: of eight tiles, exactly four carry visible=1, and those
     // four are exactly the four distinct body parts. So the visible one is the
     // representative tile and the rest are duplicates.
+    // Every limb tile is counted, visible or not, so the log can answer the
+    // question the visibility filter raises: are the other parts simply not
+    // drawn yet, or are they there and hidden? A target that offered exactly
+    // ONE part called "Butch" — the target's own name, not a body part — is
+    // either a menu that had not finished drawing or a filter that is too
+    // strict, and only the counts tell those apart.
+    if (TileNameHas(t, "limb_percent")) ++g_limb_tiles_seen;
     if (TileNameHas(t, "limb_percent") && TileVisible(t)) {
         VatsLimb l;
         l.tile = t;
         l.x = TileAbsX(t);
         l.y = TileAbsY(t);
+        l.w = TileNum(t, kTileValue_width);
+        l.h = TileNum(t, kTileValue_height);
         l.part_id = (int)TileNum(t, kTrait_VatsBodyPartId);
         l.selected = TileNum(t, kTrait_VatsLimbSelected) != 0.0f;
         if (Tile* n = FindChildByName(t, "limb_name", 3)) {
@@ -2673,6 +2964,7 @@ void CollectVatsLimbs(Tile* t, int depth, std::vector<VatsLimb>& out)
 std::vector<VatsLimb> GetVatsLimbs()
 {
     std::vector<VatsLimb> out;
+    g_limb_tiles_seen = 0;
     auto* ifm = rt::IFM();
     if (!ifm || !ifm->menuRoot) return out;
     struct Node { Tile::ChildNode* item; Node* next; };
@@ -2689,15 +2981,39 @@ std::vector<VatsLimb> GetVatsLimbs()
         }
         node = node->next;
     }
+    // A STABLE ORDER. The tile tree is walked fresh every frame and comes back
+    // in a different order each time — the log caught the same four parts as
+    // [Korpus, Prawe nogi, Lewe nogi, Głowa] on one frame and
+    // [Prawe nogi, Lewe nogi, Głowa, Korpus] on the next. An index into a list
+    // that reshuffles itself is meaningless, which is why stepping with W and S
+    // jumped about and kept landing back on the head. Sorted by the engine's own
+    // part id, then by name, so position N means the same part from one frame to
+    // the next.
+    std::sort(out.begin(), out.end(),
+              [](const VatsLimb& a, const VatsLimb& b) {
+                  if (a.part_id != b.part_id) return a.part_id < b.part_id;
+                  return a.name < b.name;
+              });
+
     static int  last_n = -1;
     static int  last_sel = -1;
     int sel = -1;
     for (size_t i = 0; i < out.size(); ++i) if (out[i].selected) { sel = (int)i; break; }
     if ((int)out.size() != last_n || sel != last_sel) {
+        // The whole list, not just the pick. Which parts the engine is even
+        // offering is the thing we cannot see from the outside, and "W and S
+        // do not read body parts" turned out to be a question about this list
+        // rather than about the keys.
+        std::string all;
+        for (size_t i = 0; i < out.size(); ++i) {
+            if (i) all += ", ";
+            all += out[i].name;
+        }
         last_n = (int)out.size();
         last_sel = sel;
-        F3A_INFO("GetVatsLimbs: %d limb(s), selected=%d (%s)", last_n, sel,
-                 sel >= 0 ? out[sel].name.c_str() : "none");
+        F3A_INFO("GetVatsLimbs: %d of %d tile(s) usable, selected=%d (%s) | %s",
+                 last_n, g_limb_tiles_seen, sel,
+                 sel >= 0 ? out[sel].name.c_str() : "none", all.c_str());
     }
     return out;
 }
@@ -2752,8 +3068,10 @@ bool GetVatsPick(VatsPick* out)
     out->queued = GetVatsQueuedCount();
     auto limbs = GetVatsLimbs();
     out->count = (int)limbs.size();
-    for (size_t i = 0; i < limbs.size() && i < 8; ++i)
+    for (size_t i = 0; i < limbs.size() && i < 8; ++i) {
         std::snprintf(out->names[i], sizeof(out->names[i]), "%s", limbs[i].name.c_str());
+        std::snprintf(out->chances[i], sizeof(out->chances[i]), "%s", limbs[i].chance.c_str());
+    }
     for (size_t i = 0; i < limbs.size(); ++i) {
         if (!limbs[i].selected) continue;
         out->index = (int)i + 1;
@@ -2826,6 +3144,22 @@ std::string StripControlPrefix(const std::string& token)
 
 // The readable name of a DirectInput scancode, from Windows — so it comes out
 // in the user's own language and matches their keyboard layout.
+// The scancode the PLAYER has bound to a control, read from the game's own
+// bind table. Index 5 is Activate/Use.
+//
+// This exists because the Use key was hard-coded to E. E is only the DEFAULT:
+// a player who has remapped it — and a blind player is quite likely to have —
+// got a keypress sent to a key that does nothing, with no way to tell from the
+// outside why activating silently failed. 0 means "bound to nothing" (or to a
+// mouse button), and the caller falls back to the default.
+UInt8 BoundScancode(UInt32 controlIndex)
+{
+    auto* globs = *reinterpret_cast<OSInputGlobals**>(0x01176524);
+    if (!globs || IsBadReadPtr(globs, 0x1BC0)) return 0;
+    if (controlIndex >= OSInputGlobals::kMaxControlBinds) return 0;
+    return globs->keyBinds[controlIndex];
+}
+
 std::string KeyNameForScancode(UInt8 dik)
 {
     if (dik == 0 || dik == 0xFF) return {};
@@ -2878,6 +3212,11 @@ std::string ExpandControlTokens(const std::string& text)
     }
     return out;
 }
+
+// The player's own Activate/Use key, or 0 when it is on a mouse button or
+// unbound. Defined here, after BoundScancode, which it uses.
+uint8_t GetUseKeyScancode() { return BoundScancode(5); }
+
 
 // ---- Native "face this point" ---------------------------------------------
 //
@@ -3068,6 +3407,17 @@ bool IsLoadDoor(const void* doorRefr)
 // the target reference? (I.e. does its far side share the target's cell/world-
 // space.) Lets cross-worldspace autowalk prefer the door that actually leads
 // toward the goal. False for non-load doors and on any unreadable pointer.
+// Is this reference inside? Needed to tell a wasteland route from a route
+// through a building: outdoors the way on is the nearest exterior door, but in
+// a place like Vault 101 every step of the way is another interior, and a rule
+// that refuses those has nowhere left to go.
+bool RefIsInInterior(const void* refr)
+{
+    TESObjectCELL* c = RefCellGuarded(refr);
+    if (!c || IsBadReadPtr(c, 0xC4)) return false;
+    return c->worldSpace == nullptr;
+}
+
 bool DoorLeadsToTargetSpace(const void* doorRefr, const void* targetRefr)
 {
     const TESObjectREFR* linked = DoorLinkedRef(doorRefr);
@@ -3315,6 +3665,22 @@ bool TileNameHas(const Tile* t, const char* needle)
 // (`lb_saveload_template_item`) have no target trait at all, yet they're the
 // rows the highlight lands on. Static text (confirm_question etc.) has no
 // target and no row-ish name, so it stays excluded.
+// A row the menu has HIDDEN — its visible trait present and 0. The Pip-Boy's
+// inventory keeps every item of every category in one list and hides the
+// ones outside the current tab, at the very same y as the shown ones; matched
+// by height alone, the highlight on Med-X read out as "Kombinezon Krypty 101"
+// sitting hidden underneath it. Only an explicit 0 counts: rows in other menus
+// that carry no visible trait at all must stay selectable.
+bool TileHiddenExplicitly(const Tile* t)
+{
+    if (!t) return false;
+    for (UInt32 i = 0; i < t->values.size; ++i) {
+        Tile::Value* v = t->values.data[i];
+        if (v && v->id == kTileValue_visible) return v->num == 0.0f;
+    }
+    return false;
+}
+
 bool TileSelectable(Tile* t, const char*& out_label)
 {
     if (!t) return false;
@@ -3412,7 +3778,7 @@ void FindRowAtY(Tile* root, float target_y, int depth,
 {
     if (!root || depth > 14) return;
     const char* label = nullptr;
-    if (TileSelectable(root, label)) {
+    if (TileSelectable(root, label) && !TileHiddenExplicitly(root)) {
         float dy = TileAbsY(root) - target_y;
         if (dy < 0) dy = -dy;
         if (dy < best_dy) { best_dy = dy; best_tile = root; }
@@ -3426,6 +3792,27 @@ void FindRowAtY(Tile* root, float target_y, int depth,
         }
         node = node->next;
     }
+}
+
+// The row the game itself treats as selected: keyboard navigation moves the
+// interface's ACTIVE tile, which carries mouseover=1 (only one tile in the
+// whole interface has it at a time). Hidden rows never count.
+Tile* FindMouseoverRow(Tile* root, int depth)
+{
+    if (!root || depth > 14) return nullptr;
+    const char* label = nullptr;
+    if (TileNum(root, kTileValue_mouseover) != 0.0f &&
+        TileSelectable(root, label) && !TileHiddenExplicitly(root))
+        return root;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&root->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        Tile::ChildNode* cn = node->item;
+        if (cn && cn->child)
+            if (Tile* r = FindMouseoverRow(cn->child, depth + 1)) return r;
+        node = node->next;
+    }
+    return nullptr;
 }
 
 // Recurse over the whole menu tree. For every VISIBLE highlight box (one
@@ -3444,7 +3831,11 @@ void ScanHighlights(Tile* root, int depth,
         float target_y = TileAbsY(root);
         float dy = 28.0f;               // tolerance ~ half a row height
         Tile* tile = nullptr;
-        FindRowAtY(listbox, target_y, 0, dy, tile);
+        // The game's own mark first: the row with mouseover. Matching the
+        // highlight by height alone read the wrong row whenever rows of
+        // another tab sat at the same height, or rows had uneven heights.
+        if (Tile* mo = FindMouseoverRow(listbox, 0)) { tile = mo; dy = -1.0f; }
+        else FindRowAtY(listbox, target_y, 0, dy, tile);
         if (tile && dy < best_dy) {
             best_dy = dy;
             best_tile = tile;
@@ -3877,32 +4268,196 @@ bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs)
     return true;
 }
 
-bool FocusContainerList(bool container_side)
-{
-    Tile* list = ContainerTile(container_side ? "CM_Container_InventoryList"
-                                              : "CM_Items_InventoryList", 4);
-    Tile* row = nullptr;
-    int n = CountListRows(list, &row);
-    if (n <= 0 || !row) return false;
+// The container menu's own column switch.
+//
+// FO3's ContainerMenu answers the same special-key codes as New Vegas's (the
+// FNV mod leans on them): its HandleSpecialKeyInput — vtable slot 14 — moves
+// the focus to YOUR list on 13 (Shift+Left) and to the CONTAINER's on 14
+// (Shift+Right), and refuses when that list is empty. Disassembly of
+// 0x0063ADE0 (FO3 1.7.0.3); the focused list is the pointer at +0xE4, which
+// equals this+0x84 for your side and this+0xB4 for the container's.
+//
+// The old way pressed the first ROW of the other list. In this menu a row
+// press MOVES that item across — a side switch that took or gave something.
+// Calling the menu's own key handler is exactly what the keyboard would do.
+namespace {
+constexpr UInt32 kContainerMenuVtbl   = 0x00E04E54;
+constexpr UInt32 kContainerSpecialKey = 0x0063ADE0;   // vtable slot 14
 
+UInt8* FindContainerMenu()
+{
     auto* ifm = rt::IFM();
-    if (!ifm || !ifm->menuRoot) return false;
+    if (!ifm || !ifm->menuRoot) return nullptr;
     struct Node { Tile::ChildNode* item; Node* next; };
     auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
     for (int safety = 0; node && safety < 4096; ++safety) {
+        if (!Readable(node, sizeof(Node))) return nullptr;
         Tile::ChildNode* cn = node->item;
         node = node->next;
-        if (!cn || !cn->child) continue;
+        if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
         auto* tm = reinterpret_cast<TileMenu*>(cn->child);
+        if (!Readable(tm, sizeof(TileMenu))) continue;
         Menu* m = tm->menu;
-        if (!m || m->typeID != kMenuType_Container) continue;
-        UInt32 id = (UInt32)TileNum(row, kTileValue_id);
-        F3A_INFO("Container: focusing the %s list, first row id=%u",
-                 container_side ? "container" : "player", id);
-        m->HandleClick(id, row);
-        return true;
+        if (!m || !Readable(m, 0xE8) || m->typeID != kMenuType_Container) continue;
+        auto* raw = reinterpret_cast<UInt8*>(m);
+        // Only the build this was read from: the vtable and its slot must be
+        // exactly the ones disassembled, or nothing here may be trusted.
+        UInt32 vt = *reinterpret_cast<UInt32*>(raw);
+        if (vt != kContainerMenuVtbl || !Readable(reinterpret_cast<void*>(vt), 15 * 4))
+            return nullptr;
+        if (reinterpret_cast<UInt32*>(vt)[14] != kContainerSpecialKey) return nullptr;
+        return raw;
     }
-    return false;
+    return nullptr;
+}
+
+int FocusSideOf(const UInt8* menu)
+{
+    const UInt8* cur = *reinterpret_cast<const UInt8* const*>(menu + 0xE4);
+    if (cur == menu + 0xB4) return 1;
+    if (cur == menu + 0x84) return 0;
+    return -1;
+}
+} // namespace
+
+int ContainerFocusSide()
+{
+    const UInt8* m = FindContainerMenu();
+    return m ? FocusSideOf(m) : -1;
+}
+
+std::optional<MenuSelection> GetContainerSelection(int* out_side)
+{
+    if (out_side) *out_side = -1;
+    UInt8* m = FindContainerMenu();
+    if (!m) return std::nullopt;
+    // The focused column's ListBox, and ITS selected row: ListBox+0x10 is the
+    // selected tile (the game's own column switch reads it there — 0x00632250
+    // takes its list index, trait 0xFAC, from [list+0x10]); +0x0C is the
+    // list's tile. Read from the menu, not guessed from where a highlight box
+    // happens to sit — with two columns, two highlight boxes match two rows
+    // equally well, and the wrong one kept winning.
+    int side = FocusSideOf(m);
+    if (side < 0) return std::nullopt;
+    const UInt8* list = m + (side == 1 ? 0xB4 : 0x84);
+    if (!Readable(list, 0x18)) return std::nullopt;
+    Tile* box = *reinterpret_cast<Tile* const*>(list + 0x0C);
+    Tile* row = *reinterpret_cast<Tile* const*>(list + 0x10);
+    if (!Readable(box, sizeof(Tile)) || !Readable(row, sizeof(Tile)))
+        return std::nullopt;
+    bool inside = false;                 // the row must belong to that list
+    int depth = 0;
+    for (Tile* p = row; p && depth < 12; p = p->parent, ++depth) {
+        if (!Readable(p, sizeof(Tile))) break;
+        if (p == box) { inside = true; break; }
+    }
+    if (!inside) return std::nullopt;
+    MenuSelection sel;
+    DescribeRowParts(row, sel.label, sel.value);
+    if (sel.label.empty() && sel.value.empty()) return std::nullopt;
+    sel.container = box;
+    if (out_side) *out_side = side;
+    return sel;
+}
+
+// Visible rows of a container column (row tiles carry id 15; rows filtered
+// out by the category have visible=0 and list index -1).
+int CountVisibleRows(Tile* box)
+{
+    int n = 0;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&box->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        if (!Readable(node, sizeof(Node))) break;
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+        Tile* c = cn->child;
+        if (TileNum(c, kTileValue_id) == 15.0f && !TileHiddenExplicitly(c) &&
+            TileNum(c, kTileValue_listindex) >= 0.0f)
+            ++n;
+    }
+    return n;
+}
+
+int StepContainerSelection(bool container_side, int delta)
+{
+    UInt8* m = FindContainerMenu();
+    if (!m) return -1;
+    const int want = container_side ? 1 : 0;
+    if (FocusSideOf(m) != want) {
+        // The game's own Up/Down roam YOUR column, and the moment they put the
+        // mouseover on one of your rows the menu switches the focus back to
+        // it. Take the focus back first, the game's own way.
+        using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
+        reinterpret_cast<SpecialKey>(kContainerSpecialKey)(
+            m, container_side ? 14u : 13u, 1.0f);
+        if (FocusSideOf(m) != want) return 0;
+    }
+    UInt8* list = m + (container_side ? 0xB4 : 0x84);
+    if (!Readable(list, 0x28)) return -1;
+    Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
+    if (!Readable(box, sizeof(Tile))) return -1;
+    int n = CountVisibleRows(box);
+    if (n <= 0) return 0;
+    Tile* row = *reinterpret_cast<Tile**>(list + 0x10);
+    int cur = Readable(row, sizeof(Tile)) ? (int)TileNum(row, kTileValue_listindex)
+                                          : -1;
+    if (cur < 0 || cur >= n) {
+        float saved = *reinterpret_cast<float*>(list + 0x24);
+        cur = std::isfinite(saved) ? (int)saved : 0;
+        if (cur < 0) cur = 0;
+        if (cur >= n) cur = n - 1;
+    }
+    int nw = cur + delta;
+    if (nw < 0) nw = 0;
+    if (nw > n - 1) nw = n - 1;
+    if (nw == cur && row) return 2;            // already at that end
+    // Exactly what the game does when it hands the focus to a column: store
+    // the row index the list should select (+0x24, a float) and run the
+    // list's select routine (0x00633140), which picks that row, makes it the
+    // interface's active tile and tells the menu — so the item panel, and the
+    // game's own Enter, follow it.
+    *reinterpret_cast<float*>(list + 0x24) = (float)nw;
+    using SelectFn = void (__thiscall*)(void*, UInt32);
+    reinterpret_cast<SelectFn>(0x00633140)(list, 1);
+    F3A_INFO("Container: step %+d in the %s column: row %d -> %d of %d",
+             delta, container_side ? "container" : "player", cur, nw, n);
+    return 1;
+}
+
+int SwitchContainerSide(bool container_side)
+{
+    UInt8* m = FindContainerMenu();
+    if (!m) return -1;
+    using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
+    auto fn = reinterpret_cast<SpecialKey>(kContainerSpecialKey);
+    bool handled = fn(m, container_side ? 14u : 13u, 1.0f);
+    int side = FocusSideOf(m);
+    F3A_INFO("Container: side key %u -> handled=%d, focus now %d (1=container 0=yours)",
+             container_side ? 14u : 13u, (int)handled, side);
+    return side == (container_side ? 1 : 0) ? 1 : 0;
+}
+
+// The category filter either side of a column's title.
+//
+// Both columns carry one: a dump of an open locker shows
+// CM_Items_LeftFilterArrow (id 0) and CM_Items_RightFilterArrow (id 2) beside
+// 'SPRZĘT', and CM_Container_LeftFilterArrow (id 5) / RightFilterArrow (id 7)
+// beside the container's name. They are ordinary buttons with ordinary ids,
+// and the engine offered them to nothing but the mouse — which is why forty
+// rows of looted junk could only ever be read one arrow key at a time.
+//
+// Safe for HandleClick: an arrow neither closes the menu nor moves an item,
+// the two things that crash this path.
+bool ClickContainerFilter(bool container_side, bool next)
+{
+    const char* nm = container_side
+        ? (next ? "CM_Container_RightFilterArrow"
+                : "CM_Container_LeftFilterArrow")
+        : (next ? "CM_Items_RightFilterArrow"
+                : "CM_Items_LeftFilterArrow");
+    return ClickMenuButton(kMenuType_Container, nm, 4);
 }
 
 bool ClickVatsButton(const char* btnName)
@@ -3944,6 +4499,98 @@ void SetTileFloat(Tile* tile, UInt32 traitId, float value)
     }
     using PFN = void (__thiscall*)(Tile*, UInt32, float, int);
     reinterpret_cast<PFN>(0x00BEE190)(tile, traitId, value, 0);
+}
+
+// THE MENU CURSOR, as the engine itself keeps it.
+//
+// InterfaceManager::cursor (+0x28) is a Tile, and a tile's position lives in
+// its own x/y traits — the same traits we already read off the VATS body-part
+// markers, so the two are in one coordinate space and directly comparable.
+//
+// This is what the VATS work has been missing. Fallout 3 picks the body part
+// from the CURSOR (proven in play: the selection sits on whichever marker the
+// cursor rests on, W and S do nothing, and the queue click lands on that same
+// part). Until now the only way to move it was to shove the real mouse with
+// SendInput, which moves the SYSTEM cursor — out of the window, onto whatever
+// else is on screen, and into the mess the player reported. Moving the engine's
+// own tile asks the game to put its cursor somewhere, and the operating system
+// never hears about it.
+//
+// Writing goes through the engine's own trait setter, which re-evaluates
+// whatever depends on the value, so the menu sees the move as a real one.
+// Main thread only: it calls into the game.
+bool SetMenuCursorPos(float x, float y)
+{
+    auto* ifm = rt::IFM();
+    if (!ifm || IsBadReadPtr(ifm, 0x2C)) return false;
+    Tile* cur = ifm->cursor;
+    if (!cur || IsBadReadPtr(cur, 0x40)) return false;
+    // Must be within, never "reject if beyond": NaN passes the second form.
+    if (!(std::isfinite(x) && std::isfinite(y) &&
+          std::fabs(x) <= 20000.0f && std::fabs(y) <= 20000.0f)) return false;
+    // The traits are relative to the parent, and the values we are handed are
+    // absolute, so take off whatever the parents contribute.
+    float baseX = 0.0f, baseY = 0.0f;
+    for (Tile* pt = cur->parent; pt; pt = pt->parent) {
+        baseX += TileNum(pt, kTileValue_x);
+        baseY += TileNum(pt, kTileValue_y);
+    }
+    SetTileFloat(cur, kTileValue_x, x - baseX);
+    SetTileFloat(cur, kTileValue_y, y - baseY);
+    return true;
+}
+
+
+// The game's cursor, as the engine itself moves it (FO3 1.7.0.3, the cursor
+// update at 0x0061FA8D..0x0061FC66):
+//   * each frame the new position = the cursor tile's NiNode local translate
+//     (node = [cursorTile+0x2C], x @+0x58, z @+0x60) plus the mouse delta;
+//   * if that differs from the stored position (IFM+0x2C x, +0x34 z) the
+//     engine stores it, sets "cursor moved" (IFM+0xED) and recomputes the
+//     screen point: IFM+0x38 = W/2 + x*W/Fw, IFM+0x40 = H/2 - z*H/Fh, where
+//     W,H = the screen size (ints at 0x00F4CC4C / 0x00F4CC50) and
+//     Fw = W/H*960 (or 1280 when not wider than tall), Fh = 960 (or H/W*1280).
+// So the UI is 960 units tall, and a tile at (x, y) — origin top-left — sits at
+// node (x - Fw/2, Fh/2 - y). Writing the node translate is a mouse move as far
+// as the engine can tell.
+bool MoveEngineCursorTo(float x, float y)
+{
+    if (!(std::isfinite(x) && std::isfinite(y))) return false;
+    auto* ifm = rt::IFM();
+    if (!Readable(ifm, 0xF0)) return false;
+    UInt8* raw = reinterpret_cast<UInt8*>(ifm);
+    Tile* cur = ifm->cursor;
+    if (!Readable(cur, 0x30)) return false;
+    UInt8* node = *reinterpret_cast<UInt8**>(reinterpret_cast<UInt8*>(cur) + 0x2C);
+    if (!Readable(node, 0x64)) return false;
+    const int* pw = reinterpret_cast<const int*>(0x00F4CC4C);
+    const int* ph = reinterpret_cast<const int*>(0x00F4CC50);
+    if (!Readable(pw, 4) || !Readable(ph, 4)) return false;
+    int W = *pw, H = *ph;
+    if (!(W >= 320 && W <= 16384 && H >= 200 && H <= 16384)) return false;
+    float Fw = (H < W) ? (float)W / (float)H * 960.0f : 1280.0f;
+    float Fh = (W < H) ? (float)H / (float)W * 1280.0f : 960.0f;
+
+    // Self-check before touching anything: the engine's stored screen point
+    // must be what this formula gives for its stored position. If another
+    // build moved any of these, they disagree and we write nothing.
+    float px = *reinterpret_cast<float*>(raw + 0x2C);
+    float pz = *reinterpret_cast<float*>(raw + 0x34);
+    float sx = *reinterpret_cast<float*>(raw + 0x38);
+    float sy = *reinterpret_cast<float*>(raw + 0x40);
+    float ex = W * 0.5f + px * (float)W / Fw;
+    float ey = H * 0.5f - pz * (float)H / Fh;
+    if (!(std::fabs(ex - sx) <= 2.0f && std::fabs(ey - sy) <= 2.0f)) {
+        F3A_WARN("MoveEngineCursorTo: layout check failed (pos %.1f,%.1f screen "
+                 "%.1f,%.1f expected %.1f,%.1f, %dx%d) — not moving",
+                 px, pz, sx, sy, ex, ey, W, H);
+        return false;
+    }
+    float nx = x - Fw * 0.5f, nz = Fh * 0.5f - y;
+    if (!(std::fabs(nx) <= Fw * 0.5f && std::fabs(nz) <= Fh * 0.5f)) return false;
+    *reinterpret_cast<float*>(node + 0x58) = nx;
+    *reinterpret_cast<float*>(node + 0x60) = nz;
+    return true;
 }
 
 bool ClickMapMarkerTile(const void* tile)
@@ -4728,6 +5375,22 @@ std::string GetHudMessage()
     if (b == std::string::npos) return {};
     size_t e = out.find_last_not_of(" \t\n\r");
     return out.substr(b, e - b + 1);
+}
+
+// The level-up banner on the XP meter (HUDMainMenu → XPMeter → XPLevelUp,
+// "NASTĘPNY POZIOM" in the Polish build). Hidden (visible=0) except while the
+// game is showing a level-up. Empty when not showing.
+std::string GetHudLevelUpText()
+{
+    Tile* hud = FindVisibleMenuTile(kMenuType_HUDMain);
+    if (!hud) return {};
+    Tile* meter = FindChildByName(hud, "XPMeter", 3);
+    if (!meter) return {};
+    Tile* lvl = FindChildByName(meter, "XPLevelUp", 2);
+    if (!lvl || !TileVisible(lvl) || TileNum(lvl, kTileValue_alpha) <= 0.0f)
+        return {};
+    const char* s = TileStringTrait(lvl);
+    return s && *s ? GameStrToUtf8(s) : std::string();
 }
 
 // Everything the HUD is currently SAYING, as separate lines.

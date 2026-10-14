@@ -49,9 +49,45 @@ function Write-Step([string] $Text) {
     if ($LogPath) { Add-Content -Path $LogPath -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $Text) -Encoding utf8 }
 }
 
+# A failed step THROWS instead of ending the script: one piece that cannot be
+# fetched (FOSE's site down, a patcher that will not unpack) must not stop the
+# rest — above all, it must not stop the mod itself from being installed, which
+# is what happened when the mod was the last step of the run.
+$script:ExitCode = 0
 function Fail([string] $Text, [int] $Code) {
     Write-Step "BŁĄD: $Text"
-    exit $Code
+    throw [System.Exception]::new("F3A:$Code")
+}
+
+function Invoke-Step([string] $Name, [scriptblock] $Body) {
+    try {
+        & $Body
+    } catch {
+        $code = 3
+        if ($_.Exception.Message -match '^F3A:(\d+)$') { $code = [int]$Matches[1] }
+        else { Write-Step "BŁĄD w kroku '$Name': $($_.Exception.Message)" }
+        if ($code -gt $script:ExitCode) { $script:ExitCode = $code }
+        Write-Step "Krok '$Name' nie powiódł się — instaluję dalej pozostałe."
+    }
+}
+
+# Copy a folder's contents into another, file by file. Copy-Item -Recurse with
+# a wildcard has corner cases in Windows PowerShell 5.1 (nesting a folder that
+# already exists inside itself), and with the game under Program Files a copy
+# that quietly lands in the wrong place looks exactly like "the mod did not
+# install". This one creates each folder it needs and copies each file to the
+# exact relative path, so the result is the archive's layout, every time.
+function Copy-Tree([string] $From, [string] $To) {
+    $base = (Resolve-Path -LiteralPath $From).Path.TrimEnd('\')
+    foreach ($f in Get-ChildItem -LiteralPath $From -Recurse -File) {
+        $rel = $f.FullName.Substring($base.Length).TrimStart('\')
+        $dst = Join-Path $To $rel
+        $dstDir = Split-Path $dst -Parent
+        if (-not (Test-Path -LiteralPath $dstDir)) {
+            New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+        }
+        Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
+    }
 }
 
 # --- checks ------------------------------------------------------------------
@@ -197,6 +233,11 @@ function Find-WinRar {
 }
 
 function Expand-Any([string] $Archive, [string] $Destination) {
+    # Start from an empty folder: leftovers of an earlier run would be copied
+    # into the game along with the new files.
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+    }
     New-Item -ItemType Directory -Force $Destination | Out-Null
 
     if ($Archive -like "*.zip") {
@@ -253,18 +294,31 @@ function Install-Mod([string] $Zip) {
         Write-Step "Instaluję mod"
     }
 
-    # The archive is laid out exactly as the game folder, so a straight copy is
-    # the whole install.
-    Copy-Item -Path (Join-Path $dir "*") -Destination $GamePath -Recurse -Force
+    # The archive is laid out as the game folder (Data\FOSE\Plugins\... plus the
+    # screen-reader DLLs beside Fallout3.exe). Find that root by the plugin
+    # itself rather than trusting the layout: an archive that gained a top
+    # folder would otherwise install everything one level too deep.
+    $dll = Get-ChildItem -LiteralPath $dir -Recurse -File -Filter "fallout3_access.dll" | Select-Object -First 1
+    if (-not $dll) { Fail "W archiwum moda nie ma fallout3_access.dll." 3 }
+    if ($dll.Directory.Parent.Parent.Name -ne "Data") {
+        Fail "Nieoczekiwany układ archiwum moda: $($dll.FullName)" 3
+    }
+    $root = $dll.Directory.Parent.Parent.Parent      # Plugins -> FOSE -> Data -> root
+    Write-Step "Kopiuję pliki moda do: $GamePath"
+    Copy-Tree $root.FullName $GamePath
 
+    $plugins = Join-Path $GamePath "Data\FOSE\Plugins"
     if ($keepIni) {
-        Copy-Item $iniPath (Join-Path $GamePath "Data\FOSE\Plugins\Fallout3Access.ini.nowy") -Force
-        Copy-Item $keepIni $iniPath -Force
+        Copy-Item -LiteralPath $iniPath -Destination (Join-Path $plugins "Fallout3Access.ini.nowy") -Force
+        Copy-Item -LiteralPath $keepIni -Destination $iniPath -Force
         Write-Step "Wzorcowy plik nowej wersji leży obok jako Fallout3Access.ini.nowy"
     }
 
-    if (-not (Test-Path (Join-Path $GamePath "Data\FOSE\Plugins\fallout3_access.dll"))) {
-        Fail "Po kopiowaniu brak fallout3_access.dll w Data\FOSE\Plugins." 3
+    # Both files, where the game looks for them — checked, not assumed.
+    foreach ($name in @("fallout3_access.dll", "Fallout3Access.ini")) {
+        $f = Join-Path $plugins $name
+        if (-not (Test-Path -LiteralPath $f)) { Fail "Po kopiowaniu brak $name w $plugins" 3 }
+        Write-Step "Jest: $f"
     }
     Write-Step "Mod zainstalowany"
 }
@@ -295,13 +349,20 @@ function Invoke-Patcher([string] $Archive) {
     if ($SkipPatcher) { Write-Step "Pomijam patcher (na życzenie)"; return }
     $dir = Join-Path $script:Work "patcher"
     Expand-Any $Archive $dir
-    $exe = Get-ChildItem $dir -Recurse -Filter "*.exe" | Select-Object -First 1
-    if (-not $exe) { Fail "W archiwum patchera nie ma pliku .exe" 3 }
-    # The patcher works in place, on the folder it is run from.
-    Copy-Item -Path (Join-Path $exe.Directory.FullName "*") -Destination $GamePath -Recurse -Force
-    Write-Step "Uruchamiam patcher — potwierdź w jego oknie, potem wróć tutaj"
-    Start-Process -FilePath (Join-Path $GamePath $exe.Name) -WorkingDirectory $GamePath -Wait
-    Write-Step "Patcher zakończony"
+    # Patcher.exe by NAME: the archive also carries xdelta3.exe, and running
+    # "the first .exe found" could start that instead and patch nothing.
+    $exe = Get-ChildItem -LiteralPath $dir -Recurse -File -Filter "Patcher.exe" | Select-Object -First 1
+    if (-not $exe) { Fail "W archiwum patchera nie ma Patcher.exe" 3 }
+    # The patcher only works from the game folder (its readme: unpack ALL files
+    # next to Fallout3.exe, no subfolder), so it is copied there and run there.
+    Write-Step "Kopiuję patcher do folderu gry"
+    Copy-Tree $exe.Directory.FullName $GamePath
+    Write-Step "Uruchamiam patcher — potwierdź w jego oknie (Enter), potem wróć tutaj"
+    $proc = Start-Process -FilePath (Join-Path $GamePath $exe.Name) -WorkingDirectory $GamePath -Wait -PassThru
+    Write-Step "Patcher zakończony (kod $($proc.ExitCode)). Wersja gry teraz: $(Get-GameBuild)"
+    if ((Get-GameBuild) -notlike "1.7.0.3*") {
+        Write-Step "UWAGA: gra nadal nie jest w wersji 1.7.0.3 — sprawdź okno patchera."
+    }
 }
 
 # --- main --------------------------------------------------------------------
@@ -309,19 +370,12 @@ function Invoke-Patcher([string] $Archive) {
 Test-GameFolder
 Write-Step "Wersja gry: $(Get-GameBuild)"
 
-$premium = Test-NexusKey
+# The mod FIRST. It is the one piece this installer exists for, and the other
+# steps can fail for reasons outside anyone's control (a site down, a Nexus
+# account without Premium, an archive tool missing).
+Invoke-Step "mod" { Install-Mod (Get-LatestModRelease) }
 
-if (-not $SkipPatcher) {
-    $patcher = $PatcherArchive
-    if (-not $patcher) { $patcher = Get-NexusFile -ModId 24913 }
-    if ($patcher) {
-        Invoke-Patcher $patcher
-    } else {
-        Write-Step "Patcher nie został pobrany automatycznie."
-        Write-Step "Pobierz go ręcznie: https://www.nexusmods.com/fallout3/mods/24913"
-        Write-Step "potem uruchom ten instalator ponownie i wskaż pobrany plik."
-    }
-}
+$premium = Test-NexusKey
 
 # Loot Menu Updated is a REQUIREMENT, not a nicety: it replaces the container
 # screen with a list drawn on the HUD, and the mod reads that list out - the
@@ -334,7 +388,7 @@ function Install-LootMenu {
     if ($file) {
         $dir = Join-Path $script:Work "lootmenu"
         Expand-Any $file $dir
-        Copy-Item -Path (Join-Path $dir "*") -Destination $GamePath -Recurse -Force
+        Copy-Tree $dir $GamePath
         if (Test-Path $dll) { Write-Step "Loot Menu Updated zainstalowany"; return }
         Write-Step "Rozpakowalem Loot Menu, ale nie widze F3LootMenu.dll"
     }
@@ -346,9 +400,26 @@ function Install-LootMenu {
 
 # The path differs from the stable download: 1.3 beta 2 lives under /beta/.
 # Verified live rather than guessed — the obvious /download/ URL 404s.
-Install-Fose "https://fose.silverlock.org/beta/fose_v1_3_beta2.7z"
-Install-LootMenu
-Install-Mod (Get-LatestModRelease)
+Invoke-Step "FOSE" { Install-Fose "https://fose.silverlock.org/beta/fose_v1_3_beta2.7z" }
+Invoke-Step "Loot Menu" { Install-LootMenu }
 
-Write-Step "Gotowe. Uruchamiaj grę przez fose_loader.exe, nie Fallout3.exe."
-exit 0
+if (-not $SkipPatcher) {
+    Invoke-Step "patcher" {
+        $patcher = $PatcherArchive
+        if (-not $patcher) { $patcher = Get-NexusFile -ModId 24913 }
+        if ($patcher) {
+            Invoke-Patcher $patcher
+        } else {
+            Write-Step "Patcher nie został pobrany automatycznie."
+            Write-Step "Pobierz go ręcznie: https://www.nexusmods.com/fallout3/mods/24913"
+            Write-Step "potem uruchom ten instalator ponownie i wskaż pobrany plik."
+        }
+    }
+}
+
+if ($script:ExitCode -eq 0) {
+    Write-Step "Gotowe. Uruchamiaj grę przez fose_loader.exe, nie Fallout3.exe."
+} else {
+    Write-Step "Zakończono z problemami (kod $($script:ExitCode)) — szczegóły powyżej."
+}
+exit $script:ExitCode

@@ -64,10 +64,9 @@ float        g_probe_timer  = 0.0f;
 constexpr float kProbeEvery  = 2.0f;   // seconds
 constexpr float kMinProgress = 16.0f;  // must get this many units CLOSER per window
 
-// Distance callouts.
-float        g_callout_timer = 0.0f;
+// No distance callouts during a walk: the player asked for a quiet walk, and
+// the beacon/scanner say how far on request.
 float        g_close_timer   = 0.0f;   // seconds spent within kNearArrive
-constexpr float kCalloutEvery = 2.5f;
 
 // Door-opening: when blocked, the obstacle is usually a closed door (e.g. the
 // Overseer's office). Open the nearest one with the native Activate and resume.
@@ -75,7 +74,21 @@ constexpr float kCalloutEvery = 2.5f;
 // grace period, we give up instead of toggling it shut again.
 uint32_t     g_last_door     = 0;
 float        g_door_cooldown = 0.0f;
+// The door we just opened: hold still while it swings, then check it really
+// opened before walking on.
+float        g_door_hold     = 0.0f;
+const void*  g_door_refr     = nullptr;
+uint32_t     g_door_form     = 0;
+std::string  g_door_name;
+int          g_door_checks   = 0;        // state checks left before giving up
+constexpr float kDoorHoldSecs  = 0.9f;   // stand still while the door swings
+constexpr float kDoorGraceSecs = 2.0f;   // then don't count the doorway as stuck
 constexpr float kDoorReach   = 300.0f;   // ~4.7 m — a door we've walked up to
+// Stopping the walk at a door is an interruption, so it needs a tighter test
+// than merely noticing one nearby: close, and roughly in the direction we are
+// actually walking.
+constexpr float kDoorStopReach = 200.0f;  // ~3 m
+constexpr float kDoorStopCone  = 55.0f;   // degrees either side of the heading
 
 // --- Cross-worldspace routing ----------------------------------------------
 // When the target sits in a DIFFERENT coordinate frame (another cell/worldspace)
@@ -104,6 +117,10 @@ int          g_hop_count        = 0;              // load doors traversed this t
 int          g_cross_stuck      = 0;              // stalls while approaching a door
 bool         g_cross_teleported = false;          // already used the teleport fallback
 const void*  g_cross_from_cell  = nullptr;        // cell we left (skip the door back)
+// Doors taken on this walk. They are DEPRIORITISED, not banned: a route that
+// has to back out of a dead end still needs them, and in a vault that happens.
+std::vector<uint32_t> g_cross_used_doors;
+bool         g_target_indoors   = false;          // is the destination inside?
 constexpr int   kMaxHops        = 12;             // give up chaining doors past this
 constexpr float kCrossTimeout   = 8.0f;           // s of active play w/o a cell change → fallback
 constexpr float kCrossSettle    = 0.8f;           // s to settle after the cell changes
@@ -133,6 +150,14 @@ constexpr float kFloorDelta = 160.0f;
 // another location rather than walked at blindly.
 constexpr float kNoPathFarDist = 4000.0f;
 
+// How near the end of a navmesh path has to land for that path to count as
+// "this target is reachable on foot from here", whatever the cell records say.
+// Generous on purpose: the last waypoint sits on walkable ground, and a target
+// standing on a staircase, a platform or inside furniture is legitimately some
+// way off the mesh — the overseer's office is 775 units above the floor the
+// path ends on.
+constexpr float kPathEndsNearTarget = 1000.0f;
+
 // --- Turning via mouse-look ------------------------------------------------
 // Relative bearing (deg, + = goal is to the right) -> horizontal mouse motion.
 // CRUCIAL for third person: mouse-look there spins the CAMERA, not the body.
@@ -150,8 +175,45 @@ constexpr float kNoPathFarDist = 4000.0f;
 constexpr long  kTurnMax  = 220;     // max mouse counts per tick
 constexpr float kTurnDead = 4.0f;    // deg — don't turn inside this
 
+// --- The key-injection gate ------------------------------------------------
+//
+// Under native walking NOTHING here presses a key or moves the mouse. Every
+// "it said Zatrzymano and kept walking" bug this mod has had came from the same
+// shape: an injected key outliving the walk that sent it — a key-up swallowed
+// while a menu had focus, a recovery branch that pressed W without telling the
+// mover, a stop that cleared one drive but not the other. A walk a blind player
+// cannot stop is worse than a walk that steers badly: you walk into the enemy,
+// into the radiation, off the walkway, with no way to break off.
+//
+// So the fix is not a better stop, it is having nothing to stop. The engine
+// mover is driven by RESTATING a goal every tick, so not restating it is
+// already a full stop — no state is left anywhere that could keep the player
+// moving. That is how the FNV mod gets a reliable stop, and it is what the
+// player asked for here: no keys at all, unless [Voice] NativeWalk is 0.
+//
+// Releases are never gated: if a run with NativeWalk = 0 left a key down, we
+// still want to let go of it.
+bool KeysAllowed() { return !config::Get().native_walk; }
+
+// Native walking asked for, but the movement hook is not in place (a different
+// game build). Refuse to walk rather than quietly fall back to keys — that
+// silent fallback is precisely the thing being removed.
+DWORD g_no_mover_said = 0;
+void WarnNoMover()
+{
+    DWORD now = GetTickCount();
+    if (g_no_mover_said && now - g_no_mover_said < 5000) return;
+    g_no_mover_said = now;
+    F3A_INFO("autowalk: NativeWalk on but the mover hook is not installed — "
+             "refusing to walk (set [Voice] NativeWalk = 0 for the old key walk).");
+    tolk::Speak("Auto-chodzenie niedostępne na tej wersji gry. "
+                "Ustaw NativeWalk na 0 w pliku INI, żeby chodzić klawiszami.",
+                tolk::Priority::System, true);
+}
+
 void TurnMouse(float relDeg)
 {
+    if (!KeysAllowed()) return;      // native walking turns the body itself
     if (std::fabs(relDeg) <= kTurnDead) return;
     long gain = config::Get().autowalk_turn_gain;
     if (gain < 1) gain = 1;
@@ -175,6 +237,10 @@ int  g_strafe_down = 0;   // 0 = none, -1 = left (A), +1 = right (D)
 
 void SendScan(WORD scan, bool down)
 {
+    // Belt and braces for the gate above: whatever path reaches here, a PRESS
+    // is impossible under native walking, so no caller added later can quietly
+    // reintroduce a key that outlives its walk. Releases always go through.
+    if (down && !KeysAllowed()) return;
     hotkeys::SuppressKey(scan);   // ours, not the player's — see SuppressKey
     INPUT in{};
     in.type       = INPUT_KEYBOARD;
@@ -191,6 +257,10 @@ bool g_kw = false, g_ka = false, g_ks = false, g_kd = false;
 
 void Move(bool w, bool a, bool s, bool d)
 {
+    // Gate here as well as in SendScan, so the bookkeeping stays honest:
+    // g_kw..g_kd must keep matching the game, or the next edge sends a key-up
+    // for a key that was never pressed.
+    if (!KeysAllowed()) { w = a = s = d = false; }
     if (w != g_kw) { SendScan(kScanW, w); g_kw = w; }
     if (a != g_ka) { SendScan(kScanA, a); g_ka = a; }
     if (s != g_ks) { SendScan(kScanS, s); g_ks = s; }
@@ -227,15 +297,35 @@ void ReleaseKeysHard()
     g_forward_down = false;
     g_strafe_down  = 0;
 }
-void TriggerJump()      { if (!g_kjump) { SetJump(true); g_jump_timer = 0.30f; } }
+void TriggerJump()
+{
+    if (!KeysAllowed()) return;   // Space is an injected key like any other
+    if (!g_kjump) { SetJump(true); g_jump_timer = 0.30f; }
+}
 
-// --- Stuck recovery: when forward progress stalls (an obstacle), strafe
-// sideways for a beat to slip around it, alternating sides on repeats, before
-// giving up. No raycasts available, so it "feels" the wall by trial.
+// --- Stuck recovery: when forward progress stalls, strafe sideways to slip
+// around whatever is there. It "feels" the obstacle by trial, since there is no
+// path to follow when the navmesh gives none.
+//
+// It used to flip sides on EVERY stall, and that is why a walk toward something
+// just past a crate turned into pacing: a step left, a step right, back to the
+// same spot, forever — a log of it shows the distance going 253, 258, 354 while
+// the mod kept announcing the same container. Going round an obstacle means
+// COMMITTING to one side long enough to clear it. So the side is kept, and each
+// further stall on that side strafes for longer; only after several failures is
+// the other side tried, with the clock reset.
 float g_recover_timer = 0.0f;   // seconds of strafing left; 0 = normal steering
-int   g_recover_dir   = 1;      // side to strafe next (alternates)
+int   g_recover_dir   = 1;      // side being tried
+int   g_recover_tries = 0;      // consecutive attempts on THIS side
 int   g_stuck_count   = 0;      // consecutive stalls without progress
 constexpr float kRecoverSecs = 1.2f;
+constexpr int   kSideTries   = 3;   // attempts before trying the other side
+// Orbit detection: the closest we have ever been this walk, and how many
+// probes in a row have failed to beat it.
+float g_best_dist = 1e9f;
+int   g_noimprove = 0;
+constexpr float kOrbitRadius = 400.0f;  // only call it an orbit when already near
+constexpr int   kOrbitProbes = 4;       // probes without improvement before stopping
 constexpr int   kMaxStuck    = 6;   // give up after this many failed sidesteps
                                     // (open terrain w/o navmesh needs more tries)
 
@@ -274,6 +364,34 @@ void AdvanceWaypoints()
 // relative and rotZ = camera in first person, so the combo stays correct as we
 // slide). THIRD person: the camera orbits independently of movement, so fall
 // back to mouse-turn + forward. Returns |relative bearing|.
+float Steer(const game::Vec3& goal);
+
+// Sidestep an obstacle WITHOUT dropping back to key injection.
+//
+// The recovery used to strafe by holding A or D, and that is why the walk went
+// quiet mid-step: forward motion is driven by the engine's own movement update,
+// which brings the walk animation and with it the game's real footstep sounds,
+// while a key-held strafe moves the player with none of that. You heard the
+// footsteps stop while the distance kept changing — two different mechanisms
+// taking turns. Steering to a point out to the side keeps one mechanism in
+// charge of everything.
+void SidestepNative(int dir, const game::Vec3& goal, bool backOut)
+{
+    auto pp = game::GetPlayerPosition();
+    float dx = goal.x - pp.x, dy = goal.y - pp.y;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1.0f) { dx = 0.0f; dy = 1.0f; len = 1.0f; }
+    dx /= len; dy /= len;
+    // Perpendicular to the line to the target, plus a lead along it: forward
+    // normally, BACKWARD when we are wedged and need to get out first.
+    const float kSide = 220.0f;
+    const float lead  = backOut ? -140.0f : 90.0f;
+    game::Vec3 aside{ pp.x + (-dy * dir) * kSide + dx * lead,
+                      pp.y + ( dx * dir) * kSide + dy * lead,
+                      pp.z };
+    Steer(aside);
+}
+
 float Steer(const game::Vec3& goal)
 {
     auto  pp  = game::GetPlayerPosition();
@@ -283,9 +401,13 @@ float Steer(const game::Vec3& goal)
     // No keys, exact speed, and the turn slows the walk instead of skidding
     // through it. Falls through to the key-holding path when the hook isn't in
     // place or [Voice] NativeWalk is off, so walking always works somehow.
-    if (config::Get().native_walk && mover::Available()) {
-        Move(false, false, false, false);          // make sure no key is stuck down
-        mover::SetGoal(goal.x, goal.y, /*run*/true);
+    if (config::Get().native_walk) {
+        if (mover::Available()) {
+            Move(false, false, false, false);      // make sure no key is stuck down
+            mover::SetGoal(goal.x, goal.y, /*run*/true);
+            return std::fabs(rel);
+        }
+        WarnNoMover();      // say so, and steer nowhere rather than press keys
         return std::fabs(rel);
     }
     mover::Clear();
@@ -325,46 +447,144 @@ void StopWalking(const char* reason_utf8)
                  g_have_path ? 1 : 0, (unsigned)g_wp_index,
                  (unsigned)g_waypoints.size());
     }
+    // Measured, not assumed, and measured BEFORE we stop anything: the first
+    // version of this line read mover::Active() after mover::Clear() had
+    // already cleared it, so it reported 0 every single time and told us
+    // nothing about the state we were trying to diagnose.
+    F3A_INFO("autowalk stop state (before stopping): keys_allowed=%d W_down=%d "
+             "mover_active=%d",
+             (int)KeysAllowed(),
+             (GetAsyncKeyState('W') & 0x8000) ? 1 : 0,
+             (int)mover::Active());
     mover::Clear();       // stop driving the engine's mover
     ReleaseKeysHard();    // and let go of every movement key, edge or no edge
     g_jump_timer    = 0.0f;
     g_close_timer   = 0.0f;
     g_recover_timer = 0.0f;
+    g_recover_tries = 0;
     g_stuck_count   = 0;
+    g_door_hold     = 0.0f;
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
     g_cross         = false;
     g_cross_wait    = 0.0f;
     g_cross_door_refr = nullptr;
+    g_cross_used_doors.clear();   // a new walk gets a clean map of the building
     g_state = State::Idle;
     if (reason_utf8 && *reason_utf8)
         tolk::Speak(reason_utf8, tolk::Priority::System, true);
 }
 
 
-// When blocked, try to open the nearest door (native Activate). Returns true if
-// it opened one (caller should give it a moment before re-checking progress).
-// Returns false if the only door in reach is the one we already tried (it's
-// probably locked) or there's no door — caller falls back to strafe/give-up.
+// When blocked, a closed door is the usual culprit. Open it ourselves — the
+// same native Activate the End key uses, on the game's thread — hold still
+// while it swings, check it really opened, and walk on.
+//
+// Handing the door to the player instead (the previous behaviour) stranded a
+// blind player in the vault: the walk stopped "facing" a door it had not
+// actually turned to, the interaction key hit nothing, and there was no way
+// forward. What made opening it ourselves go wrong before is now ruled out
+// before we touch anything:
+//   * a LOCKED door is never activated (that would open the lockpick screen
+//     mid-walk) — the walk stops and says which lock it is;
+//   * a LOAD door is never activated (that would carry the player off to
+//     another place) — the walk goes round it like any obstacle;
+//   * a door that is already OPEN, or whose state can't be read, is not
+//     toggled — activating it would shut it;
+//   * the walk stands still while the door swings instead of shoving into it,
+//     and stops with a clear sentence if the door did not open.
+// Each door is tried once per walk. Returns true if it took the matter in hand.
 bool TryOpenBlockingDoor()
 {
-    auto pp = game::GetPlayerPosition();
-    auto ents = game::ScanNearby((int)kDoorReach, 8, /*actors_only*/false, false);
+    auto  pp  = game::GetPlayerPosition();
+    float yaw = game::GetPlayerYaw();
+    auto ents = game::ScanNearby((int)kDoorReach, 24, /*actors_only*/false, false);   // 24: a cluttered room must not crowd the door out
     const game::WorldEntity* best = nullptr;
-    float bestd = kDoorReach * kDoorReach;
+    float bestd = kDoorStopReach * kDoorStopReach;
     for (const auto& e : ents) {
         if (e.kind != game::WorldEntity::Kind::Door || !e.refr || !e.form_id)
             continue;
+        if (e.load_door != 0) continue;     // a way somewhere else, not a door to open
+        if (e.open_state == 1) continue;    // already open: not what blocks us
+        // It has to be IN FRONT of us, not merely nearby.
+        auto br = game::ComputeBearing(pp, yaw, e.position);
+        if (std::fabs(br.relative_yaw) > kDoorStopCone) continue;
         float dx = e.position.x - pp.x, dy = e.position.y - pp.y;
         float d2 = dx * dx + dy * dy;
         if (d2 < bestd) { bestd = d2; best = &e; }
     }
     if (!best) return false;
-    if (best->form_id == g_last_door) return false;   // already tried — likely locked
+    // Only once per door per walk: if the SAME door blocks us again it is not
+    // the problem, so fall through to the ordinary stuck handling.
+    if (best->form_id == g_last_door) return false;
+    g_last_door = best->form_id;
+    float dist = std::sqrt(bestd);
+
+    if (best->locked) {
+        F3A_INFO("autowalk: locked door '%s' (%08X) lock=%d, %.0f units — stopping",
+                 best->name.c_str(), (unsigned)best->form_id, best->lock_level, dist);
+        std::string what = "Zamknięte drzwi na drodze: " + best->name + ", ";
+        int L = best->lock_level;
+        if (L >= 250 || L < 0) what += "potrzebny klucz.";
+        else what += std::string("zamek ") +
+                     ((L < 25) ? "bardzo łatwy" : (L < 50) ? "łatwy" :
+                      (L < 75) ? "średni" : (L < 100) ? "trudny" : "bardzo trudny") + ".";
+        const void* r = best->refr; uint32_t f = best->form_id;
+        StopWalking(what.c_str());
+        game::Vec3 at{};
+        if (game::GetRefPosition(r, f, &at)) poll::RequestFacePoint(at);
+        return true;
+    }
+    if (best->open_state != 0) {
+        // Can't tell whether it is open: don't risk shutting it. Stuck handling
+        // goes round instead, and logs this so a pattern would show.
+        F3A_INFO("autowalk: door '%s' (%08X) state unknown — not touching it",
+                 best->name.c_str(), (unsigned)best->form_id);
+        return false;
+    }
+
+    F3A_INFO("autowalk: opening the door '%s' (%08X), %.0f units",
+             best->name.c_str(), (unsigned)best->form_id, dist);
     game::QueueActivate(best->refr, best->form_id);
-    tolk::Speak("Otwieram drzwi: " + best->name, tolk::Priority::Background, false);
-    g_last_door     = best->form_id;
-    g_door_cooldown = 2.5f;                            // let it swing open (progress
-                                                       // base is reset when it ends)
+    // Stop ONCE, here; the hold below only waits. (The mover's stop is a full
+    // brake with an idle animation — not something to repeat every tick.)
+    mover::Clear();
+    Move(false, false, false, false);
+    g_door_refr = best->refr;
+    g_door_form = best->form_id;
+    g_door_name = best->name;
+    g_door_hold = kDoorHoldSecs;
+    g_door_checks = 2;
+    g_door_cooldown = 2.0f * kDoorHoldSecs + kDoorGraceSecs;
+    tolk::Speak("Otwieram drzwi.", tolk::Priority::Background, false);
     return true;
+}
+
+// Called every tick while a door we opened is swinging: stand still, then
+// check it opened. Returns true while the walk must not move.
+bool DoorHoldTick(float dt)
+{
+    if (g_door_hold <= 0.0f) return false;
+    g_door_hold -= dt;   // standing still: nothing steers until it is done
+    if (g_door_hold > 0.0f) return true;
+
+    int st = game::DoorOpenState(g_door_refr, g_door_form);
+    F3A_INFO("autowalk: door '%s' after opening: state=%d (1=open 0=closed -1=?)",
+             g_door_name.c_str(), st);
+    if (st == 0 && --g_door_checks > 0) {
+        g_door_hold = kDoorHoldSecs;          // a slow door: look once more
+        return true;
+    }
+    if (st == 0) {
+        std::string what = "Drzwi się nie otworzyły: " + g_door_name + ".";
+        const void* r = g_door_refr; uint32_t f = g_door_form;
+        StopWalking(what.c_str());
+        game::Vec3 at{};
+        if (game::GetRefPosition(r, f, &at)) poll::RequestFacePoint(at);
+        return true;
+    }
+    g_last_probe_dist = DistanceToTarget();   // fresh progress base past the door
+    return false;
 }
 
 // When forward progress stalls, identify WHAT is most likely blocking us and say
@@ -398,8 +618,9 @@ std::string DescribeObstacle()
             return (best->hostile ? "Wróg na drodze: " : "Ktoś na drodze: ")
                    + best->name + ". Omijam.";
         case game::WorldEntity::Kind::Door:
-            // A door still in the cone here is the one TryOpenBlockingDoor already
-            // tried (else it'd have opened it) — so it's locked or blocked.
+            // A door still in the cone here is one we already handed to the
+            // player (we stop at each door only once per walk), so if we are
+            // still stuck on it, it is locked or blocked rather than just shut.
             return "Drzwi zablokowane lub zamknięte: " + best->name + ".";
         case game::WorldEntity::Kind::Container:
             return "Blokuje pojemnik: " + best->name + ". Omijam.";
@@ -425,6 +646,7 @@ bool PickCrossDoor()
     auto pp   = game::GetPlayerPosition();
     auto ents = game::ScanNearby(kCrossScan, 48, /*actors_only*/false, false);
     const void* hereCell = game::GetPlayerCell();
+    const bool  indoors  = game::PlayerIsInInterior();
     const game::WorldEntity* best = nullptr;
     int   bestCat = 0;
     float bestd   = 0.0f;
@@ -437,17 +659,38 @@ bool PickCrossDoor()
             game::DoorLeadsToCellSpace(e.refr, g_cross_from_cell)) continue;
         if (hereCell && game::DoorLeadsToCellSpace(e.refr, hereCell)) continue;
 
+        // Ranking, best first. The old rule was "a door into another interior
+        // is never a good pick", which is true in the wasteland and wrong
+        // underground: Vault 101 is a chain of interiors, so in the prologue
+        // EVERY usable door was rejected, the pick came back empty, and the
+        // walk gave up a few rooms from the overseer's office.
+        //
+        // Doors already used this walk rank last rather than being banned, so a
+        // dead end can be backed out of instead of ending the route.
+        bool used = false;
+        for (uint32_t id : g_cross_used_doors) if (id == e.form_id) { used = true; break; }
+
         int cat;
-        if (game::DoorLeadsToTargetSpace(e.refr, g_target_refr)) cat = 2;
-        else if (game::DoorLeadsToExterior(e.refr))             cat = 1;
-        else continue;   // leads into some other interior — never a good pick
+        if (game::DoorLeadsToTargetSpace(e.refr, g_target_refr))    cat = 4;
+        else if (game::DoorLeadsToExterior(e.refr))
+            cat = g_target_indoors ? 2 : 3;   // outside only helps if that is where we are going
+        else if (indoors)                                           cat = 2;
+        else continue;   // outdoors, a door further inside is not the way on
+        if (used) cat = 1;
 
         float dx = e.position.x - pp.x, dy = e.position.y - pp.y;
         float d2 = dx * dx + dy * dy;
         bool better = !best || cat > bestCat || (cat == bestCat && d2 < bestd);
         if (better) { best = &e; bestCat = cat; bestd = d2; }
     }
-    if (!best) return false;
+    if (!best) {
+        F3A_INFO("Autowalk: no usable door here (indoors=%d, target indoors=%d, "
+                 "%d door(s) already used)", (int)indoors, (int)g_target_indoors,
+                 (int)g_cross_used_doors.size());
+        return false;
+    }
+    if (g_cross_used_doors.size() < 32) g_cross_used_doors.push_back(best->form_id);
+    F3A_INFO("Autowalk: next door '%s' (rank %d)", best->name.c_str(), bestCat);
     g_cross_door_refr = best->refr;
     g_cross_door_form = best->form_id;
     g_cross_door_pos  = best->position;
@@ -488,6 +731,8 @@ void BeginCross()
 {
     g_cross            = true;
     g_cross_from_cell  = game::GetPlayerCell();
+    g_target_indoors   = g_target_refr ? game::RefIsInInterior(g_target_refr)
+                                       : game::PlayerIsInInterior();
     g_cross_door_refr  = nullptr;
     g_cross_stuck      = 0;
     g_probe_timer      = 0.0f;
@@ -600,7 +845,10 @@ void TickCross(float dt)
 
     // Recovery strafe (same idea as the main loop) or steer at the door.
     if (g_recover_timer > 0.0f) {
-        Move(true, g_recover_dir < 0, false, g_recover_dir > 0);
+        if (config::Get().native_walk)
+            SidestepNative(g_recover_dir, g_cross_door_pos, /*backOut*/false);
+        else
+            Move(true, g_recover_dir < 0, false, g_recover_dir > 0);
         g_recover_timer -= dt;
         if (g_recover_timer <= 0.0f) g_last_probe_dist = dd;
     } else {
@@ -614,18 +862,42 @@ void TickCross(float dt)
         g_probe_timer = 0.0f;
         float progress = g_last_probe_dist - dd;
         g_last_probe_dist = dd;
+        // Circling: near the target but no longer getting nearer. The existing
+        // backstop only covers 175 units for 2.5 s, so an orbit at any wider
+        // radius went on forever. Alex's walker calls this "arrival at the
+        // closest navmesh-reachable point", and that is the honest answer — the
+        // walk has got as close as it is going to get, and saying so beats
+        // pacing around a marker.
+        if (dd < g_best_dist - kMinProgress) {
+            g_best_dist = dd;
+            g_noimprove = 0;
+        } else if (g_best_dist < kOrbitRadius) {
+            if (++g_noimprove >= kOrbitProbes) {
+                char buf[192];
+                std::snprintf(buf, sizeof(buf), "Bliżej nie dojdę: %s.",
+                              g_target_name.c_str());
+                StopWalking(buf);
+                return;
+            }
+        }
+
         if (progress < kMinProgress && g_recover_timer <= 0.0f) {
             if (TryOpenBlockingDoor()) return;
             if (++g_cross_stuck >= kCrossMaxStuck) { CrossFallbackTeleport(); return; }
-            g_recover_dir   = -g_recover_dir;
-            g_recover_timer = kRecoverSecs;
+            // Same side again, for longer, until this side has had its chances.
+            if (++g_recover_tries > kSideTries) {
+                g_recover_dir   = -g_recover_dir;
+                g_recover_tries = 1;
+            }
+            g_recover_timer = kRecoverSecs * (float)g_recover_tries;
             TriggerJump();
             // Logged, not spoken. Naming every crate and doorframe it squeezes
             // past turned a walk into a running commentary, and the player
             // cannot act on any of it — the mod is already going round.
             F3A_DEBUG("autowalk: %s", DescribeObstacle().c_str());
         } else if (progress >= kMinProgress) {
-            g_cross_stuck = 0;
+            g_cross_stuck   = 0;
+            g_recover_tries = 0;   // it is getting through; stop escalating
         }
     }
 }
@@ -681,6 +953,10 @@ namespace { bool TryTravelLeg(); }   // defined below, used by StartTo
 void StartTo(const game::Vec3& pos, const std::string& name,
              const void* refr, uint32_t form_id)
 {
+    // Native walking with no hook = nothing may drive the player. Refuse out
+    // loud instead of falling back to held keys: that fallback is what produced
+    // a walk which carried on after "Zatrzymano".
+    if (config::Get().native_walk && !mover::Available()) { WarnNoMover(); return; }
     DropAimLock();
     g_target_pos  = pos;
     g_target_name = name;
@@ -689,12 +965,16 @@ void StartTo(const game::Vec3& pos, const std::string& name,
 
     g_last_probe_dist = DistanceToTarget();
     g_probe_timer    = 0.0f;
-    g_callout_timer  = 0.0f;
     g_recover_timer  = 0.0f;
+    g_recover_tries  = 0;
     g_stuck_count    = 0;
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
     g_recover_dir    = 1;
     g_last_door      = 0;
     g_door_cooldown  = 0.0f;
+    g_door_hold      = 0.0f;
+    g_door_refr      = nullptr;
 
     // Reset cross-worldspace routing state for the new trip.
     g_cross            = false;
@@ -717,6 +997,8 @@ void StartTo(const game::Vec3& pos, const std::string& name,
              name.c_str(), refr, (int)shares, (int)(refr && !shares),
              game::GetCurrentLocationName().c_str(),
              game::GetRefSpaceLabel(refr).c_str());
+    // Ask the engine, once per walk, whether it already has a path for us.
+    mover::ProbePath();
 
     // A "travel leg" (hop to the nearest known marker, walk the rest) used to run
     // here. It relied on the native MoveTo, which CRASHES the game — so the hop
@@ -744,6 +1026,35 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     // situation: the navmesh here cannot reach it, so it is not here.
     bool other_space = refr ? !shares
                             : (!g_have_path && DistanceToTarget() > kNoPathFarDist);
+
+    // A REAL PATH OUTRANKS THE CELL COMPARISON.
+    //
+    // Comparing cells was only ever a proxy for the real question, "can I walk
+    // there?", and in the vault it gives the wrong answer: the overseer's
+    // office is recorded in "Krypta 101 - przedsionek" while the player stands
+    // in "Krypta 101", so the two do not share a cell — and the walk refused,
+    // told the player to go and find a door, and threw away the 125-waypoint
+    // path the navmesh had JUST BUILT across both of them. Interior cells of
+    // one building share a navmesh; the records disagree, the geometry does not.
+    //
+    // So when the mesh produces a path that ENDS NEAR THE TARGET, that path is
+    // the evidence and the cell records are overruled. The end-of-path test is
+    // what keeps the old Moriarty bug away: a target in another worldspace has
+    // coordinates that mean something else here, so any path toward them ends
+    // nowhere near, and we still route by doors.
+    if (other_space && g_have_path && !g_waypoints.empty()) {
+        const auto& end = g_waypoints.back();
+        float ex = pos.x - end.x, ey = pos.y - end.y, ez = pos.z - end.z;
+        float gap = std::sqrt(ex * ex + ey * ey + ez * ez);
+        F3A_INFO("autowalk: cells disagree, but the mesh has a %u-waypoint "
+                 "path ending %.0f units from the target.",
+                 (unsigned)g_waypoints.size(), gap);
+        if (gap <= kPathEndsNearTarget) {
+            other_space = false;
+            F3A_INFO("autowalk: walking it — a path this close is a path there.");
+        }
+    }
+
     if (other_space) {
         tolk::Speak("Cel w innej lokacji: " + name +
                     ". Prowadzę przez przejścia.",
@@ -755,9 +1066,8 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     Steer(CurrentGoal());
 
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "Idę do: %s, %s%s",
+    std::snprintf(buf, sizeof(buf), "Idę do: %s%s",
                   name.c_str(),
-                  strings::FormatDistance(DistanceToTarget()).c_str(),
                   g_have_path ? ", trasa wyznaczona" : "");
     tolk::Speak(buf, tolk::Priority::System, true);
 }
@@ -833,6 +1143,13 @@ bool StartToQuest()
 
 void Stop()
 {
+    // The player pressing the stop key means STOP, even when our own state
+    // machine already believes the walk is over — and especially then, because
+    // "the mod says it stopped and I am still walking" is exactly the case
+    // where the two disagree. StopWalking returns early when it thinks it is
+    // idle, so the engine-side stop goes first and unconditionally.
+    mover::Clear();
+    ReleaseKeysHard();
     StopWalking("Zatrzymano.");
 }
 
@@ -892,6 +1209,9 @@ void Tick(float dt)
 
     // Release a recovery-jump once its brief hold elapses (both modes use it).
     if (g_kjump) { g_jump_timer -= dt; if (g_jump_timer <= 0.0f) SetJump(false); }
+
+    // A door we opened is still swinging: stand still until it is out of the way.
+    if (DoorHoldTick(dt)) return;
 
     // Quest walks follow the LIVE objective: if it advanced (or another quest
     // took the tracked slot), switch targets mid-walk instead of marching to a
@@ -977,7 +1297,10 @@ void Tick(float dt)
         // a corner/rock in open terrain), REVERSE+strafe to back out first, then
         // steer around next window.
         bool backOut = (g_stuck_count >= 2);
-        Move(!backOut, g_recover_dir < 0, backOut, g_recover_dir > 0);
+        if (config::Get().native_walk)
+            SidestepNative(g_recover_dir, CurrentGoal(), backOut);
+        else
+            Move(!backOut, g_recover_dir < 0, backOut, g_recover_dir > 0);
         g_recover_timer -= dt;
         if (g_recover_timer <= 0.0f)
             g_last_probe_dist = DistanceToTarget();   // fresh progress base
@@ -1048,14 +1371,6 @@ void Tick(float dt)
             }
         }
         if (!driving) g_last_probe_dist = DistanceToTarget();
-    }
-
-    // Periodic distance callout.
-    g_callout_timer += dt;
-    if (g_callout_timer >= kCalloutEvery) {
-        g_callout_timer = 0.0f;
-        tolk::Speak(strings::FormatDistance(dist),
-                    tolk::Priority::Background, false);
     }
 }
 

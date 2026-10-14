@@ -9,7 +9,7 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.3.1"
+#define AppVersion   "0.4.0"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
 
@@ -84,7 +84,8 @@ begin
     if not RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath', SteamDir) then
       if not RegQueryStringValue(HKLM, 'SOFTWARE\Valve\Steam', 'InstallPath', SteamDir) then
         Exit;
-  StringChangeEx(SteamDir, '/', '', True);
+  // The registry spells it c:/program files (x86)/steam.
+  StringChangeEx(SteamDir, '/', '\', True);
 
   SetArrayLength(Roots, 1);
   Roots[0] := SteamDir;
@@ -109,7 +110,8 @@ begin
           if q2 > 1 then
           begin
             Root := Copy(Line, 1, q2 - 1);
-            StringChangeEx(Root, '\', '', True);
+            // The file escapes every backslash: "D:\\SteamLibrary".
+            StringChangeEx(Root, '\\', '\', True);
             SetArrayLength(Roots, RootCount + 1);
             Roots[RootCount] := Root;
             RootCount := RootCount + 1;
@@ -130,7 +132,7 @@ begin
   for r := 0 to RootCount - 1 do
     for i := 0 to GetArrayLength(Names) - 1 do
     begin
-      Candidate := AddBackslash(Roots[r]) + 'steamapps\common' + Names[i];
+      Candidate := AddBackslash(Roots[r]) + 'steamapps\common\' + Names[i];
       if LooksLikeGame(Candidate) then
       begin
         Result := Candidate;
@@ -157,7 +159,7 @@ begin
     Base := 'SOFTWARE\GOG.com\Games';
     if not RegGetSubkeyNames(Hives[h], Base, Keys) then Continue;
     for i := 0 to GetArrayLength(Keys) - 1 do
-      if RegQueryStringValue(Hives[h], Base + '' + Keys[i], 'path', Path) then
+      if RegQueryStringValue(Hives[h], Base + '\' + Keys[i], 'path', Path) then
         if LooksLikeGame(Path) then
         begin
           Result := Path;
@@ -323,7 +325,8 @@ begin
 
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' +
             ExpandConstant('{app}\f3a-install.ps1') + '"' +
-            ' -GamePath "' + GamePage.Values[0] + '"' +
+            // No trailing backslash: "...\" would escape the closing quote.
+            ' -GamePath "' + RemoveBackslashUnlessRoot(GamePage.Values[0]) + '"' +
             ' -LogPath "' + LogFile + '"';
 
   if not GameNeedsPatch then
