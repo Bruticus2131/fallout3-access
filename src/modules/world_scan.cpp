@@ -221,6 +221,17 @@ SprayPt SprayOffset(int i)
     int col = i / 7, row = i % 7;
     return { kSprayYaw[col], kSprayPitch[row] };
 }
+
+// End the mouse-driven aim. If a burst is holding the attack key it is let go
+// here: an aim cut off mid-shot (out of time, a menu, a load) used to leave the
+// injected key down, and the weapon kept firing.
+void StopAimLoop()
+{
+    if (g_fire_holding) { FireKey(false); g_fire_holding = false; }
+    g_fire_left = 0;
+    g_spray_px = 0; g_spray_py = 0;
+    g_aim_on = false;
+}
 const void* g_scan_cell  = nullptr;  // cell the full list was built for
 
 bool GameplayAndHud()
@@ -412,7 +423,7 @@ void TurnToCurrent()
     // engine's own SetAngle Z, on the main thread. Works in first & third person
     // (replaces the old mouse-turn). If it snaps to face the target, native yaw
     // works and we can retire the mouse turn.
-    g_aim_on = false;
+    StopAimLoop();
     auto pp = game::GetPlayerPosition();
     float dx = tgt.x - pp.x, dy = tgt.y - pp.y;
     float yawDeg = std::atan2(dx, dy) * 57.2957795f;   // 0 = north(+Y), clockwise
@@ -451,8 +462,8 @@ void GuideToggle()
     // walking/beaconing toward those raw coordinates heads off in a meaningless
     // direction — send the player to teleport instead of leading them astray.
     if (e.refr && !game::TargetSharesPlayerSpace(e.refr)) {
-        tolk::Speak("Cel jest w innej lokacji — nie dojdziesz tam pieszo stąd. "
-                    "Użyj teleportu (Alt+Home) albo najpierw wyjdź na zewnątrz.",
+        tolk::Speak("Cel jest w innej lokacji — sygnał tam nie poprowadzi. "
+                    "Użyj automatycznego chodzenia: prowadzi przez przejścia.",
                     tolk::Priority::System, true);
         return;
     }
@@ -481,7 +492,10 @@ void DropItem()
 // generic — any list that needs a click rather than Enter benefits.
 void PressRow()
 {
-    if (menu::ActiveMenu() == menu::Id::None) {
+    // The HUD counts as "a menu" to the dispatcher, but there is no row to
+    // press in the world.
+    auto m = menu::ActiveMenu();
+    if (m == menu::Id::None || m == menu::Id::HUDMain || !poll::MenuModeActive()) {
         tolk::Speak("Ta funkcja działa w menu.", tolk::Priority::System, true);
         return;
     }
@@ -741,6 +755,15 @@ void ItemInfo()
     std::string info = game::GetSelectedItemInfo();
     if (!info.empty()) { tolk::Speak(info, tolk::Priority::Ui, true); return; }
     // No stat card here (e.g. container lists only names): re-read the name.
+    // In the container it is the row of the column in use — the generic scan
+    // can match the other column's highlight just as well.
+    if (m == menu::Id::Container) {
+        if (auto cs = game::GetContainerSelection()) {
+            std::string t = cs->label;
+            if (!cs->value.empty()) t += (t.empty() ? "" : ", ") + cs->value;
+            if (!t.empty()) { tolk::Speak(t, tolk::Priority::Ui, true); return; }
+        }
+    }
     auto sel = game::GetKeyboardSelectionText();
     if (sel && !sel->empty()) tolk::Speak(*sel, tolk::Priority::Ui, true);
     else tolk::Speak("Brak opisu.", tolk::Priority::System, true);
@@ -838,6 +861,7 @@ void AimAtTarget()
             // Don't hard-bail on third person any more — always run the aim (and
             // log it). If the POV read is wrong it shouldn't block aiming; if
             // it's right, the mouse turn just works less well and we'll see it.
+            StopAimLoop();               // a burst in flight lets go first
             g_aim_on    = true;
             g_aim_id    = t.form_id;
             g_aim_pos   = t.position;
@@ -846,6 +870,11 @@ void AimAtTarget()
             g_aim_budget = 150;
             g_aim_pstep  = 0;
             g_aim_wait   = 0;
+            g_pitch_started = false;
+            g_pitch_sign    = 1;
+            g_pitch_gain    = 6.0f;      // fresh gains for each aim: the last
+            g_yaw_gain      = 4.0f;      // one's overshoot halvings must not
+            g_yaw_prev_set  = false;     // make this one crawl
             g_aim_label  = idx;
             tolk::Speak(std::string(idx) + ", celuję.", tolk::Priority::Ui, true);
             g_aim_cycle = (g_aim_cycle + 1) % (int)tg.size();
@@ -1229,7 +1258,7 @@ void SayNameAndDistance(const AimTarget& at)
 void CenterCamera()
 {
     if (!GameplayAndHud()) return;
-    g_aim_on = false; g_level_on = false;   // stop any mouse-driven aim/level
+    StopAimLoop(); g_level_on = false;      // stop any mouse-driven aim/level
 
     // Alt+Home = TELEPORT to the selected object (last resort when you can't walk
     // there — doors, broken navmesh). Native MoveTo to the scanner pick's ref.
@@ -1246,14 +1275,15 @@ void CenterCamera()
         if (autowalk::IsWalking() && autowalk::TargetRefr()) {
             std::string nm = autowalk::TargetName();
             const void* r  = autowalk::TargetRefr();
+            uint32_t    rid = autowalk::TargetFormId();
             autowalk::Stop(); guide::Stop();
-            poll::RequestTeleport(r);
+            poll::RequestTeleport(r, rid);
             tolk::Speak("Teleportuję do: " + nm, tolk::Priority::Ui, true);
         } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
                    g_scan_list[g_scan_index].refr) {
             const auto& e = g_scan_list[g_scan_index];
             autowalk::Stop(); guide::Stop();
-            poll::RequestTeleport(e.refr);
+            poll::RequestTeleport(e.refr, e.form_id);
             tolk::Speak("Teleportuję do: " + e.name, tolk::Priority::Ui, true);
         } else {
             tolk::Speak("Najpierw wybierz obiekt skanerem, żeby się teleportować.",
@@ -1314,6 +1344,7 @@ void CenterCamera()
         if (!game::GetAimPointFor(at.refr, &point, &how)) point = at.pos;
 
         poll::RequestFacePoint(point);      // fast first pass on the heading
+        StopAimLoop();
         g_aim_on        = true;             // then close BOTH angles by mouse
         g_aim_id        = at.refid;
         g_aim_pos       = point;
@@ -1589,9 +1620,11 @@ void Tick(float)
     // target with mouse-X until we're facing it. Phase 1: sweep pitch with
     // mouse-Y until the crosshair ref is the target, then say "na celu".
     if (g_aim_on) {
-        if (!poll::IsGameplayActive()) { g_aim_on = false; return; }
+        // Any menu (VATS, Pip-Boy, pause, a load) ends it: mouse moves and an
+        // attack key sent into a menu act on the menu.
+        if (!GameplayAndHud()) { StopAimLoop(); return; }
         if (--g_aim_budget <= 0) {
-            g_aim_on = false;
+            StopAimLoop();
             F3A_INFO("Aim loop: '%s' ran out of budget", g_aim_label.c_str());
             if (!g_aim_face_only)
                 tolk::Speak(g_aim_label +
@@ -1667,7 +1700,10 @@ void Tick(float)
                         return;
                     }
                     // Aimed at the target's height — start the auto-fire burst.
+                    // It gets its own time: 21 shots of ~6 ticks each would
+                    // outlast what is left of the aim's budget.
                     g_aim_phase    = 2;
+                    g_aim_budget   = kSprayCount * 8 + 20;
                     g_fire_left    = kSprayCount;
                     g_fire_holding = false;
                     g_spray_px = 0; g_spray_py = 0;
@@ -1762,7 +1798,7 @@ void ResetSession()
     g_category     = Cat_All;
     g_scan_cell    = nullptr;
     g_aim_cycle    = 0;
-    g_aim_on       = false;
+    StopAimLoop();
     g_level_on     = false;
     g_turn_verify_at    = 0;
     g_turn_correct_left = 0;
@@ -1772,6 +1808,16 @@ void ResetSession()
     g_track_refid  = 0;
     g_cue_actors.clear();
     F3A_INFO("World scan session reset (new game / load).");
+}
+
+void StopInput()
+{
+    // The mod is being switched off: its Tick stops running, so nothing it
+    // holds down (attack key, aim button) would ever be let go.
+    StopAimLoop();
+    g_level_on = false;
+    AimHoldRelease();
+    g_track_on = false;
 }
 
 } // namespace f3a::modules::worldscan

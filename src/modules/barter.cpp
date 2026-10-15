@@ -18,7 +18,7 @@ int         g_last_net = INT32_MIN;
 void AnnounceSelection()
 {
     auto bs = game::GetBarterState();
-    if (!bs.selected) return;
+    if (!bs.valid || !bs.selected) return;
 
     char vbuf[16];  std::snprintf(vbuf, sizeof(vbuf), "%d", bs.selected->value_caps);
     char wbuf[16];  std::snprintf(wbuf, sizeof(wbuf), "%.1f", bs.selected->weight);
@@ -38,6 +38,9 @@ void AnnounceSelection()
 void AnnounceTotal()
 {
     auto bs = game::GetBarterState();
+    // The reader is still a stub; its zeros were spoken as a "0 for 0" deal on
+    // every barter and repair screen.
+    if (!bs.valid) return;
     int net = bs.vendor_total_value - bs.player_total_value;
     if (net == g_last_net) return;
     g_last_net = net;

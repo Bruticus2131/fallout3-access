@@ -17,7 +17,9 @@ namespace vats     { void Init(); void Shutdown(); }
 namespace container{ void Init(); void Shutdown(); }
 namespace message  { void Init(); void Shutdown(); }
 namespace nav      { void Init(); void Shutdown(); void Tick(float dt); }
-namespace worldscan{ void Init(); void Shutdown(); void Tick(float dt); void ResetSession(); }
+namespace worldscan{ void Init(); void Shutdown(); void Tick(float dt); void ResetSession();
+                     // Let go of every key/button the module holds (F12 off).
+                     void StopInput(); }
 namespace intro    { void Init(); void Shutdown(); void Tick(float dt); void Start(); }
 namespace hacking  { void Init(); void Shutdown(); void Tick(float dt); }
 // The vault's SPECIAL book: reads the page, the selected stat and its text.

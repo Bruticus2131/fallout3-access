@@ -9,6 +9,9 @@
 #include <windows.h>
 #include <atomic>
 #include <cmath>
+#include <cstring>
+#include <mutex>
+#include <vector>
 
 namespace f3a::mover {
 namespace {
@@ -59,6 +62,9 @@ std::atomic<float> g_goal_y{ 0.0f };
 std::atomic<bool>  g_run{ false };
 float g_heading = 0.0f;          // radians, engine convention (0 = +Y/north)
 bool  g_heading_seeded = false;
+// A new walk was started from the poll thread: the hook re-seeds its own
+// heading/footstep/animation state on its next frame (those are its own).
+std::atomic<bool> g_reseed_pending{ false };
 
 // Stopping is requested from the polling thread but CARRIED OUT in the hook,
 // which runs on the game's own thread and is handed the engine's real mover as
@@ -276,9 +282,262 @@ void StopNow(void* mover)
 // update, so it is always the object the game is actually using.
 void* g_last_mover = nullptr;
 
+// --- The engine's own pathfinder (FO3 1.7.0.3) ------------------------------
+//
+// Found by disassembly, matching the New Vegas recipe the FNV mod uses (the
+// code is near-identical; see tools/fo3_pathfinding_report.md):
+//   SetPathfindingGoal 0x006F8AB0  bool __thiscall(Actor*, Ref*, float, void*)
+//   ActorMover::Update 0x007E0D40  void __thiscall(mover, float dt)
+//   FullReset          0x007DF400  void __thiscall(mover)
+// The player's mover never paths by itself — PlayerMover::Update overrides the
+// ActorMover one — so after setting the goal the NPC update is ticked by hand
+// until the request is answered (mover+0x74 drops), the waypoints are copied
+// out of the PathingSolution (mover+0x20, or the path handler's +0x0C; data
+// +0x24, count +0x28, stride 0x3C, xyz +0x08), and the mover is reset so no
+// NPC path handler is left steering the player.
+constexpr uintptr_t kSetPathfindingGoal = 0x006F8AB0;
+constexpr uintptr_t kActorMoverUpdate   = 0x007E0D40;
+constexpr uintptr_t kMoverFullReset     = 0x007DF400;
+constexpr int       kPathTimeoutFrames  = 240;     // ~4 s of frames
+
+using SetGoalFn   = bool (__thiscall*)(void* actor, void* ref, float radius, void* avoid);
+using MoverUpdFn  = void (__thiscall*)(void* mover, float dt);
+using FullResetFn = void (__thiscall*)(void* mover);
+
+// Only on the build these were read from: the first bytes of each function
+// must be exactly the ones disassembled, or the feature stays off.
+int g_ep_verified = -1;                  // -1 unknown, 0 no, 1 yes
+bool EnginePathCodeOk()
+{
+    if (g_ep_verified < 0) {
+        static const unsigned char kGoal[]  = { 0x8B,0x44,0x24,0x0C,0x85,0xC0,0x56,0x8B };
+        static const unsigned char kUpd[]   = { 0x6A,0xFF,0x68,0x28,0x17,0xC7,0x00,0x64 };
+        static const unsigned char kReset[] = { 0x53,0x56,0x8B,0xF1,0x57,0xC7,0x46,0x6C };
+        auto is = [](uintptr_t a, const unsigned char* b) {
+            return !IsBadReadPtr(reinterpret_cast<void*>(a), 8) &&
+                   std::memcmp(reinterpret_cast<void*>(a), b, 8) == 0;
+        };
+        bool ok = is(kSetPathfindingGoal, kGoal) && is(kActorMoverUpdate, kUpd) &&
+                  is(kMoverFullReset, kReset);
+        g_ep_verified = ok ? 1 : 0;
+        F3A_INFO("EnginePath: game functions %s", ok ? "verified"
+                 : "do not match this build - engine routes disabled");
+    }
+    return g_ep_verified == 1;
+}
+
+std::mutex              g_ep_mutex;       // guards the request and the result
+const void*             g_ep_ref    = nullptr;
+uint32_t                g_ep_refid  = 0;
+float                   g_ep_radius = 100.0f;
+std::vector<game::Vec3> g_ep_points;
+std::atomic<int>        g_ep_request{ 0 };  // 1 = a new request is waiting
+std::atomic<int>        g_ep_cancel{ 0 };
+std::atomic<int>        g_ep_state{ 0 };    // see EnginePathState()
+// Every request and cancel gets a new number. A result is handed over only if
+// it answers the newest one: a route worked out for the previous target must
+// never be adopted by the walk to the next.
+uint32_t                g_ep_seq      = 0;  // under g_ep_mutex
+uint32_t                g_ep_req_seq  = 0;  // the waiting request's number (mutex)
+uint32_t                g_ep_work_seq = 0;  // hook thread: the request being worked
+bool                    g_ep_ticking = false;   // hook thread only
+int                     g_ep_frames  = 0;       // hook thread only
+// Where the player was when the request went in (hook thread). A load door,
+// fast travel or a load frees the navmesh the request points into; ticking the
+// mover after that crashes deep in the engine's pathing (the FNV mod saw it),
+// so the request is then dropped WITHOUT calling into the mover.
+const void*             g_ep_cell = nullptr;
+const void*             g_ep_ws   = nullptr;
+float                   g_ep_px = 0.0f, g_ep_py = 0.0f;
+constexpr float         kEpTeleportJump = 4096.0f;   // as the FNV mod
+
+// Hand a result to the walk, unless a newer request or a cancel came in since
+// this one was taken (then it answers a question nobody is asking any more).
+void EnginePathPublish(std::vector<game::Vec3>&& pts, int state)
+{
+    std::lock_guard<std::mutex> lk(g_ep_mutex);
+    if (g_ep_work_seq != g_ep_seq) {
+        F3A_INFO("EnginePath: result of an older request dropped");
+        return;
+    }
+    g_ep_points = std::move(pts);
+    g_ep_state.store(state);
+}
+
+void EnginePathFail(const char* why)
+{
+    F3A_INFO("EnginePath: %s", why);
+    EnginePathPublish({}, 3);
+}
+
+// The player's cell and worldspace (null for an interior).
+void PlayerArea(const void** cell, const void** ws)
+{
+    *cell = nullptr; *ws = nullptr;
+    auto* p = rt::Player();
+    if (!p || IsBadReadPtr(p, sizeof(*p))) return;
+    TESObjectCELL* c = p->parentCell;
+    *cell = c;
+    if (c && !IsBadReadPtr(c, 0xC4)) *ws = c->worldSpace;
+}
+
+// Is the player still where the request being worked went in? (FNV mod's
+// guard: the worldspace for exteriors — crossing exterior cells keeps the
+// streamed navmesh — the cell for interiors, and a jump of thousands of units
+// for a teleport.) `area` says which of the two failed.
+bool EpSameArea(bool* area)
+{
+    const void* cell; const void* ws;
+    PlayerArea(&cell, &ws);
+    auto* p = rt::Player();
+    float jx = p ? p->posX - g_ep_px : 0.0f, jy = p ? p->posY - g_ep_py : 0.0f;
+    bool areaChanged = !p || ws != g_ep_ws || (!ws && cell != g_ep_cell);
+    bool teleported  = !(jx * jx + jy * jy <= kEpTeleportJump * kEpTeleportJump);
+    if (area) *area = areaChanged;
+    return !areaChanged && !teleported;
+}
+
+// Called at the top of every PlayerMover::Update, on the game's thread.
+void TickEnginePath(void* mover, float dt)
+{
+    if (g_ep_cancel.exchange(0) && g_ep_ticking) {
+        // Reset only where the request still belongs: after a load door what
+        // the mover holds points into freed memory (see below).
+        if (EpSameArea(nullptr)) reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
+        g_ep_ticking = false;
+        F3A_INFO("EnginePath: cancelled");
+    }
+
+    if (g_ep_request.exchange(0)) {
+        const void* ref; uint32_t refid; float radius;
+        {
+            std::lock_guard<std::mutex> lk(g_ep_mutex);
+            ref = g_ep_ref; refid = g_ep_refid; radius = g_ep_radius;
+            g_ep_work_seq = g_ep_req_seq;
+        }
+        if (g_ep_ticking) {                       // a newer request replaces it
+            if (EpSameArea(nullptr)) reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
+            g_ep_ticking = false;
+        }
+        if (!EnginePathCodeOk()) { EnginePathFail("unavailable on this build"); return; }
+        auto* player = reinterpret_cast<UInt8*>(rt::Player());
+        if (!player || IsBadReadPtr(player, 0x188)) { EnginePathFail("no player"); return; }
+        // The game calls these without checking them; we check first.
+        if (*reinterpret_cast<void**>(player + 0x184) != mover) {
+            EnginePathFail("the hooked mover is not the player's"); return;
+        }
+        void* proc = *reinterpret_cast<void**>(player + 0x60);
+        if (!proc || IsBadReadPtr(proc, 4)) { EnginePathFail("player has no process"); return; }
+        auto* r = reinterpret_cast<const TESObjectREFR*>(ref);
+        if (!r || IsBadReadPtr(r, 0x40) || r->refID != refid || !r->parentCell) {
+            EnginePathFail("target reference is gone"); return;
+        }
+        auto* m = reinterpret_cast<UInt8*>(mover);
+        if (IsBadReadPtr(m, 0x80)) { EnginePathFail("mover unreadable"); return; }
+
+        reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
+        bool ok = reinterpret_cast<SetGoalFn>(kSetPathfindingGoal)(
+                      player, const_cast<void*>(ref), radius, nullptr);
+        UInt8 inflight = m[0x74];
+        F3A_INFO("EnginePath: SetPathfindingGoal(%08X, r=%.0f) -> %d, in flight %d",
+                 refid, radius, (int)ok, (int)inflight);
+        if (!ok) {
+            reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
+            EnginePathFail("the game found no route");
+            return;
+        }
+        if (!inflight) {                           // already within the radius
+            reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
+            EnginePathFail("already there - nothing to route");
+            return;
+        }
+        g_ep_ticking = true;
+        g_ep_frames  = 0;
+        PlayerArea(&g_ep_cell, &g_ep_ws);
+        g_ep_px = rt::Player()->posX;
+        g_ep_py = rt::Player()->posY;
+    }
+    if (!g_ep_ticking) return;
+
+    // Same area as when the request went in?
+    {
+        bool areaChanged = false;
+        if (!EpSameArea(&areaChanged)) {
+            // Not reset, not ticked: what the mover holds points into freed
+            // memory. The next request's FullReset clears it, as the engine's
+            // own load does.
+            g_ep_ticking = false;
+            EnginePathFail(areaChanged ? "the player changed area mid-request - dropped"
+                                       : "the player was moved mid-request - dropped");
+            return;
+        }
+        auto* p = rt::Player();
+        g_ep_px = p->posX;
+        g_ep_py = p->posY;
+    }
+
+    reinterpret_cast<MoverUpdFn>(kActorMoverUpdate)(mover, dt);
+    ++g_ep_frames;
+    auto* m = reinterpret_cast<UInt8*>(mover);
+    if (m[0x74] && g_ep_frames < kPathTimeoutFrames) return;   // still working
+
+    // Answered (or given up): copy the waypoints straight away, while the
+    // solution is certainly alive, then reset the mover.
+    std::vector<game::Vec3> pts;
+    const UInt8* sol = *reinterpret_cast<const UInt8**>(m + 0x20);
+    if (!sol) {
+        const UInt8* h = *reinterpret_cast<const UInt8**>(m + 0x24);
+        if (h && !IsBadReadPtr(h, 0x10)) sol = *reinterpret_cast<const UInt8* const*>(h + 0x0C);
+    }
+    const bool timedOut = g_ep_frames >= kPathTimeoutFrames;
+    UInt32 total = 0, otherArea = 0;
+    if (!timedOut && sol && !IsBadReadPtr(sol, 0x2C)) {
+        const UInt8* data = *reinterpret_cast<const UInt8* const*>(sol + 0x24);
+        UInt32 n = *reinterpret_cast<const UInt32*>(sol + 0x28);
+        if (data && n > 0 && n <= 4096 && !IsBadReadPtr(data, n * 0x3C)) {
+            total = n;
+            for (UInt32 i = 0; i < n; ++i) {
+                const UInt8* e = data + i * 0x3C;
+                // Each waypoint names its cell (+0x1C) and worldspace (+0x20).
+                // A route that goes on through a door continues in another
+                // area whose coordinates mean something else here: the walk
+                // takes it up to the door and crosses by its own door logic.
+                auto* wcell = *reinterpret_cast<TESObjectCELL* const*>(e + 0x1C);
+                const void* wws = *reinterpret_cast<const void* const*>(e + 0x20);
+                if (!wws && wcell && !IsBadReadPtr(wcell, 0xC4)) wws = wcell->worldSpace;
+                bool other;
+                if (wws)        other = (wws != g_ep_ws);           // exterior point
+                else if (wcell) other = g_ep_ws ? true              // interior point
+                                                : (wcell != g_ep_cell);
+                else            other = false;                      // not recorded
+                if (other) {
+                    otherArea = n - i;
+                    break;
+                }
+                const float* xyz = reinterpret_cast<const float*>(e + 0x08);
+                if (std::isfinite(xyz[0]) && std::isfinite(xyz[1]) && std::isfinite(xyz[2]))
+                    pts.push_back({ xyz[0], xyz[1], xyz[2] });
+            }
+        }
+    }
+    int state = *reinterpret_cast<int*>(m + 0x6C);
+    F3A_INFO("EnginePath: answered after %d frame(s)%s, mover state %d, %u waypoint(s)"
+             " (%u of %u in another area, left out)",
+             g_ep_frames, timedOut ? " (timed out)" : "", state,
+             (unsigned)pts.size(), (unsigned)otherArea, (unsigned)total);
+    reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
+    g_ep_ticking = false;
+    // State 7 is the engine's own "failed": whatever partial route it left is
+    // not a way to the target, and walking it ends at a wall.
+    if (state == 7) pts.clear();
+    bool any = !pts.empty();
+    EnginePathPublish(std::move(pts), any ? 2 : 3);
+}
+
 void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
 {
     g_last_mover = mover;
+    TickEnginePath(mover, dt);
     // Aiming rides along on this hook. It has nothing to do with walking; it is
     // here because this is the one place we already run INSIDE the engine's
     // per-frame update, which is where a view change has to happen to survive
@@ -292,6 +551,14 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     if (g_stop_pending.exchange(false)) {
         StopNow(mover);
         g_brake = kBrakeFrames;
+    }
+    // A walk (re)started by SetGoal: fresh state, set here on the thread that
+    // owns it rather than written from the poll thread mid-frame.
+    if (g_reseed_pending.exchange(false)) {
+        g_heading_seeded = false;    // seed on this frame
+        g_step_accum     = 0.0f;
+        g_current_anim   = kAnimIdle;  // force the walk anim to be issued
+        g_watch_stage    = 3;          // a new walk ends the previous stop's probe
     }
 
     if (!g_active.load()) {
@@ -558,12 +825,8 @@ void SetGoal(float x, float y, bool run)
     g_goal_y.store(y);
     g_run.store(run);
     g_goal_stamp.fetch_add(1);      // feeds the watchdog in the hook
-    if (!g_active.exchange(true)) {
-        g_heading_seeded = false;   // seed on next frame
-        g_step_accum = 0.0f;
-        g_current_anim = kAnimIdle;  // force the walk anim to be issued
-        g_watch_stage  = 3;          // a new walk ends the previous stop's probe
-    }
+    if (!g_active.exchange(true))
+        g_reseed_pending.store(true);   // the hook resets its state (next frame)
 }
 
 void Clear()
@@ -580,6 +843,41 @@ void Clear()
     // call into the game from the polling thread. The very next frame clears the
     // movement bits before the engine's Update gets to act on them.
     g_stop_pending.store(true);
+}
+
+void RequestEnginePath(const void* refr, uint32_t refid, float radius)
+{
+    std::lock_guard<std::mutex> lk(g_ep_mutex);
+    ++g_ep_seq;                       // whatever was being worked is now stale
+    g_ep_points.clear();
+    if (!g_installed.load() || !config::Get().engine_path) { g_ep_state.store(3); return; }
+    g_ep_ref = refr; g_ep_refid = refid; g_ep_radius = radius;
+    g_ep_req_seq = g_ep_seq;
+    g_ep_state.store(1);
+    g_ep_request.store(1);
+}
+
+void CancelEnginePath()
+{
+    std::lock_guard<std::mutex> lk(g_ep_mutex);
+    ++g_ep_seq;
+    g_ep_request.store(0);
+    g_ep_cancel.store(1);
+    g_ep_points.clear();
+    g_ep_state.store(0);
+}
+
+int EnginePathState() { return g_ep_state.load(); }
+
+bool TakeEnginePath(std::vector<game::Vec3>* out)
+{
+    std::lock_guard<std::mutex> lk(g_ep_mutex);
+    int st = g_ep_state.load();
+    if (st != 2 && st != 3) return false;
+    if (out) *out = std::move(g_ep_points);
+    g_ep_points.clear();
+    g_ep_state.store(0);
+    return true;
 }
 
 float CurrentHeadingDeg()

@@ -1,5 +1,6 @@
 #include "f3a/tolk_bridge.h"
 #include "f3a/logger.h"
+#include "f3a/config.h"
 
 #include <windows.h>
 #include <sapi.h>
@@ -131,6 +132,8 @@ bool Init()
     if (dll && ResolveTolk(dll, g_tolk)) {
         g_tolk.Load();
         g_tolk.TrySAPI(true);     // SAPI as last resort inside Tolk
+        // [General] PreferSAPI = 1 forces SAPI even with NVDA/JAWS running.
+        if (g_tolk.PreferSAPI) g_tolk.PreferSAPI(config::Get().prefer_sapi);
         const wchar_t* name = g_tolk.Detect();
         if (name) {
             g_reader_name = name;
@@ -202,20 +205,28 @@ const char* ActiveReaderName()
 struct RecentLine { std::string text; std::chrono::steady_clock::time_point at; };
 std::vector<RecentLine> g_recent;
 constexpr int kRecentKeep = 32;
-const auto kRepeatAfter = std::chrono::minutes(5);
+// Two seconds, as in the FNV mod: only the SAME line arriving twice in a
+// row is swallowed. It used to be five minutes for everything, which also
+// silenced a second "+25 PD", "Weź Stimpak" for the next stimpak, the next
+// "Otwieram drzwi"... The game's recurring hints have their own once-per-
+// session rule now (polling_loop LooksLikeHint), so this needn't do that job.
+const auto kRepeatAfter = std::chrono::seconds(2);
 
 bool SaidRecently(std::string_view text)
 {
     auto now = std::chrono::steady_clock::now();
-    for (auto& r : g_recent) {
-        if (r.text != text) continue;
-        if (now - r.at < kRepeatAfter) return true;
-        r.at = now;
-        return false;
-    }
+    for (const auto& r : g_recent)
+        if (r.text == text && now - r.at < kRepeatAfter) return true;
+    return false;
+}
+
+void RememberSaid(std::string_view text)
+{
+    auto now = std::chrono::steady_clock::now();
+    for (auto& r : g_recent)
+        if (r.text == text) { r.at = now; return; }
     if ((int)g_recent.size() >= kRecentKeep) g_recent.erase(g_recent.begin());
     g_recent.push_back({ std::string(text), now });
-    return false;
 }
 
 void Speak(std::string_view text, Priority prio, bool interrupt)
@@ -225,9 +236,6 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
     std::lock_guard<std::mutex> lk(g_mutex);
 
     if (!interrupt && SaidRecently(text)) return;
-
-    // Remember the last thing we actually spoke so RepeatLast can replay it.
-    g_last_text.assign(text);
 
     // g_current_prio holds the priority of the last utterance, but it's only
     // meaningful WHILE that utterance is still playing. It is never cleared on
@@ -244,6 +252,12 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
     const int current = g_current_prio.load();
     // Drop only if a STRICTLY higher-priority utterance is still in flight.
     if (!interrupt && current > static_cast<int>(prio)) return;
+
+    // Remembered only once it is really going to be spoken: a line dropped for
+    // priority must neither block its own next try nor be what RepeatLast
+    // replays.
+    RememberSaid(text);
+    g_last_text.assign(text);
 
     g_current_prio.store(static_cast<int>(prio));
     g_last_speak_at = now;

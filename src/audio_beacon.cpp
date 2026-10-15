@@ -32,6 +32,9 @@ struct Buf {
 };
 Buf g_bufs[kNumBuffers];
 int g_next = 0;
+// The sonar sweep's own device and buffer (see Sweep).
+HWAVEOUT g_sweep_wave = nullptr;
+Buf      g_sweep_buf;
 
 // constant-power pan + front/back pitch + distance attenuation
 void Synthesize(std::vector<short>& out, float azimuth_deg, float dist01)
@@ -79,9 +82,9 @@ void Synthesize(std::vector<short>& out, float azimuth_deg, float dist01)
 // main thread before the engine's audio is up) hangs/crashes the game. Instead
 // we open lazily on the first Ping, which only happens once the player is in
 // the world.
-bool OpenLocked()
+bool OpenDeviceLocked(HWAVEOUT& h)
 {
-    if (g_wave) return true;
+    if (h) return true;
 
     WAVEFORMATEX fmt{};
     fmt.wFormatTag      = WAVE_FORMAT_PCM;
@@ -91,15 +94,17 @@ bool OpenLocked()
     fmt.nBlockAlign     = fmt.nChannels * fmt.wBitsPerSample / 8;
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
 
-    MMRESULT mr = waveOutOpen(&g_wave, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL);
+    MMRESULT mr = waveOutOpen(&h, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL);
     if (mr != MMSYSERR_NOERROR) {
         F3A_WARN("audio: waveOutOpen failed (%u); beacon disabled.", mr);
-        g_wave = nullptr;
+        h = nullptr;
         return false;
     }
     F3A_INFO("audio: beacon device ready.");
     return true;
 }
+
+bool OpenLocked() { return OpenDeviceLocked(g_wave); }
 
 } // namespace
 
@@ -113,6 +118,15 @@ bool Init()
 void Shutdown()
 {
     std::lock_guard<std::mutex> lk(g_mutex);
+    if (g_sweep_wave) {
+        waveOutReset(g_sweep_wave);
+        if (g_sweep_buf.prepared) {
+            waveOutUnprepareHeader(g_sweep_wave, &g_sweep_buf.hdr, sizeof(WAVEHDR));
+            g_sweep_buf.prepared = false;
+        }
+        waveOutClose(g_sweep_wave);
+        g_sweep_wave = nullptr;
+    }
     if (!g_wave) return;
     waveOutReset(g_wave);
     for (auto& b : g_bufs) {
@@ -324,8 +338,30 @@ void Sweep(const std::vector<SweepBlip>& blips, int total_ms)
         pcm[i * 2 + 1] = (short)(R[i] * scale * 30000.0f);
     }
     std::lock_guard<std::mutex> lk(g_mutex);
-    if (!g_wave && !OpenLocked()) return;
-    EmitLocked(pcm);
+    // The sweep plays on its OWN device. On the shared one it was queued
+    // ahead of everything else for up to six seconds, so the aim cues and
+    // pings that came during it played late — after the moment they were
+    // about. Windows mixes the two devices.
+    if (!g_sweep_wave && !OpenDeviceLocked(g_sweep_wave)) {
+        if (!g_wave && !OpenLocked()) return;
+        EmitLocked(pcm);                           // no second device: share
+        return;
+    }
+    Buf& b = g_sweep_buf;
+    if (b.prepared) {
+        // A new sweep replaces one still playing.
+        if (!(b.hdr.dwFlags & WHDR_DONE)) waveOutReset(g_sweep_wave);
+        waveOutUnprepareHeader(g_sweep_wave, &b.hdr, sizeof(WAVEHDR));
+        b.prepared = false;
+    }
+    b.pcm.swap(pcm);
+    b.hdr = WAVEHDR{};
+    b.hdr.lpData         = reinterpret_cast<LPSTR>(b.pcm.data());
+    b.hdr.dwBufferLength = (DWORD)(b.pcm.size() * sizeof(short));
+    if (waveOutPrepareHeader(g_sweep_wave, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR)
+        return;
+    b.prepared = true;
+    waveOutWrite(g_sweep_wave, &b.hdr, sizeof(WAVEHDR));
 }
 
 } // namespace f3a::audio

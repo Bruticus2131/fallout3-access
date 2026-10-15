@@ -15,7 +15,12 @@ namespace f3a::navmesh {
 // `out_waypoints` (ordered, ending at/near `to`) and returns true. Returns
 // false if there's no navmesh, the endpoints aren't on it, or no path exists
 // — callers should fall back to straight-line guidance then.
+//
+// `avoid` (optional): points the path must not pass through — a locked door
+// found on the way. Navmesh triangles centred within ~120 units of one are
+// treated as walls, so the search goes round them if there is another way.
 bool BuildPath(const game::Vec3& from, const game::Vec3& to,
-               std::vector<game::Vec3>& out_waypoints);
+               std::vector<game::Vec3>& out_waypoints,
+               const std::vector<game::Vec3>* avoid = nullptr);
 
 } // namespace f3a::navmesh

@@ -40,6 +40,7 @@ bool g_side_target = false;
 bool g_want_container = false;
 bool g_kUp = false, g_kDown = false;
 int  g_restore_wait = 0;      // ticks before another focus restore may be asked
+int  g_restore_tries = 0;     // restores asked since the focus was last seen right
 
 const char* SideName(const void* box);   // defined below
 std::string CountSuffix(int rows);       // defined below
@@ -85,12 +86,22 @@ void OnTick(float)
         game::ContainerSide mine{}, theirs{};
         if (game::GetContainerSides(&mine, &theirs) && theirs.rows <= 0) {
             g_want_container = false;          // emptied: your column it is
+        } else if (g_restore_tries >= 5) {
+            // The menu keeps refusing: stop fighting it and read the column
+            // the focus is really in.
+            F3A_INFO("Container: focus restore given up after %d tries", g_restore_tries);
+            g_want_container = false;
         } else {
             if (g_restore_wait > 0) --g_restore_wait;
-            else { poll::RequestContainerSide(true); g_restore_wait = 3; }
+            else {
+                poll::RequestContainerSide(true, /*quiet*/true);
+                g_restore_wait = 3;
+                ++g_restore_tries;
+            }
             return;
         }
     }
+    if (focusSide == 1) g_restore_tries = 0;
     // Only in the menus that share this tick (quantity, sleep/wait): in the
     // container screen a generic reader can land on the other column.
     if (!sel && !inContainer) sel = game::GetKeyboardSelection();
@@ -225,6 +236,7 @@ void PollFilterKeys()
 
     if (sideL || sideR) {
         g_want_container = sideR;
+        g_restore_tries = 0;
         poll::RequestContainerSide(sideR);
         g_side_target = sideR;
         g_side_wait   = 6;    // ~0.5 s
@@ -291,13 +303,14 @@ void SwitchSide()
     bool onContainer = focus >= 0 ? (focus == 1) : g_on_container;
     poll::RequestContainerSide(!onContainer);
     g_want_container = !onContainer;
+    g_restore_tries = 0;
     g_side_target = !onContainer;
     g_side_wait   = 6;
 }
 
 void OnOpen()  { g_last.clear(); g_last_box = nullptr; g_on_container = false;
                  g_filter_say = 0; g_filter_queue = false; g_side_wait = 0;
-                 g_want_container = false; g_restore_wait = 0;
+                 g_want_container = false; g_restore_wait = 0; g_restore_tries = 0;
                  g_kUp   = (GetAsyncKeyState(VK_UP)   & 0x8000) != 0;
                  g_kDown = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
                  // Keys already down when the menu opens must not fire.
@@ -313,7 +326,6 @@ void Init()
 {
     hotkeys::Bind(config::Get().hotkeys.container_side, &SwitchSide);
     menu::RegisterMenu(menu::Id::Container, &OnOpen, &OnClose, &OnTick);
-    menu::RegisterMenu(menu::Id::Quantity,  &OnOpen, &OnClose, &OnTick);
     menu::RegisterMenu(menu::Id::SleepWait, &OnOpen, &OnClose, &OnTick);
     F3A_INFO("Container module ready.");
 }

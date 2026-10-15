@@ -40,6 +40,19 @@ std::string g_confirm_pending;    // name awaiting a second Enter (undiscovered)
 int         g_confirm_travel = 0;    // ticks until we press the travel button
 std::string g_travel_name;
 
+// "Walk there" (Home) waits for the map to close: the walk stops itself under
+// any open menu, so starting it while the map was still up ended it silently
+// on its first tick.
+struct PendingWalk {
+    bool        on = false;
+    game::Vec3  pos{};
+    std::string name;
+    const void* refr = nullptr;
+    uint32_t    form = 0;
+    int         ticks = 0;          // left to wait for the map to close
+};
+PendingWalk g_walk;
+
 bool g_pgup = false, g_pgdn = false, g_enter = false, g_home = false, g_end = false;
 
 enum Filter { F_All = 0, F_Discovered, F_Undiscovered, F_Count };
@@ -163,8 +176,13 @@ void WalkToSelected()
     }
     const auto& m = g_markers[g_index];
     guide::Stop();
-    autowalk::StartTo(m.pos, m.name, m.refr, m.form_id);
-    poll::RequestMenuBack();             // leave the map and start walking
+    g_walk.on    = true;
+    g_walk.pos   = m.pos;
+    g_walk.name  = m.name;
+    g_walk.refr  = m.refr;
+    g_walk.form  = m.form_id;
+    g_walk.ticks = 60;                   // ~5 s
+    poll::RequestMenuBack();             // leave the map; Tick starts the walk
 }
 
 } // namespace
@@ -176,8 +194,26 @@ void Tick(float)
         if (g_open) {
             g_open = false; g_index = -1;
             g_confirm_pending.clear(); g_last_objectives.clear();
+            g_confirm_travel = 0;        // a travel press must not wait for the next map
+        }
+        if (g_walk.on) {
+            auto a = menu::ActiveMenu();
+            if (poll::IsGameplayActive() && !poll::MenuModeActive() &&
+                (a == menu::Id::None || a == menu::Id::HUDMain)) {
+                g_walk.on = false;
+                autowalk::StartTo(g_walk.pos, g_walk.name, g_walk.refr, g_walk.form);
+            } else if (--g_walk.ticks <= 0) {
+                g_walk.on = false;
+                tolk::Speak("Zamknij Pip-Boya i wybierz cel jeszcze raz.",
+                            tolk::Priority::System, true);
+            }
         }
         return;
+    }
+    if (g_walk.on && --g_walk.ticks <= 0) {   // the map never closed
+        g_walk.on = false;
+        tolk::Speak("Zamknij Pip-Boya i wybierz cel jeszcze raz.",
+                    tolk::Priority::System, true);
     }
 
     // Quests tab: speak the selected quest's objectives when they change. The

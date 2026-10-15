@@ -227,8 +227,11 @@ int LocateTri(const std::vector<Tri>& tris, const Vec3& p, float maxFallback,
 constexpr float kStartFallbackDist = 2000.0f;
 constexpr float kGoalFallbackDist  = 800.0f;
 
+constexpr float kAvoidRadius = 120.0f;   // a doorway's worth of triangles
+
 bool BuildPath(const Vec3& from, const Vec3& to,
-               std::vector<Vec3>& out_waypoints)
+               std::vector<Vec3>& out_waypoints,
+               const std::vector<Vec3>* avoid)
 {
     out_waypoints.clear();
 
@@ -276,6 +279,25 @@ bool BuildPath(const Vec3& from, const Vec3& to,
     std::vector<char>  closed(N, 0);
     using PQ = std::pair<float, int>;            // (fScore, tri)
     std::priority_queue<PQ, std::vector<PQ>, std::greater<PQ>> open;
+
+    // Places to stay out of: closed before the search starts, so A* treats
+    // them as walls. Never the start or the goal triangle themselves.
+    if (avoid && !avoid->empty()) {
+        int blocked = 0;
+        for (int i = 0; i < N; ++i) {
+            if (i == start || i == goal) continue;
+            for (const auto& a : *avoid) {
+                float dx = tris[i].centroid.x - a.x, dy = tris[i].centroid.y - a.y;
+                float dz = tris[i].centroid.z - a.z;
+                if (dx * dx + dy * dy <= kAvoidRadius * kAvoidRadius &&
+                    std::fabs(dz) <= 160.0f) {
+                    closed[i] = 1; ++blocked; break;
+                }
+            }
+        }
+        F3A_INFO("navmesh: %d triangle(s) blocked around %u avoided point(s)",
+                 blocked, (unsigned)avoid->size());
+    }
 
     g[start] = 0.0f;
     open.push({ Dist(tris[start].centroid, tris[goal].centroid), start });

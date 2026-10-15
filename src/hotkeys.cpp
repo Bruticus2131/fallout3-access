@@ -7,6 +7,7 @@
 #include "f3a/console.h"
 #include "f3a/game_access.h"
 #include "f3a/menu_dispatch.h"
+#include "f3a/modules.h"
 
 #include <windows.h>
 #include <map>
@@ -96,6 +97,13 @@ bool IsForegroundFallout()
 void ToggleMod()
 {
     bool now = !config::IsEnabled();
+    if (!now) {
+        // Switched off, the modules stop ticking: whatever they hold down (a
+        // walk, the attack key of a burst, the aim button) has to be let go
+        // now or it stays down.
+        modules::autowalk::Stop();
+        modules::worldscan::StopInput();
+    }
     config::SetEnabled(now);
     tolk::Speak(strings::Render(now ? strings::Key::ModEnabled
                                     : strings::Key::ModDisabled),
@@ -286,6 +294,12 @@ void Poll()
             continue;
         }
         bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        // Mod switched off: only the toggle key works, so it can be switched
+        // back on.
+        if (!config::IsEnabled() && b.dik != config::Get().hotkeys.toggle_mod) {
+            b.was_down = down;
+            continue;
+        }
         if (down && !b.was_down) {
             F3A_DEBUG("hotkey fired: dik=0x%02X vk=0x%02X", b.dik, vk);
             if (b.action) b.action();

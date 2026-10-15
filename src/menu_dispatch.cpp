@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 
 namespace f3a::menu {
 namespace {
@@ -23,10 +24,26 @@ std::unordered_map<uint32_t, Slot> g_slots;
 // one. A single "active" field was wrong: the VATS tutorial pops up a second
 // AFTER VATS, and when it closed it cleared the field while VATS was still on
 // screen — so VATS stopped getting ticks and its keys went dead.
+//
+// The stack itself is the poll thread's (it opens, closes and ticks menus).
+// The main thread asks too — "is VATS up?", "is the quantity prompt the
+// active menu?" — and walking a vector while the other thread reallocates it
+// is a crash, so those answers are published as atomics: the active id, and
+// one bit per open menu id (all FO3 menu ids lie in 1000..1127).
 std::vector<Id> g_stack;
-Id g_active = Id::None;
+std::atomic<Id> g_active{ Id::None };
+std::atomic<uint32_t> g_open_bits[4];
 
-void Recompute() { g_active = g_stack.empty() ? Id::None : g_stack.back(); }
+void Recompute()
+{
+    uint32_t bits[4] = {};
+    for (Id open : g_stack) {
+        uint32_t n = (uint32_t)open - 1000u;
+        if (n < 128u) bits[n >> 5] |= 1u << (n & 31u);
+    }
+    for (int k = 0; k < 4; ++k) g_open_bits[k].store(bits[k]);
+    g_active.store(g_stack.empty() ? Id::None : g_stack.back());
+}
 
 } // namespace
 
@@ -34,14 +51,14 @@ void Init()
 {
     g_slots.clear();
     g_stack.clear();
-    g_active = Id::None;
+    Recompute();
 }
 
 void Shutdown()
 {
     g_slots.clear();
     g_stack.clear();
-    g_active = Id::None;
+    Recompute();
 }
 
 void RegisterMenu(Id id, OpenHandler on_open,
@@ -128,12 +145,13 @@ void OnTick(float dt)
     }
 }
 
-Id ActiveMenu() { return g_active; }
+Id ActiveMenu() { return g_active.load(); }
 
 bool IsOpen(Id id)
 {
-    for (Id open : g_stack) if (open == id) return true;
-    return false;
+    uint32_t n = (uint32_t)id - 1000u;
+    if (n >= 128u) return false;
+    return (g_open_bits[n >> 5].load() >> (n & 31u)) & 1u;
 }
 
 std::string_view DisplayName(Id id)

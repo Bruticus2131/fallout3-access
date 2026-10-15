@@ -4,6 +4,7 @@
 #include "f3a/strings.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/logger.h"
+#include "f3a/polling_loop.h"
 
 #include <windows.h>
 #include <string>
@@ -48,6 +49,7 @@ const strings::Key kDescKeys[kNumSpecials] = {
 std::string g_learned[kNumSpecials];
 
 bool g_open = false;
+int  g_open_wait = 0;    // ticks spent waiting for the first value sample
 bool g_up = false, g_down = false, g_left = false, g_right = false, g_enter = false;
 
 // Where the highlight sits. With no text in the menu this follows the player's
@@ -65,10 +67,11 @@ std::string Description(int i)
     return strings::Render(kDescKeys[i]);
 }
 
+// Sampled on the main thread (poll::PlayerSpecial): this module runs on the
+// poll thread, and GetActorValue is a virtual call into the game.
 int ReadValue(int i)
 {
-    float v = game::GetPlayerAV(5 + i);   // 5..11 = SPECIAL
-    return v < 0.0f ? -1 : (int)(v + 0.5f);
+    return poll::PlayerSpecial(i);
 }
 
 std::string Describe(int i, bool withDescription)
@@ -165,10 +168,16 @@ void Tick(float)
 
     if (menu::ActiveMenu() != menu::Id::SpecialBookMenu) {
         if (g_open) g_open = false;
+        g_open_wait = 0;
         return;
     }
 
     if (!g_open) {
+        // The values come from the main thread's sample, which may not have
+        // been taken yet on the first tick: wait for it (briefly), so the
+        // opening line carries the numbers.
+        if (ReadValue(0) < 0 && ++g_open_wait < 6) return;
+        g_open_wait = 0;
         g_open  = true;
         g_index = 0;
         for (int i = 0; i < kNumSpecials; ++i) g_values[i] = ReadValue(i);

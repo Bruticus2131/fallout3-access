@@ -72,6 +72,7 @@ struct QuestTarget {
     Vec3        position;
     bool        valid;
     const void* refr = nullptr;   // objective target ref (for cross-space checks)
+    uint32_t    refid = 0;        // its refID — guards `refr` against going stale
 };
 QuestTarget GetCurrentQuestTarget();
 
@@ -97,7 +98,21 @@ struct WorldEntity {
 
 // Is this reference an actor currently fighting the PLAYER? Asked of the
 // engine (Actor::GetCombatTarget, a virtual slot), not guessed from a field.
+// MAIN THREAD ONLY (a virtual call); returns false anywhere else.
 bool IsHostileToPlayer(const void* refr);
+
+// Which nearby actors are fighting the player, worked out on the MAIN thread
+// (RefreshHostiles, from MainThreadWork) and read anywhere: ScanNearby marks
+// `hostile` and honours `hostiles_only` from this set.
+void RefreshHostiles();
+bool IsKnownHostile(uint32_t refid);
+
+// The game's main thread, as seen by MainThreadWork (NoteMainThread).
+void NoteMainThread();
+bool OnMainThread();
+
+// Forget the cached world-map markers (another save has other discoveries).
+void ClearMapMarkerCache();
 
 // The engine's OWN menu cursor (InterfaceManager::cursor, a Tile). Positions
 // are in the same coordinate space as the tile positions we read elsewhere.
@@ -310,6 +325,11 @@ struct VatsPick {
     // SOMETHING rather than go silent, and it says this list's entry instead.
     char names[8][48] = {};
     char chances[8][16] = {};   // each part's own hit chance, same order
+    // Filled by the main-thread sampler, not by GetVatsPick: the target's name
+    // (GetVatsSelectionText; empty = no target shown) and whether this record
+    // was taken in the VATS session that is open now.
+    char target[128] = {};
+    bool sampled = false;
 };
 bool GetVatsPick(VatsPick* out);
 
@@ -570,7 +590,8 @@ void SetPlayerAngleDeg(int axisAscii, float degrees);
 // Native teleport (`Player.MoveTo`) via 0x00528730 — move the player to the
 // given reference (cell-aware). Last-resort navigation when a target can't be
 // walked to. MUST be called on the MAIN thread.
-void TeleportPlayerToRef(const void* targetRefr);
+// `expectedRefID` guards a stale pointer (0 = unchecked; callers pass it).
+void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID);
 
 // True when a target reference shares the player's coordinate frame (same cell,
 // or both in the same exterior worldspace). On-foot guidance walks toward a
@@ -738,6 +759,9 @@ struct BarterState {
     int  vendor_caps;
     bool player_side_active;     // true if focus is on player's inventory
     std::optional<InventoryItem> selected;
+    // False until the reader is implemented (GetBarterState is still a stub):
+    // the module must say nothing rather than "0 for 0".
+    bool valid = false;
 };
 BarterState GetBarterState();
 
@@ -750,6 +774,9 @@ struct LockpickState {
     int   picks_left;
     bool  broken;
     bool  unlocked;
+    // False until the reader is implemented (GetLockpickState is still a
+    // stub): all zeros read as "pick on the sweet spot".
+    bool  valid = false;
 };
 LockpickState GetLockpickState();
 
@@ -817,6 +844,15 @@ std::string GetHudMessage();
 // The level-up banner on the HUD's XP meter ("NASTĘPNY POZIOM"), empty unless
 // the game is showing it right now.
 std::string GetHudLevelUpText();
+
+// The HUD's quest reminder (HUDMainMenu → QuestReminder), which is where the
+// game shows "quest updated / added / completed", location discoveries and
+// the new objective. `headline` = QuestAdded (built from its child tiles,
+// which the game animates one letter at a time), `stages` = QuestStages (one
+// objective line per child, joined with ". "). Read whether or not the HUD is
+// the active menu — the popup is filled in under a terminal or a dialogue.
+// Memory reads only. False when there is no HUD.
+bool GetQuestReminder(std::string* headline, std::string* stages);
 
 // The crosshair activate prompt (HUD "Info" tile): the verb + target you'd
 // interact with — "Rozmawiaj", "Weź", "Okradnij", "Otwórz"… Empty when nothing

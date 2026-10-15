@@ -17,6 +17,7 @@
 #include <thread>
 #include <unordered_set>
 #include <cstring>
+#include <cstdio>
 #include <cstdarg>
 #include <cmath>
 
@@ -348,6 +349,40 @@ void PollRaceSex()
 // during free gameplay so it isn't missed.
 std::string g_hud_msg;
 
+// The game's control hints — "Aby oddać strzał z broni, <key>.", "Naciśnij
+// <key>, aby ..." — come back again and again while you play, and every one
+// of them used to be read out every time. They are worth hearing once. A
+// hint is recognised by the control placeholder the game leaves in it for a
+// keyboard player (&sUActnUse;) or by the way the Polish build phrases them;
+// everything else on that line (items added, "you cannot wait with enemies
+// near", low health) is a real notice and is always read.
+bool LooksLikeHint(const std::string& raw)
+{
+    size_t amp = raw.find('&');
+    if (amp != std::string::npos && raw.find(';', amp) != std::string::npos &&
+        raw.find(';', amp) - amp <= 40)
+        return true;
+    auto starts = [&](const char* p) { return raw.rfind(p, 0) == 0; };
+    return starts("Aby ") || starts("Naciśnij") || starts("Wciśnij") ||
+           raw.find(" naciśnij ") != std::string::npos ||
+           raw.find("naciśnij ESC") != std::string::npos;
+}
+
+// Hints already read this game session (cleared only when the game restarts).
+std::vector<std::string> g_hints_said;
+
+// Should this hint be spoken now? Records it as said when the answer is yes.
+bool HintShouldSpeak(const std::string& raw)
+{
+    int mode = config::Get().hint_mode;
+    if (mode >= 2) return true;
+    if (mode <= 0) return false;
+    for (const auto& h : g_hints_said) if (h == raw) return false;
+    if (g_hints_said.size() >= 256) g_hints_said.erase(g_hints_said.begin());
+    g_hints_said.push_back(raw);
+    return true;
+}
+
 void PollHudMessages()
 {
     if (!g_system_ready || !IsGameplayActive()) { g_hud_msg.clear(); return; }
@@ -361,6 +396,10 @@ void PollHudMessages()
     // placeholders, which stay unreplaced for keyboard players and get read out
     // as gibberish ("su act use"); seeing the raw form is the only way to know
     // what to substitute them with.
+    if (LooksLikeHint(msg) && !HintShouldSpeak(msg)) {
+        F3A_INFO("HUD msg (hint, already read): '%s'", msg.c_str());
+        return;
+    }
     F3A_INFO("HUD msg: '%s'", msg.c_str());
     tolk::Speak(game::ExpandControlTokens(msg), tolk::Priority::Ui,
                 /*interrupt=*/false);
@@ -411,10 +450,60 @@ void PollHudProse()
         for (const auto& old : g_hud_seen) if (old == line) { seen = true; break; }
         if (seen) continue;
         if (HudAlreadySaid(line)) continue;
+        if (LooksLikeHint(line) && !HintShouldSpeak(line)) {
+            F3A_INFO("HUD (hint, already read): %s", line.c_str());
+            continue;
+        }
         F3A_INFO("HUD: %s", line.c_str());
-        tolk::Speak(line, tolk::Priority::Ui, false);
+        tolk::Speak(game::ExpandControlTokens(line), tolk::Priority::Ui, false);
     }
     g_hud_seen = std::move(now);
+}
+
+// Quest popups and new objectives — what the HUD's quest reminder shows.
+//
+// As in the FNV mod, read while ANY menu is up, not only in free play: the
+// objective that follows a terminal command ("Otwórz tunel Nadzorcy" →
+// "Otwórz właz Krypty") is put up while the terminal is still open, and a
+// reader that waited for the menu to close found it gone — which is why that
+// objective was never announced. Each text is said once it has held still for
+// a couple of polls (the headline is animated letter by letter), and again
+// only after something different was shown.
+std::string g_qr_head_seen, g_qr_head_said;
+std::string g_qr_stage_seen, g_qr_stage_said;
+int         g_qr_head_stable = 0, g_qr_stage_stable = 0;
+std::string g_qr_last_objective;   // shared with PollQuestChange (no double)
+DWORD       g_qr_last_objective_at = 0;
+
+void PollQuestReminder()
+{
+    if (!g_system_ready || !IsGameplayActive() || g_postload_cooldown > 0) {
+        g_qr_head_seen.clear(); g_qr_head_said.clear(); g_qr_head_stable = 0;
+        g_qr_stage_seen.clear(); g_qr_stage_said.clear(); g_qr_stage_stable = 0;
+        return;
+    }
+    std::string head, stages;
+    if (!game::GetQuestReminder(&head, &stages)) return;
+
+    auto settle = [](const std::string& now, std::string& seen, int& stable) {
+        if (now != seen) { seen = now; stable = 0; return false; }
+        return ++stable == 2;            // exactly once, two polls after it settled
+    };
+    if (settle(head, g_qr_head_seen, g_qr_head_stable) &&
+        !head.empty() && head != g_qr_head_said) {
+        g_qr_head_said = head;
+        F3A_INFO("Quest popup: '%s'", head.c_str());
+        tolk::Speak(head, tolk::Priority::Ui, false);
+    }
+    if (settle(stages, g_qr_stage_seen, g_qr_stage_stable) &&
+        !stages.empty() && stages != g_qr_stage_said) {
+        g_qr_stage_said = stages;
+        g_qr_last_objective = stages;
+        g_qr_last_objective_at = GetTickCount();
+        F3A_INFO("Quest objective: '%s'", stages.c_str());
+        tolk::Speak(stages, tolk::Priority::Ui, false);
+    }
+    if (head.empty()) g_qr_head_said.clear();      // a new popup may repeat it
 }
 
 // Crosshair activate prompt (HUD "Info" tile): speak the verb + target you're
@@ -541,7 +630,7 @@ bool        g_quest_seen = false;
 
 void PollQuestChange()
 {
-    if (!IsGameplayActive()) { g_quest_seen = false; return; }
+    if (!IsGameplayActive() || g_postload_cooldown > 0) { g_quest_seen = false; return; }
     auto m = menu::ActiveMenu();
     if (m != menu::Id::None && m != menu::Id::HUDMain) return;  // menu up: hold
     const void* q = game::GetTrackedQuestPtr();
@@ -567,9 +656,23 @@ void PollQuestChange()
         std::string name = game::GetTrackedQuestName();
         std::string line = "Zadanie: " + (name.empty() ? obj : name);
         if (!name.empty() && !obj.empty()) line += ", " + obj;
-        tolk::Speak(line, tolk::Priority::Background, false);
+        // The HUD's quest popup (PollQuestReminder) normally says this first.
+        bool popupSaid = !g_qr_last_objective.empty() && !obj.empty() &&
+                         GetTickCount() - g_qr_last_objective_at < 30000 &&
+                         g_qr_last_objective.find(obj) != std::string::npos;
+        F3A_INFO("Quest change: %s%s", line.c_str(),
+                 popupSaid ? " (already read from the HUD)" : "");
+        if (!popupSaid) tolk::Speak(line, tolk::Priority::Ui, false);
     } else if (!obj.empty()) {
-        tolk::Speak("Nowy cel: " + obj, tolk::Priority::Background, false);
+        // Already read off the HUD's quest reminder a moment ago? Then once is
+        // enough. (Ui, not Background: a hint arriving at the same moment used
+        // to drown it.)
+        bool justSaid = !g_qr_last_objective.empty() &&
+                        GetTickCount() - g_qr_last_objective_at < 30000 &&
+                        g_qr_last_objective.find(obj) != std::string::npos;
+        F3A_INFO("Quest change: new objective '%s'%s", obj.c_str(),
+                 justSaid ? " (already read from the HUD)" : "");
+        if (!justSaid) tolk::Speak("Nowy cel: " + obj, tolk::Priority::Ui, false);
     }
 }
 
@@ -843,6 +946,10 @@ constexpr float kMouseTakeover = 0.035f;
 // not a hand on a mouse, that is us.
 constexpr int kAimSettleFrames = 12;
 int g_aim_settle = 0;
+// Requests from the poll thread for the main thread's aim state (see
+// RequestAimTrack / NudgeAim): the counters below belong to the main thread.
+std::atomic<bool> g_aimtrack_reset_pending{ false };
+std::atomic<int>  g_nudge_units{ 0 };   // trims not yet applied, whole units
 int g_takeover = 0;
 std::atomic<bool> g_aim_released{ false };
 
@@ -979,6 +1086,7 @@ void TickNativeAim()
 // touches cells/collision → main thread only. Worker writes the ref then raises
 // the flag.
 const void*       g_teleport_refr = nullptr;
+uint32_t          g_teleport_refid = 0;
 std::atomic<bool> g_teleport_pending{ false };
 // Press the map's "travel to" button (a HandleClick → main thread only).
 std::atomic<bool> g_map_travel_pending{ false };
@@ -1018,6 +1126,11 @@ int   g_vats_click_hold = 0;     // frames left holding the attack button down
 // uses the same sequence guard as the loot overlay.
 std::atomic<unsigned> g_vats_pick_seq{ 0 };
 game::VatsPick        g_vats_pick;
+bool                  g_vats_pick_live = false;   // main thread only
+// SPECIAL for the vault's SPECIAL book, sampled on the main thread while that
+// menu is open (see PlayerSpecial).
+std::atomic<int>  g_special_live[7];
+std::atomic<bool> g_special_live_ok{ false };
 
 // Press the inventory's "Upuść" button (HandleClick → main thread only).
 std::atomic<bool> g_drop_pending{ false };
@@ -1059,6 +1172,7 @@ void PollMenuReaders()
 {
     if (menu::ActiveMenu() == menu::Id::Quantity) return;
     PollKeyboardSelection();
+    PollQuestReminder();
     PollTerminal();
     PollRaceSex();
     PollHudMessages();
@@ -1138,12 +1252,25 @@ void PollXpChange()
 
 void MainThreadWork()
 {
-    PollSpecialChange();
-    PollXpChange();
-    PollViewChange();
+    game::NoteMainThread();
+    // Who is fighting the player: a virtual call per actor, so it is worked
+    // out here and ScanNearby (poll thread) reads the result.
+    {
+        static DWORD s_hostile_at = 0;
+        DWORD now = GetTickCount();
+        if (IsGameplayActive() && now - s_hostile_at >= 300) {
+            s_hostile_at = now;
+            game::RefreshHostiles();
+        }
+    }
+    if (config::IsEnabled()) {       // F12 off = no unasked-for speech
+        PollSpecialChange();
+        PollXpChange();
+        PollViewChange();
+    }
     TickNativeAim();
     if (g_teleport_pending.exchange(false))
-        game::TeleportPlayerToRef(g_teleport_refr);
+        game::TeleportPlayerToRef(g_teleport_refr, g_teleport_refid);
     AnnounceStatus();
     if (g_menuback_pending.exchange(false)) game::ClickMenuBack();
     if (g_restore_pending.exchange(false)) {
@@ -1180,11 +1307,35 @@ void MainThreadWork()
         }
         game::VatsPick pick;
         game::GetVatsPick(&pick);
+        // The target's name is read here too: VATS is closed by a key press on
+        // this thread, and the poll thread reading its tiles raced with that.
+        if (auto t = game::GetVatsSelectionText())
+            std::snprintf(pick.target, sizeof(pick.target), "%s", t->c_str());
+        pick.sampled = true;
         g_vats_pick_seq.fetch_add(1, std::memory_order_acq_rel);
         g_vats_pick = pick;
         g_vats_pick_seq.fetch_add(1, std::memory_order_acq_rel);
-    } else if (g_vats_valid.load()) {
-        g_vats_valid.store(false);
+        g_vats_pick_live = true;
+    } else {
+        if (g_vats_valid.load()) g_vats_valid.store(false);
+        if (g_vats_pick_live) {
+            // Forget the closed session's pick, so the next VATS does not open
+            // on the last one's target.
+            g_vats_pick_live = false;
+            g_vats_pick_seq.fetch_add(1, std::memory_order_acq_rel);
+            g_vats_pick = game::VatsPick{};
+            g_vats_pick_seq.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+
+    if (g_system_ready && menu::IsOpen(menu::Id::SpecialBookMenu)) {
+        for (int i = 0; i < 7; ++i) {
+            float v = game::GetPlayerAV(5 + i);     // 5..11 = SPECIAL
+            g_special_live[i].store(v >= 0.0f ? (int)(v + 0.5f) : -1);
+        }
+        g_special_live_ok.store(true);
+    } else if (g_special_live_ok.load()) {
+        g_special_live_ok.store(false);
     }
 
     // The loot overlay lives ON the HUD, so there is no menu transition to hang
@@ -1212,9 +1363,12 @@ void MainThreadWork()
     }
     if (g_press_row_pending.exchange(false)) {
         // No list filter: this is the generic "activate what I have selected".
-        if (game::ClickSelectedRowIn(nullptr))
-            tolk::Speak("Naciśnij nowy klawisz.", tolk::Priority::System, true);
-        else
+        if (game::ClickSelectedRowIn(nullptr)) {
+            // Only the controls page (in the pause/start menu) waits for a
+            // key; elsewhere the row's own action speaks for itself.
+            if (menu::ActiveMenu() == menu::Id::Start)
+                tolk::Speak("Naciśnij nowy klawisz.", tolk::Priority::System, true);
+        } else
             tolk::Speak("Nie ma zaznaczonej pozycji.", tolk::Priority::System, true);
     }
     if (g_track_quest_pending.exchange(false)) {
@@ -1265,12 +1419,15 @@ void MainThreadWork()
         }
     }
     if (int c = g_container_side.exchange(0)) {
-        bool toContainer = (c == 2);
+        bool toContainer = (c >= 2);
+        bool quiet = (c == 3);       // the module taking its focus back
         int r = game::SwitchContainerSide(toContainer);
         // A refusal is the menu saying that column is empty — say so, or the
         // key press simply vanishes. A switch speaks for itself: the module
         // announces the new column and row as the highlight lands there.
-        if (r == 0)
+        if (quiet) {
+            if (r <= 0) F3A_INFO("Container: focus restore refused (r=%d)", r);
+        } else if (r == 0)
             tolk::Speak(toContainer ? "Pojemnik jest pusty." : "Nie masz nic przy sobie.",
                         tolk::Priority::Ui, true);
         else if (r < 0)
@@ -1527,6 +1684,15 @@ void Tick(float dt)
                 g_postload_cooldown = kPostLoadCooldownTicks;
                 modules::worldscan::ResetSession();
                 g_pov_announced.store(-1);
+                // A held or calibration aim must not carry into the loaded
+                // save (F9 is the game's quickload), nor the old save's map
+                // markers or quest baseline.
+                StopAimTrack();
+                WatchAimLos(0);
+                g_hit_watch_refr.store(nullptr);
+                g_rayrefine_id.store(0);
+                game::ClearMapMarkerCache();
+                g_quest_seen = false;
                 // Loading closed with no player yet → the new-game opening
                 // cinematic (a loaded save spawns the player at once, and the
                 // intro AD auto-stops when it does). Kick off the description.
@@ -1563,14 +1729,17 @@ void Tick(float dt)
     // touches the live menu.
     const bool quantity_up = menu::ActiveMenu() == menu::Id::Quantity;
 
-    if (!quantity_up) {
+    if (!quantity_up && config::IsEnabled()) {
         menu::OnTick(dt);
         PollActiveTile();
         PollMenuReaders();
     }
 
+    // Always polled: with the mod switched off only the toggle key acts (see
+    // hotkeys::Poll) — before, F12 could switch the mod off but never on.
+    hotkeys::Poll();
+
     if (config::IsEnabled()) {
-        hotkeys::Poll();
         modules::autowalk::Tick(dt);
         modules::guide::Tick(dt);
         modules::intro::Tick(dt);
@@ -1670,9 +1839,9 @@ void RequestContainerStep(bool container_side, int delta)
     g_container_step.store(1 + (container_side ? 2 : 0) + (delta > 0 ? 1 : 0));
 }
 
-void RequestContainerSide(bool container_side)
+void RequestContainerSide(bool container_side, bool quiet)
 {
-    g_container_side.store(container_side ? 2 : 1);
+    g_container_side.store(container_side ? (quiet ? 3 : 2) : 1);
 }
 
 void RequestVatsLimbClick(const void* tile)
@@ -1714,9 +1883,10 @@ void RequestNativeAim(const game::Vec3& pos, uint32_t refid)
 
 // Called from any thread (Alt+Home): teleport the player to a reference. The
 // native MoveTo runs on the main thread (cells/collision).
-void RequestTeleport(const void* refr)
+void RequestTeleport(const void* refr, uint32_t refid)
 {
-    g_teleport_refr = refr;
+    g_teleport_refr  = refr;
+    g_teleport_refid = refid;
     g_teleport_pending.store(true);
 }
 
@@ -1783,6 +1953,28 @@ bool VatsPickState(game::VatsPick* out)
     return false;
 }
 
+int PlayerSpecial(int i)
+{
+    if (i < 0 || i >= 7 || !g_special_live_ok.load()) return -1;
+    return g_special_live[i].load();
+}
+
+bool VatsTargetState(std::string* out)
+{
+    if (!out) return false;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        unsigned before = g_vats_pick_seq.load(std::memory_order_acquire);
+        if (before & 1u) continue;
+        game::VatsPick copy = g_vats_pick;
+        if (g_vats_pick_seq.load(std::memory_order_acquire) != before) continue;
+        if (!copy.sampled) return false;
+        copy.target[sizeof(copy.target) - 1] = 0;
+        out->assign(copy.target);
+        return true;
+    }
+    return false;
+}
+
 bool VatsState(game::VatsInfo* out)
 {
     if (!out || !g_vats_valid.load()) return false;
@@ -1842,6 +2034,24 @@ void RequestAim(bool doYaw, float yawDeg, bool doPitch, float pitchDeg)
 // message; FOSE has no equivalent, so the movement hook is ours.
 void AimTick()
 {
+    // Work the poll thread asked for: a new target's fresh start and the
+    // player's trims. Done here because these counters are this thread's.
+    if (g_aimtrack_reset_pending.exchange(false)) {
+        g_aim_settle = kAimSettleFrames;   // let our own change bed in
+        AimTrackReset();                   // a new target: search over
+        g_hit_have = false;                // re-seed the health baseline
+    }
+    if (int n = g_nudge_units.exchange(0)) {
+        g_aim_bias += (float)n;
+        if (g_aim_bias >  400.0f) g_aim_bias =  400.0f;
+        if (g_aim_bias < -400.0f) g_aim_bias = -400.0f;
+        // Whatever the player settles on is kept: it corrects our estimate of
+        // the eye height and of where a target's aim point sits, and neither
+        // of those changes from one target to the next.
+        g_aim_settled = true;
+        F3A_INFO("AimTrim: correction now %+.0f units.", g_aim_bias);
+    }
+
     // Has the view moved on its own since we set it last frame? Two things can
     // cause that, and both matter.
     //
@@ -2096,7 +2306,7 @@ void AimTick()
     // A held aim must not reach into menus, dialogue or a load screen: forcing
     // the view while the player is reading their Pip-Boy fights the game for no
     // benefit. Skipped, not cancelled — the lock resumes when play does.
-    if (trackFrames != 0 && !IsGameplayActive()) trackFrames = 0;
+    if (trackFrames != 0 && (!IsGameplayActive() || MenuModeActive())) trackFrames = 0;
     if (trackFrames != 0) {
         // Live reference position when there is one (it may be walking away),
         // otherwise the point we were given.
@@ -2360,17 +2570,23 @@ void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
     if (refr && refid) {
         g_hit_watch_refr.store(refr);
         g_hit_watch_id.store(refid);
-        g_hit_have = false;          // re-seed the health baseline
         g_kill_pending.store(false);
     }
     g_aimtrack_x.store(FToBits(at.x));
     g_aimtrack_y.store(FToBits(at.y));
     g_aimtrack_z.store(FToBits(at.z));
     g_aimtrack_up.store(FToBits(up));
+    // The search counters, settle window and health baseline are the main
+    // thread's; from the poll thread (the aim keys) they are reset there, on
+    // the next AimTick, instead of written from here under its feet.
+    if (game::OnMainThread()) {
+        g_aim_settle = kAimSettleFrames;   // let our own change bed in
+        AimTrackReset();   // a new target: start the crosshair search over
+        g_hit_have = false;
+    } else {
+        g_aimtrack_reset_pending.store(true);
+    }
     g_aimtrack_frames.store(frames);
-    g_aim_settle = kAimSettleFrames;   // let our own change bed in
-    AimTrackReset();   // a new target: start the crosshair search over
-    g_hit_have = false;
     g_hit_pending.store(false);
     g_block_pending.store(false);
     F3A_INFO("AimTrack: refr=%p refid=%08X at=(%.0f,%.0f,%.0f) up=%.0f frames=%d",
@@ -2381,15 +2597,14 @@ void StopAimTrack() { g_aimtrack_frames.store(0); }
 
 float NudgeAim(float units)
 {
-    g_aim_bias += units;
-    if (g_aim_bias >  400.0f) g_aim_bias =  400.0f;
-    if (g_aim_bias < -400.0f) g_aim_bias = -400.0f;
-    // Whatever the player settles on is kept: it corrects our estimate of the
-    // eye height and of where a target's aim point sits, and neither of those
-    // changes from one target to the next.
-    g_aim_settled = true;
-    F3A_INFO("AimTrim: correction now %+.0f units.", g_aim_bias);
-    return g_aim_bias;
+    // Applied by AimTick on the main thread, which owns the bias; the value
+    // returned is what it will be once that has happened.
+    int add = (int)std::lround(units);
+    int pending = g_nudge_units.fetch_add(add) + add;
+    float total = g_aim_bias + (float)pending;
+    if (total >  400.0f) total =  400.0f;
+    if (total < -400.0f) total = -400.0f;
+    return total;
 }
 
 float AimCorrection() { return g_aim_bias; }
@@ -2864,6 +3079,12 @@ void DumpQuestList()
 
 void DumpActiveMenuTree()
 {
+    // The quantity prompt and VATS are freed by a key press on the main
+    // thread; walking their tiles from here is a known crash.
+    if (menu::ActiveMenu() == menu::Id::Quantity || menu::IsOpen(menu::Id::VATS)) {
+        tolk::Speak("Zrzut niedostępny w tym ekranie.", tolk::Priority::System, true);
+        return;
+    }
     InterfaceManager* ifm = fose_rt::IFM();
     if (!ifm) {
         F3A_INFO("DumpMenuTree: no interface manager.");

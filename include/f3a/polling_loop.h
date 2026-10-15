@@ -57,7 +57,8 @@ void RequestContainerFilter(bool container_side, bool next);
 
 // Request a container column switch on the main thread (Left = your items,
 // Right = the container's). Runs the menu's own Shift+Left/Right handler.
-void RequestContainerSide(bool container_side);
+// `quiet`: a refusal is not announced (the module's own focus restore).
+void RequestContainerSide(bool container_side, bool quiet = false);
 
 // Request one Up/Down step in a container column on the main thread.
 void RequestContainerStep(bool container_side, int delta);
@@ -81,6 +82,16 @@ void RequestVatsCursorTo(int limbIndex);
 // own clicks as well as ours.
 bool VatsPickState(game::VatsPick* out);
 
+// The VATS target's name, sampled on the main thread with VatsPickState. False
+// until the first sample after VATS opens; *out is empty when VATS shows no
+// target. Modules must not call GetVatsSelectionText themselves (poll thread).
+bool VatsTargetState(std::string* out);
+
+// The player's SPECIAL value i (0 = Strength .. 6 = Luck), sampled on the main
+// thread while the vault's SPECIAL book is open — GetActorValue is a virtual
+// call and must not run on the poll thread. -1 until sampled.
+int PlayerSpecial(int i);
+
 // Announce the first/third-person view a moment after the F key is pressed (once
 // the camera zoom has settled). Called from the F hotkey on the worker thread;
 // the read + speech happen on the main thread in PollViewChange.
@@ -94,7 +105,7 @@ void RequestNativeAim(const game::Vec3& pos, uint32_t refid);
 // Teleport the player to a reference (Alt+Home), main-thread MoveTo. Last-resort
 // navigation when a target can't be reached on foot. NOTE: the engine refuses to
 // move the player while a menu owns the screen — close it first.
-void RequestTeleport(const void* refr);
+void RequestTeleport(const void* refr, uint32_t refid);
 
 // Turn the player toward a world point on the main thread, using the engine's
 // own actor-facing routine (see game::FacePointNative).

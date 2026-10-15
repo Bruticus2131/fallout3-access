@@ -31,6 +31,10 @@ void Tone(int freq, int ms)
 void OnTick(float)
 {
     auto s = game::GetLockpickState();
+    // No real reading yet: an all-zero state announced "sweet spot" and beeped
+    // (blocking this thread) every time a lock was opened. The lockpick cue
+    // that does work lives in the world scanner's tick.
+    if (!s.valid) return;
     if (s.broken) {
         tolk::Speak(strings::Render(strings::Key::LockpickBroken),
                     tolk::Priority::System, true);

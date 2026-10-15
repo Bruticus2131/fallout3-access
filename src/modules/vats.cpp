@@ -25,6 +25,10 @@ bool g_kSpace = false, g_kH = false;
 bool g_kW = false, g_kS = false, g_kA = false, g_kD = false;
 int  g_force_sel = 0;    // ticks left in which to speak the TARGET
 int  g_force_pick = 0;   // ticks left in which to speak the pick regardless
+// Ticks the opening line may wait for VATS to show its target. The menu is
+// sampled on the main thread, so at the moment it opens there may be nothing
+// to read yet; "no targets" is said only if there still is none after this.
+int  g_open_wait = 0;
 
 // Which limb VATS is aimed at is the GAME's business, not ours: the menu shows
 // the name label only on the selected body part, and that is what we read. We
@@ -88,11 +92,10 @@ void SpeakSummary()
         std::snprintf(buf, sizeof(buf), "%d z %d punktów akcji", v.ap, v.max_ap);
         out = buf;
     }
-    if (auto sel = game::GetVatsSelectionText()) {
-        if (!sel->empty()) {
-            if (!out.empty()) out += ", ";
-            out += *sel;
-        }
+    std::string sel;
+    if (poll::VatsTargetState(&sel) && !sel.empty()) {
+        if (!out.empty()) out += ", ";
+        out += sel;
     }
     game::VatsPick pick;
     if (poll::VatsPickState(&pick) && pick.name[0]) {
@@ -232,10 +235,22 @@ std::string ResourceSummary()
 // points, and again whenever any of them drifted. In a fight that is three
 // voices over each other and none of them is the one you pressed a key for.
 // Now a key press is a question and the answer is one line.
-void AnnounceSelection(bool force = false)
+void AnnounceSelection()
 {
-    auto sel = game::GetVatsSelectionText();
-    std::string text = sel ? *sel : std::string();
+    // Read from the main thread's sample: VATS is closed by a key press on that
+    // thread, and reading its tiles from here raced with it being freed.
+    std::string text;
+    bool have = poll::VatsTargetState(&text);
+    bool force = false;
+    if (g_open_wait > 0) {
+        // VATS has just opened: say who is targeted as soon as it shows, and
+        // "no targets" only if it still shows nobody after a moment.
+        if ((!have || text.empty()) && --g_open_wait > 0) return;
+        g_open_wait = 0;
+        force = true;
+    } else if (!have) {
+        return;
+    }
     bool changed = (text != g_last_sel);
     g_last_sel = text;
     if (!force && !(changed && g_force_sel > 0)) return;
@@ -262,6 +277,7 @@ void OnOpen()
     g_kD = (GetAsyncKeyState('D') & 0x8000) != 0;
     g_force_sel = 0;
     g_force_pick = 0;
+    g_open_wait = 0;
     g_kH     = (GetAsyncKeyState('H') & 0x8000) != 0;
     g_last_pick.clear();
     g_last_count = 0;
@@ -282,10 +298,14 @@ void OnOpen()
     // summary used to follow it here; H reads that on demand, and having it
     // arrive unasked at the moment a fight starts is noise over the one fact
     // that matters.
-    AnnounceSelection(/*force*/true);
+    g_open_wait = 6;       // ~0.5 s; spoken by AnnounceSelection on the ticks
 }
 
-void OnClose() { g_last_sel.clear(); g_last_ap = -1; g_last_queued = -1; }
+void OnClose()
+{
+    g_last_sel.clear(); g_last_ap = -1; g_last_queued = -1;
+    g_force_sel = 0; g_open_wait = 0;
+}
 // Announce the selected body part whenever the GAME changes it — by our key,
 // by a mouse click, by switching target. Reading it back this way is also the
 // proof that a key did something: if nothing is announced, nothing moved.
@@ -319,6 +339,10 @@ void OnTick(float)
 {
     PollVatsKeys();        // sets the "a key was pressed" windows below
     AnnounceSelection();   // the target — only after A or D
+    // The A/D window closes on its own: without this a target change long
+    // after the press (the target dying, a new one walking in) was still
+    // announced as if it answered the key.
+    if (g_force_sel > 0) --g_force_sel;
     AnnouncePick();        // the body part — only after W or S
     // Action points are NOT announced here any more. They changed constantly
     // and talked over the answer to whichever key had just been pressed; H

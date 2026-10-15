@@ -94,6 +94,9 @@ void AdvanceWaypoints()
         const auto& w = g_waypoints[g_wp_index];
         float dx = w.x - pp.x, dy = w.y - pp.y;
         if (std::sqrt(dx * dx + dy * dy) > kWaypointReach) break;
+        // On the waypoint's floor too: on a staircase the next point can lie
+        // straight overhead, and passing under it is not reaching it.
+        if (std::fabs(w.z - pp.z) > kFloorDelta) break;
         ++g_wp_index;     // reached this waypoint; lead to the next
     }
 }
@@ -193,10 +196,11 @@ void Tick(float dt)
     auto pp   = game::GetPlayerPosition();
     float yaw = game::GetPlayerYaw();
 
-    // Arrival is measured against the FINAL target.
+    // Arrival is measured against the FINAL target — on its floor: standing
+    // under it on the level below is not being there.
     float fdx = g_target.x - pp.x, fdy = g_target.y - pp.y;
     float dist = std::sqrt(fdx * fdx + fdy * fdy);
-    if (dist <= kArriveDist) {
+    if (dist <= kArriveDist && std::fabs(g_target.z - pp.z) <= kFloorDelta) {
         g_active = false;
         tolk::Speak("Dotarłeś: " + g_name, tolk::Priority::System, true);
         return;
@@ -249,8 +253,10 @@ void Tick(float dt)
         g_dist_timer = 0.0f;
         std::string msg = strings::FormatDistance(dist);
         if (std::fabs(dz) > kFloorDelta) {
-            msg += dz > 0 ? ", cel wyżej — poszukaj schodów"
-                          : ", cel niżej — poszukaj schodów";
+            // With a navmesh path the beacon already leads to the stairs.
+            if (g_have_path) msg += dz > 0 ? ", cel wyżej" : ", cel niżej";
+            else msg += dz > 0 ? ", cel wyżej — poszukaj schodów"
+                               : ", cel niżej — poszukaj schodów";
         }
         tolk::Speak(msg, tolk::Priority::Background, false);
     }

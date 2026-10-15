@@ -104,10 +104,13 @@ void GuideToQuest()
     }
     // Marker in another worldspace (a wasteland location while we're in Megaton,
     // etc.): its coordinates are in a different frame, so a beacon toward them
-    // would lead nowhere. Teleport is cell-aware; send the player there instead.
+    // would lead nowhere. The auto-walk routes through the connecting doors;
+    // the Alt+Home teleport is not advised — its native MoveTo has crashed
+    // the game.
     if (qt.refr && !game::TargetSharesPlayerSpace(qt.refr)) {
-        tolk::Speak("Cel zadania jest w innej lokacji — nie doprowadzę tam "
-                    "pieszo stąd. Użyj teleportu (Alt+Home).",
+        tolk::Speak("Cel zadania jest w innej lokacji — sygnał tam nie "
+                    "poprowadzi. Użyj automatycznego chodzenia: prowadzi "
+                    "przez przejścia.",
                     tolk::Priority::System, true);
         return;
     }

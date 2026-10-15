@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
+#include "f3a/game_access.h"
 
 // Driving the player by TAKING OVER the engine's movement update, instead of
 // holding W/A/S/D through SendInput.
@@ -54,5 +56,20 @@ bool Active();
 // Heading the engine is currently being steered to, in degrees (0 = north) —
 // for diagnostics and speech.
 float CurrentHeadingDeg();
+
+// --- The engine's own pathfinder --------------------------------------------
+//
+// Ask the GAME to work out a route to `refr` — the same SetPathfindingGoal an
+// NPC's travel package uses, so doors, stairs and the navmesh links between
+// cells are handled by the game's own rules. Runs inside the movement hook on
+// the game's thread; the call returns at once. `refid` guards against a
+// stale pointer. Safe from any thread.
+void RequestEnginePath(const void* refr, uint32_t refid, float radius);
+// Drop a request (the walk was stopped). Safe from any thread.
+void CancelEnginePath();
+// 0 = nothing asked, 1 = working, 2 = route ready, 3 = the game found none.
+int  EnginePathState();
+// Take the finished route (state 2 or 3 → back to 0). False if not finished.
+bool TakeEnginePath(std::vector<game::Vec3>* out);
 
 } // namespace f3a::mover

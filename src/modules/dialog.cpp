@@ -34,12 +34,11 @@ void AnnounceHighlight()
     if (idx == g_last_highlight) return;
     g_last_highlight = idx;
 
+    // Empty also means "not read": GetDialogOptions is not implemented yet
+    // (the generic menu readers speak the topics), and "no options" on every
+    // conversation was simply untrue.
     auto opts = game::GetDialogOptions();
-    if (opts.empty()) {
-        tolk::Speak(strings::Render(strings::Key::DialogNoOptions),
-                    tolk::Priority::Ui, true);
-        return;
-    }
+    if (opts.empty()) return;
     if (idx < 0 || idx >= (int)opts.size()) return;
 
     const auto& o = opts[idx];

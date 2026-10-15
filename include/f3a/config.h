@@ -56,7 +56,7 @@ struct Hotkeys {
     // own writes; this is the one independent measurement available.
     // [ — in a container, jump between the container's list and your own.
     uint32_t container_side   = 0x1A;
-    uint32_t aim_calibrate    = 0x43; // F9
+    uint32_t aim_calibrate    = 0;    // unbound: F9 is the game's quickload
     // T — turn to face the nearest enemy, so VATS and a shot have something
     // in front of them even when the ordinary aim has lost the target.
     uint32_t lock_enemy       = 0x14;
@@ -146,6 +146,11 @@ struct Settings {
     int    nearby_scan_max_items = 8;
     // Leave containers with nothing in them out of the object scanner.
     bool   hide_empty_containers = true;
+    // Let the game's own pathfinder route the auto-walk (as it routes NPCs).
+    bool   engine_path = true;
+    // The game's control hints ("Aby oddać strzał, ..."): 0 = never read,
+    // 1 = once per game session (default), 2 = every time they show.
+    int    hint_mode = 1;
     int    compass_units = 0;           // 0 = clock face ("godzina trzecia"), 1 = degrees
     // AutoWalk mouse-turn gain: mouse counts injected per degree of heading
     // error. Higher = turns faster (may overshoot/spin), lower = gentler/slower.

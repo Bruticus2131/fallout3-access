@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -87,8 +88,12 @@ float GetPlayerYaw()
     if (!p) return 0.0f;
     // Engine stores yaw in radians, +Z up, 0 = north.
     float deg = p->rotZ * 57.2957795f;
-    while (deg < 0)    deg += 360.0f;
-    while (deg >= 360) deg -= 360.0f;
+    // fmod, not a subtract-loop: an infinite or huge value never leaves such
+    // a loop, and this runs on every poll.
+    if (!std::isfinite(deg)) return 0.0f;
+    deg = std::fmod(deg, 360.0f);
+    if (deg < 0.0f) deg += 360.0f;
+    if (!(deg < 360.0f)) deg = 0.0f;
     return deg;
 }
 
@@ -113,7 +118,7 @@ std::string GetCurrentLocationName()
     // its `name` field is a `String { char* m_data; ... }`.
     const char* raw = cell->fullName.name.m_data;
     if (!raw || !*raw) return {};
-    return raw;
+    return GameStrToUtf8(raw);   // the game's code page, not UTF-8
 }
 
 // ---- Quest target ---------------------------------------------------------
@@ -145,6 +150,7 @@ QuestTarget GetCurrentQuestTarget()
     if (IsBadReadPtr(refr, 0x38)) return t;
     if (refr->baseForm == nullptr) return t;
     t.refr = refr;          // target ref → cross-worldspace check / cell-aware teleport
+    t.refid = refr->refID;
     Vec3 pos = { refr->posX, refr->posY, refr->posZ };
     if (pos.x != 0.0f || pos.y != 0.0f || pos.z != 0.0f) {
         t.position = pos;   // have a real bearing
@@ -400,11 +406,11 @@ bool Readable(const void* p, size_t n) { return p && !IsBadReadPtr(p, n); }
 int ReadLockLevel(const TESObjectREFR* r, int* out_flags)
 {
     if (out_flags) *out_flags = -1;
-    if (!Readable(r, 0x44)) return -1;
+    if (!Readable(r, 0x48)) return -1;
     const UInt8* base = reinterpret_cast<const UInt8*>(r);
     const UInt8* node = *reinterpret_cast<const UInt8* const*>(base + 0x44);
     for (int i = 0; node && i < 128; ++i) {
-        if (!Readable(node, 0x0C)) break;
+        if (!Readable(node, 0x10)) break;
         if (node[0x04] == 0x2A) {                       // kExtraData_Lock
             const UInt8* data = *reinterpret_cast<const UInt8* const*>(node + 0x0C);
             if (Readable(data, 0x0C)) {
@@ -602,7 +608,7 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         if (actors_only && kind != WorldEntity::Kind::Actor) continue;
 
         float dx = r->posX - pp.x, dy = r->posY - pp.y;
-        if (dx * dx + dy * dy > r2) continue;
+        if (!(dx * dx + dy * dy <= r2)) continue;   // NaN fails too
 
         const char* nm = BaseFormName(base);
         std::string label;
@@ -685,8 +691,24 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
 //
 // A virtual call into the engine, so: every pointer checked before use, and an
 // INI switch to turn the whole thing off if it ever misbehaves.
+namespace {
+std::atomic<DWORD>    g_main_tid{ 0 };
+std::mutex            g_hostile_mx;
+std::vector<uint32_t> g_hostile_ids;
+} // namespace
+
+void NoteMainThread() { g_main_tid.store(GetCurrentThreadId()); }
+bool OnMainThread()
+{
+    DWORD t = g_main_tid.load();
+    return t != 0 && t == GetCurrentThreadId();
+}
+
 bool IsHostileToPlayer(const void* refr)
 {
+    // A virtual call into the actor: the game's thread only. Elsewhere the
+    // answer is "not known to be hostile".
+    if (!OnMainThread()) return false;
     if (!refr || !config::Get().hostile_from_combat) return false;
     auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
     if (IsBadReadPtr(r, 0x70)) return false;
@@ -725,10 +747,14 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     // Mark the hostiles, and drop everything else when only those were asked
     // for. Done here rather than inside the cell walk so the virtual call is
     // made once per candidate, on a list that is already distance-filtered.
+    // The hostility test is a virtual call and this runs on the poll thread, so
+    // the answer comes from the set the main thread keeps (RefreshHostiles).
+    // It used to be a lambda that was never called — `hostile` was always
+    // false and "hostiles only" returned every actor, friends included.
     auto MarkHostiles = [&]() {
         for (auto& e : out)
             if (e.kind == WorldEntity::Kind::Actor)
-                e.hostile = IsHostileToPlayer(e.refr);
+                e.hostile = IsKnownHostile(e.form_id);
         if (!hostiles_only) return;
         out.erase(std::remove_if(out.begin(), out.end(),
                                  [](const WorldEntity& e) { return !e.hostile; }),
@@ -766,9 +792,10 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                     }
                 }
             }
-            F3A_DEBUG("ScanNearby: grid cells scanned=%d", scannedCells);
         }
     }
+
+    MarkHostiles();
 
     std::sort(out.begin(), out.end(),
               [&pp](const WorldEntity& a, const WorldEntity& b) {
@@ -780,6 +807,24 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
               });
     if ((int)out.size() > max_results) out.resize(max_results);
     return out;
+}
+
+void RefreshHostiles()
+{
+    if (!OnMainThread()) return;
+    std::vector<uint32_t> ids;
+    for (const auto& e : ScanNearby(6000, 64, /*actors_only*/true, false))
+        if (e.refr && IsHostileToPlayer(e.refr)) ids.push_back(e.form_id);
+    std::lock_guard<std::mutex> lk(g_hostile_mx);
+    g_hostile_ids.swap(ids);
+}
+
+bool IsKnownHostile(uint32_t refid)
+{
+    if (!refid) return false;
+    std::lock_guard<std::mutex> lk(g_hostile_mx);
+    for (uint32_t id : g_hostile_ids) if (id == refid) return true;
+    return false;
 }
 
 const void* GetPlayerCell()
@@ -822,7 +867,7 @@ std::vector<WorldEntity> GetShootingTargets(int radius)
         if (r->flags & 0x820) continue;            // disabled / deleted
         if (r->baseForm != mbase) continue;        // not the same target object
         float dx = r->posX - pp.x, dy = r->posY - pp.y;
-        if (dx * dx + dy * dy > r2) continue;
+        if (!(dx * dx + dy * dy <= r2)) continue;   // NaN fails too
         WorldEntity e;
         e.kind       = WorldEntity::Kind::Item;
         e.name       = "Cel";
@@ -872,7 +917,7 @@ std::vector<std::string> DebugNearbyRefs(int radius)
         if (!Readable(base, 0x08)) continue;
         float dx = r->posX - pp.x, dy = r->posY - pp.y, dz = r->posZ - pp.z;
         float d2 = dx * dx + dy * dy;
-        if (d2 > r2) continue;
+        if (!(d2 <= r2)) continue;
         const char* nm = BaseFormName(base);
         std::string name = (nm && !IsBadReadPtr(nm, 1)) ? GameStrToUtf8(nm)
                                                         : std::string();
@@ -1151,6 +1196,7 @@ std::vector<MapMarker> GetMapMarkers()
 }
 
 const std::vector<MapMarker>& CachedMapMarkers() { return g_marker_cache; }
+void ClearMapMarkerCache() { g_marker_cache.clear(); }
 
 // The world map's cursor position on screen — feedback for driving the mouse
 // onto a marker, exactly like the hacking grid's cursor.
@@ -1678,6 +1724,12 @@ bool AimNativeReady()
 {
     if (g_aim_native_ok >= 0) return g_aim_native_ok != 0;
     g_aim_native_ok = 0;
+    // The camera globals written below are .data addresses of the standard
+    // 1.7.0.3 build; on the no-gore build they sit elsewhere, so never write.
+    if (rt::g_addrs != &rt::kAddrs_1_7) {
+        F3A_INFO("Aim: native rotation only on the standard 1.7.0.3 build.");
+        return false;
+    }
     const uint8_t pitchSig[] = { 0x51, 0xD9, 0x05 };          // push ecx; fld [imm32]
     const uint8_t yawSig[]   = { 0x56, 0x57, 0x8B, 0xF1 };    // push esi; push edi; mov esi,ecx
     auto* pp = reinterpret_cast<const uint8_t*>(kSetPitchWithClamp);
@@ -1790,8 +1842,13 @@ bool GetCameraPos(Vec3* out)
     // Sanity: the camera belongs to the player. Before the 3D exists it can be
     // stale or zero, and silently aiming from the wrong place is worse than
     // admitting we do not know.
+    if (!(std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z)))
+        return false;
     float dx = pos.x - p->posX, dy = pos.y - p->posY, dz = pos.z - p->posZ;
-    if (dx * dx + dy * dy + dz * dz > 400.0f * 400.0f) return false;
+    if (!(dx * dx + dy * dy + dz * dz <= 400.0f * 400.0f)) return false;
+    // A hard-coded .data global: only on the build it was read from.
+    if (rt::g_addrs != &rt::kAddrs_1_7 ||
+        IsBadReadPtr(reinterpret_cast<void*>(kCamera1stNodePtr), 4)) return false;
     if (!*reinterpret_cast<void**>(kCamera1stNodePtr) && !IsThirdPerson())
         return false;
 
@@ -2090,6 +2147,7 @@ std::vector<RayHit> RayScanAhead(float yawSpanDeg, float pitchSpanDeg,
 
 bool AimPlayerAtRad(float pitchRad, float yawRad)
 {
+    if (!(std::isfinite(pitchRad) && std::isfinite(yawRad))) return false;
     if (!AimNativeReady()) return false;
     auto* player = rt::Player();
     if (!player) return false;
@@ -2108,10 +2166,10 @@ bool AimPlayerAtRad(float pitchRad, float yawRad)
         auto getZ = reinterpret_cast<GetZFn>(vt[kGetRotationZSlot]);
         if (getZ) {
             float cur = getZ(player, 0);
-            float d = yawRad - cur;
-            while (d >  kAimPi) d -= kAimTwoPi;
-            while (d < -kAimPi) d += kAimTwoPi;
-            reinterpret_cast<YawFn>(kAddDeltaZRot)(player, d);
+            if (std::isfinite(cur)) {
+                float d = std::remainder(yawRad - cur, kAimTwoPi);
+                reinterpret_cast<YawFn>(kAddDeltaZRot)(player, d);
+            }
         }
     }
 
@@ -2153,8 +2211,7 @@ bool AimPlayerAtRad(float pitchRad, float yawRad)
             float engPitch = *reinterpret_cast<float*>(kCameraPitchGlobal);
             const float R2D = 57.2957795f;
             float dy = engYaw - g_cam_probe_yaw;
-            while (dy >  kAimPi) dy -= kAimTwoPi;
-            while (dy < -kAimPi) dy += kAimTwoPi;
+            dy = std::isfinite(dy) ? std::remainder(dy, kAimTwoPi) : 0.0f;
             F3A_INFO("CamProbe: engine says yaw=%.1f pitch=%.1f, we set body "
                      "yaw=%.1f pitch=%.1f (difference %+.1f / %+.1f deg)",
                      engYaw * R2D, engPitch * R2D,
@@ -2202,8 +2259,8 @@ bool AimDriftSinceLast(float* outYaw, float* outPitch)
     auto* p = rt::Player();
     if (!p) return false;
     float dy = p->rotZ - g_aim_last_yaw;
-    while (dy >  kAimPi) dy -= kAimTwoPi;
-    while (dy < -kAimPi) dy += kAimTwoPi;
+    if (!std::isfinite(dy)) return false;
+    dy = std::remainder(dy, kAimTwoPi);
     if (outYaw)   *outYaw   = dy;
     if (outPitch) *outPitch = p->rotX - g_aim_last_pitch;
     return true;
@@ -2584,9 +2641,12 @@ bool GetCameraWorldPos(float* x, float* y, float* z)
     // else in this build, the result lands far away — then we say so and the
     // caller falls back to the player's eye position instead of aiming at junk.
     auto* p = rt::Player();
-    if (p) {
+    if (!p) return false;
+    if (!(std::isfinite(t[0]) && std::isfinite(t[1]) && std::isfinite(t[2])))
+        return false;
+    {
         float dx = t[0] - p->posX, dy = t[1] - p->posY, dz = t[2] - p->posZ;
-        if (dx * dx + dy * dy + dz * dz > 600.0f * 600.0f) return false;
+        if (!(dx * dx + dy * dy + dz * dz <= 600.0f * 600.0f)) return false;
     }
     if (x) *x = t[0];
     if (y) *y = t[1];
@@ -2720,7 +2780,7 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
 
     // Bones first: this is the point a sighted player's crosshair ends up on.
     const char* bone = nullptr;
-    if (config::Get().aim_bones && FindBoneWorldPos(r, out, &bone)) {
+    if (config::Get().aim_bones && OnMainThread() && FindBoneWorldPos(r, out, &bone)) {
         if (how) *how = bone;
         F3A_INFO("AimPoint: bone '%s' at (%.0f,%.0f,%.0f), origin (%.0f,%.0f,%.0f)",
                  bone, out->x, out->y, out->z, r->posX, r->posY, r->posZ);
@@ -2763,7 +2823,7 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
     // Behind the same switch as the bone walk, and for the same reason: it
     // reaches the model through a virtual call, which is only safe on the
     // game's own thread.
-    if (void* root = config::Get().aim_bones ? RefNiNode(r) : nullptr) {
+    if (void* root = (config::Get().aim_bones && OnMainThread()) ? RefNiNode(r) : nullptr) {
         if (!IsBadReadPtr(root, 0x24)) {
             auto* wb = *reinterpret_cast<float**>(reinterpret_cast<UInt8*>(root) + 0x20);
             if (wb && !IsBadReadPtr(wb, 16)) {
@@ -2834,10 +2894,21 @@ bool AimAtReference(const void* refr, std::string* detail)
 // mod has no business assuming. FOSE exposes the bind tables; we then ask
 // Windows whether that physical key or mouse button is down, which is what the
 // FNV accessibility mod does for the same purpose.
+// OSInputGlobals for THIS build (FOSE's ladder: 1.7 = 0x011795C4, no-gore
+// 0x011765C4). The old hard-coded 0x01176524 was the 1.0.15 address, so every
+// key-binding read — hint tokens, the Use key, the aim control — read some
+// other object.
+OSInputGlobals* InputGlobals()
+{
+    auto* pp = reinterpret_cast<OSInputGlobals**>(rt::g_addrs->inputGlobals);
+    if (!pp || IsBadReadPtr(pp, 4)) return nullptr;
+    return *pp;
+}
+
 bool IsAimControlHeld()
 {
     constexpr UInt32 kControl_Aim = 6;
-    auto* globs = *reinterpret_cast<OSInputGlobals**>(0x01176524);
+    auto* globs = InputGlobals();
     if (!globs || IsBadReadPtr(globs, 0x1BC0)) return false;
     if (kControl_Aim >= OSInputGlobals::kMaxControlBinds) return false;
 
@@ -3154,17 +3225,20 @@ std::string StripControlPrefix(const std::string& token)
 // mouse button), and the caller falls back to the default.
 UInt8 BoundScancode(UInt32 controlIndex)
 {
-    auto* globs = *reinterpret_cast<OSInputGlobals**>(0x01176524);
+    auto* globs = InputGlobals();
     if (!globs || IsBadReadPtr(globs, 0x1BC0)) return 0;
     if (controlIndex >= OSInputGlobals::kMaxControlBinds) return 0;
-    return globs->keyBinds[controlIndex];
+    UInt8 k = globs->keyBinds[controlIndex];
+    return k == 0xFF ? 0 : k;          // 0xFF = bound to nothing
 }
 
 std::string KeyNameForScancode(UInt8 dik)
 {
     if (dik == 0 || dik == 0xFF) return {};
     char buf[64] = {};
-    LONG lparam = (LONG)dik << 16;
+    // DirectInput marks extended keys (arrows, Home, Ins, right Ctrl...) with
+    // bit 7; GetKeyNameText wants the low 7 bits plus its own extended flag.
+    LONG lparam = ((LONG)(dik & 0x7F) << 16) | ((dik & 0x80) ? (1L << 24) : 0);
     if (GetKeyNameTextA(lparam, buf, sizeof(buf)) > 0 && buf[0]) return buf;
     return {};
 }
@@ -3175,7 +3249,7 @@ std::string ExpandControlTokens(const std::string& text)
 {
     if (text.find('&') == std::string::npos) return text;
 
-    auto* globs = *reinterpret_cast<OSInputGlobals**>(0x01176524);
+    auto* globs = InputGlobals();
     std::string out;
     size_t pos = 0;
     while (pos < text.size()) {
@@ -3183,6 +3257,20 @@ std::string ExpandControlTokens(const std::string& text)
         if (start == std::string::npos) { out += text.substr(pos); break; }
         size_t end = text.find(';', start);
         if (end == std::string::npos) { out += text.substr(pos); break; }
+
+        // Only a real marker: short, letters/digits/underscore/minus. A plain
+        // "&" followed somewhere later by a ";" is text, not a token.
+        bool token = end - start <= 40;
+        for (size_t k = start + 1; token && k < end; ++k) {
+            char ch = text[k];
+            token = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                    (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
+        }
+        if (!token) {
+            out += text.substr(pos, start - pos + 1);
+            pos = start + 1;
+            continue;
+        }
 
         out += text.substr(pos, start - pos);
         // Both "&-name;" and "&name;" appear in the game's text.
@@ -3261,12 +3349,23 @@ bool FacePointNative(const Vec3& p)
 // prologue even loads the player singleton and special-cases moving the player).
 // Used as a last resort when navigation can't reach a target: teleport the
 // player to the selected object's reference. MUST run on the MAIN thread.
-void TeleportPlayerToRef(const void* targetRefr)
+void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID)
 {
     auto* p = rt::Player();
     if (!p || !targetRefr) {
         F3A_INFO("Teleport: aborted (player=%p target=%p)", (void*)p, targetRefr);
         return;
+    }
+    // A scanner or walk target can be unloaded (and its memory reused) by the
+    // time the key is pressed: MoveTo on that is a crash or a jump to junk.
+    {
+        auto* t = reinterpret_cast<const TESObjectREFR*>(targetRefr);
+        if (IsBadReadPtr(t, 0x40) || (expectedRefID && t->refID != expectedRefID) ||
+            !SanePos(t->posX, t->posY, t->posZ)) {
+            F3A_INFO("Teleport: target %p is gone or reused (want %08X) - aborted",
+                     targetRefr, expectedRefID);
+            return;
+        }
     }
     // Guard the address across builds: `mov ecx,[imm32]` (8B 0D ..) then
     // `sub esp,0x48` (83 EC 48). The imm32 (player ptr) differs by runtime, so
@@ -3491,8 +3590,7 @@ Bearing ComputeBearing(const Vec3& from, float from_yaw_deg, const Vec3& to)
     float dist = std::sqrt(dx*dx + dy*dy);
     float bearing = std::atan2(dx, dy) * 57.2957795f;
     float rel = bearing - from_yaw_deg;
-    while (rel > 180.0f)   rel -= 360.0f;
-    while (rel < -180.0f)  rel += 360.0f;
+    rel = std::isfinite(rel) ? std::remainder(rel, 360.0f) : 0.0f;   // -180..180
     return { dist, rel };
 }
 
@@ -4222,6 +4320,10 @@ int CountListRows(Tile* list, Tile** firstRow)
         if (!nm || !*nm) continue;
         if (std::strcmp(nm, "lb_scrollbar") == 0 ||
             std::strcmp(nm, "lb_highlight_box") == 0) continue;
+        // Rows the category filter has taken out stay in the list, hidden and
+        // with list index -1; counted, an emptied column still read as full.
+        if (TileHiddenExplicitly(cn->child) ||
+            TileNum(cn->child, kTileValue_listindex) < 0.0f) continue;
         if (n == 0 && firstRow) *firstRow = cn->child;
         ++n;
     }
@@ -4429,7 +4531,9 @@ int StepContainerSelection(bool container_side, int delta)
         using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
         reinterpret_cast<SpecialKey>(kContainerSpecialKey)(
             m, container_side ? 14u : 13u, 1.0f);
-        if (FocusSideOf(m) != want) return 0;
+        int now = FocusSideOf(m);
+        if (now < 0) return -1;
+        if (now != want) return 0;
     }
     UInt8* list = m + (container_side ? 0xB4 : 0x84);
     if (!Readable(list, 0x28)) return -1;
@@ -4472,6 +4576,7 @@ int SwitchContainerSide(bool container_side)
     int side = FocusSideOf(m);
     F3A_INFO("Container: side key %u -> handled=%d, focus now %d (1=container 0=yours)",
              container_side ? 14u : 13u, (int)handled, side);
+    if (side < 0) return -1;                  // can't tell: say nothing confident
     return side == (container_side ? 1 : 0) ? 1 : 0;
 }
 
@@ -4635,6 +4740,21 @@ bool ClickMapMarkerTile(const void* tile)
     Tile* menuTile = FindVisibleMenuTile(kMenuType_Map);
     auto* marker = reinterpret_cast<Tile*>(const_cast<void*>(tile));
     if (!menu || !menuTile || !marker || IsBadReadPtr(marker, 0x40)) return false;
+    // The tile was collected earlier; the map may have been rebuilt since
+    // (Pip-Boy closed and opened, world/local map switched) and the pointer
+    // freed. Only click it if it is still part of the map that is open now.
+    {
+        bool inside = false;
+        int depth = 0;
+        for (Tile* t = marker; t && depth < 16; t = t->parent, ++depth) {
+            if (IsBadReadPtr(t, 0x40)) break;
+            if (t == menuTile) { inside = true; break; }
+        }
+        if (!inside) {
+            F3A_INFO("ClickMapMarkerTile: marker tile no longer in the open map");
+            return false;
+        }
+    }
 
     // The engine accepts a marker click only while the map's action button is a
     // live target — the FNV mod sets exactly this before clicking, and without it
@@ -5429,6 +5549,105 @@ std::string GetHudLevelUpText()
     return s && *s ? GameStrToUtf8(s) : std::string();
 }
 
+namespace {
+// The HUD menu's tile whether or not it is the visible/active menu.
+Tile* FindMenuTileAny(UInt32 menuType)
+{
+    auto* ifm = rt::IFM();
+    if (!ifm || !ifm->menuRoot) return nullptr;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
+    for (int safety = 0; node && safety < 4096; ++safety) {
+        if (!Readable(node, sizeof(Node))) return nullptr;
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+        auto* tm = reinterpret_cast<TileMenu*>(cn->child);
+        if (!Readable(tm, sizeof(TileMenu))) continue;
+        Menu* m = tm->menu;
+        if (m && Readable(m, 0x24) && m->typeID == menuType) return cn->child;
+    }
+    return nullptr;
+}
+
+// Text of a tile's direct children, in order. `letters` = the children each
+// hold one character of an animated headline: joined without a separator,
+// with a space wherever the gap to the next letter is wider than a letter
+// (the spaces are gaps in the layout, not characters).
+std::string JoinChildStrings(Tile* parent, const char* sep, bool letters)
+{
+    std::string out;
+    float prevRight = -1.0f;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&parent->childList);
+    for (int i = 0; node && i < 256; ++i) {
+        if (!Readable(node, sizeof(Node))) break;
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+        const char* s = TileStringTrait(cn->child);
+        if (!s || !*s) continue;
+        std::string part = GameStrToUtf8(s);
+        if (letters) {
+            float x = TileNum(cn->child, kTileValue_x);
+            float w = TileNum(cn->child, kTileValue_width);
+            if (prevRight >= 0.0f && x > prevRight + 4.0f &&
+                !out.empty() && out.back() != ' ')
+                out += ' ';
+            out += part;
+            prevRight = x + (w > 0.0f ? w : 0.0f);
+        } else {
+            if (!out.empty() && sep) out += sep;
+            out += part;
+        }
+    }
+    // Trim.
+    size_t b = out.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    size_t e = out.find_last_not_of(" \t\r\n");
+    return out.substr(b, e - b + 1);
+}
+} // namespace
+
+bool GetQuestReminder(std::string* headline, std::string* stages)
+{
+    if (headline) headline->clear();
+    if (stages) stages->clear();
+    Tile* hud = FindMenuTileAny(kMenuType_HUDMain);
+    if (!hud) return false;
+    Tile* rem = FindChildByName(hud, "QuestReminder", 3);
+    if (!rem) return false;
+    // Hidden between popups, but the old strings stay in the tiles — reading
+    // them then would repeat the last popup after a load. Empty = nothing up.
+    if (!TileVisible(rem)) return true;
+    if (headline) {
+        if (Tile* qa = FindChildByName(rem, "QuestAdded", 1)) {
+            // One letter per child while animating — decide by the children:
+            // mostly single characters means letters.
+            int kids = 0, singles = 0;
+            struct Node { Tile::ChildNode* item; Node* next; };
+            auto* node = reinterpret_cast<Node*>(&qa->childList);
+            for (int i = 0; node && i < 256; ++i) {
+                if (!Readable(node, sizeof(Node))) break;
+                Tile::ChildNode* cn = node->item;
+                node = node->next;
+                if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+                const char* s = TileStringTrait(cn->child);
+                if (!s || !*s) continue;
+                ++kids;
+                if (std::strlen(s) == 1) ++singles;
+            }
+            bool letters = kids > 0 && singles * 2 >= kids;
+            *headline = JoinChildStrings(qa, " ", letters);
+        }
+    }
+    if (stages) {
+        if (Tile* qs = FindChildByName(rem, "QuestStages", 1))
+            *stages = JoinChildStrings(qs, ". ", false);
+    }
+    return true;
+}
+
 // Everything the HUD is currently SAYING, as separate lines.
 //
 // The game puts tutorials, hints, "you cannot fast travel while overencumbered",
@@ -5450,6 +5669,9 @@ bool HudTileIsNoise(Tile* t)
         "Compass", "clock", "Clock", "meter", "Meter", "bar", "Bar",
         "Messages", "Info", "crippled", "Crippled", "xp", "XP", "rad", "Rad",
         "sneak", "Sneak", "reticle", "Reticle", "enemyhealth", "EnemyHealth",
+        // Quest popups and objectives: read by their own reader, which also
+        // works under other menus (poll::PollQuestReminder).
+        "QuestReminder",
         // Loot Menu Updated's overlay. It lives on the HUD and is full of
         // prose — item names, "Take", the carry weight — which this collector
         // happily read out at every loading screen. GetLootMenuInfo reads it
@@ -5517,9 +5739,13 @@ UInt32 TraitId(const char* name)
     static int  state = 0;          // 0 = untested, 1 = usable, -1 = rejected
     if (state == 0) {
         const void* fn = reinterpret_cast<const void*>(0x00BEA9E0);
-        if (IsBadReadPtr(fn, 5)) {
+        static const unsigned char kSig[] = { 0x51,0x8B,0x4C,0x24,0x08,0x8D,0x04,0x24 };
+        if (IsBadReadPtr(fn, sizeof(kSig))) {
             state = -1;
             F3A_INFO("TraitId: 0x00BEA9E0 unreadable — loot menu support off");
+        } else if (std::memcmp(fn, kSig, sizeof(kSig)) != 0) {
+            state = -1;
+            F3A_INFO("TraitId: 0x00BEA9E0 is not TraitNameToID on this build — loot menu support off");
         } else if (reinterpret_cast<PFN>(0x00BEA9E0)("visible") != kTileValue_visible) {
             state = -1;
             F3A_INFO("TraitId: self-test failed — loot menu support off");

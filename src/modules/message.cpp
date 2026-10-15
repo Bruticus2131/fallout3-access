@@ -17,6 +17,10 @@ bool        g_spoken = false;
 std::string g_last;
 int         g_retry  = 0;
 constexpr int kRetryTicks = 12;   // ~1s at the poll rate
+// After the first read: a different text seen once, waiting for a second
+// sighting, and the ticks until the next comparison.
+std::string g_pending;
+int         g_watch = 0;
 
 void TryAnnounce()
 {
@@ -38,6 +42,8 @@ void OnOpen()
 {
     g_spoken = false;
     g_last.clear();
+    g_pending.clear();
+    g_watch = 0;
     g_retry = kRetryTicks;
     TryAnnounce();
 }
@@ -46,14 +52,30 @@ void OnClose()
 {
     g_spoken = false;
     g_last.clear();
+    g_pending.clear();
     g_retry = 0;
 }
 
 void OnTick(float)
 {
-    if (g_spoken || g_retry <= 0) return;
-    --g_retry;
-    TryAnnounce();
+    if (!g_spoken) {
+        if (g_retry <= 0) return;
+        --g_retry;
+        TryAnnounce();
+        return;
+    }
+    // One popup can follow another between two polls, with no close and open
+    // for the dispatcher to see — the second was never read. Keep comparing
+    // while the menu is up (as the FNV mod does every frame) and read a new
+    // text once it has held for two reads, so a redraw can't pass for one.
+    if (++g_watch < 3) return;
+    g_watch = 0;
+    std::string text = game::GetActiveMessageText();
+    if (text.empty() || text == g_last) { g_pending.clear(); return; }
+    if (text != g_pending) { g_pending = text; return; }
+    g_pending.clear();
+    g_last = text;
+    tolk::Speak(game::ExpandControlTokens(text), tolk::Priority::System, true);
 }
 
 // ---- Text-entry popup (character name, etc.) -------------------------------

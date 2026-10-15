@@ -49,6 +49,14 @@ bool         g_follow_quest = false;
 std::vector<game::Vec3> g_waypoints;
 size_t       g_wp_index   = 0;
 bool         g_have_path  = false;
+// Places this walk must route round: locked doors met on the way.
+std::vector<game::Vec3> g_avoid;
+// Lost-the-path check: how far off the route counts as lost, and how often a
+// new route may be worked out (a rebuild every tick would be its own problem).
+constexpr float kLostDist       = 450.0f;
+bool g_lost_said = false;   // "lost the route" already said in this episode
+constexpr float kRebuildEvery   = 3.0f;
+float        g_rebuild_cooldown = 0.0f;
 constexpr float kWaypointRadius = 96.0f;   // advance when this close (~1.5 m)
 // While we have no path, keep retrying BuildPath as we move — once we near the
 // stairs / a connected mesh region the path (which handles height) is found.
@@ -346,6 +354,90 @@ game::Vec3 CurrentGoal()
     return g_target_pos;
 }
 
+// Ask the game's own pathfinder for the route as well (it routes NPCs: doors,
+// stairs, the links between navmeshes). Our navmesh route walks meanwhile; the
+// engine's replaces it when it arrives — see AdoptEngineRoute.
+void RequestEngineRoute()
+{
+    if (!g_target_refr || !g_target_form || g_cross) return;
+    mover::RequestEnginePath(g_target_refr, g_target_form, kArriveDist);
+}
+
+// A route that runs through somewhere this walk has learned to avoid (a locked
+// door) is no route.
+//
+// A reroute starts AT the locked door, so its first points always lie near it.
+// When the player already stands in a door's zone, only points clearly nearer
+// the door than the player count — a route going through it, not one leaving.
+bool RouteHitsAvoided(const std::vector<game::Vec3>& wp)
+{
+    const float kZone2 = 120.0f * 120.0f;
+    auto pp = game::GetPlayerPosition();
+    for (const auto& a : g_avoid) {
+        float pdx = pp.x - a.x, pdy = pp.y - a.y;
+        float pd2 = pdx * pdx + pdy * pdy;
+        for (const auto& p : wp) {
+            float dx = p.x - a.x, dy = p.y - a.y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < kZone2 && std::fabs(p.z - a.z) < 160.0f &&
+                (pd2 >= kZone2 || d2 < pd2 * 0.5f))
+                return true;
+        }
+    }
+    return false;
+}
+
+// Take the game's route once it is ready.
+void AdoptEngineRoute()
+{
+    int st = mover::EnginePathState();
+    if (st != 2 && st != 3) return;
+    std::vector<game::Vec3> wp;
+    mover::TakeEnginePath(&wp);
+    if (st == 3 || wp.empty()) {
+        F3A_INFO("autowalk: no engine route - keeping the navmesh one (%u waypoint(s))",
+                 (unsigned)g_waypoints.size());
+        return;
+    }
+    if (RouteHitsAvoided(wp)) {
+        F3A_INFO("autowalk: engine route goes through an avoided door - ignored");
+        return;
+    }
+    F3A_INFO("autowalk: engine route adopted, %u waypoint(s) (navmesh had %u)",
+             (unsigned)wp.size(), (unsigned)g_waypoints.size());
+    g_waypoints = std::move(wp);
+    g_wp_index  = 0;
+    g_have_path = true;
+    g_last_probe_dist = DistanceToTarget();
+}
+
+// Work the route out again from where the player stands now, steering round
+// everything in g_avoid. Says `why` (if any) so the player knows the walk has
+// not simply wandered off. Returns whether a route was found.
+bool RebuildPath(const char* why)
+{
+    g_rebuild_cooldown = kRebuildEvery;
+    std::vector<game::Vec3> wp;
+    bool ok = navmesh::BuildPath(game::GetPlayerPosition(), g_target_pos, wp,
+                                 &g_avoid) && !wp.empty();
+    // The avoid list steers the search, but a route that still runs through
+    // a locked door is no route round it.
+    bool hits = ok && !g_avoid.empty() && RouteHitsAvoided(wp);
+    if (hits) ok = false;
+    F3A_INFO("autowalk: rebuild (%s) -> %s, %u waypoint(s), %u avoided",
+             why ? why : "silent",
+             ok ? "OK" : hits ? "only through an avoided door" : "no path",
+             (unsigned)wp.size(), (unsigned)g_avoid.size());
+    if (ok) {
+        g_waypoints = std::move(wp);
+        g_wp_index  = 0;
+        g_have_path = true;
+    }
+    RequestEngineRoute();
+    if (why && *why) tolk::Speak(why, tolk::Priority::Ui, false);
+    return ok;
+}
+
 // Advance past waypoints we've already reached.
 void AdvanceWaypoints()
 {
@@ -457,6 +549,7 @@ void StopWalking(const char* reason_utf8)
              (GetAsyncKeyState('W') & 0x8000) ? 1 : 0,
              (int)mover::Active());
     mover::Clear();       // stop driving the engine's mover
+    mover::CancelEnginePath();
     ReleaseKeysHard();    // and let go of every movement key, edge or no edge
     g_jump_timer    = 0.0f;
     g_close_timer   = 0.0f;
@@ -521,6 +614,20 @@ bool TryOpenBlockingDoor()
     float dist = std::sqrt(bestd);
 
     if (best->locked) {
+        // A locked door on the route is not the end of the route: the navmesh
+        // runs through doorways whether or not they open, and often there is
+        // another way round (the reactor level on the way to Jonas). Close the
+        // doorway off and look for one before giving up.
+        g_avoid.push_back(best->position);
+        if (!g_cross && RebuildPath(nullptr)) {
+            F3A_INFO("autowalk: locked door '%s' (%08X) — routing round it",
+                     best->name.c_str(), (unsigned)best->form_id);
+            tolk::Speak("Drzwi zamknięte na zamek. Szukam innej drogi.",
+                        tolk::Priority::Ui, false);
+            g_last_probe_dist = DistanceToTarget();
+            g_stuck_count = 0;
+            return true;
+        }
         F3A_INFO("autowalk: locked door '%s' (%08X) lock=%d, %.0f units — stopping",
                  best->name.c_str(), (unsigned)best->form_id, best->lock_level, dist);
         std::string what = "Zamknięte drzwi na drodze: " + best->name + ", ";
@@ -677,6 +784,9 @@ bool PickCrossDoor()
         else if (indoors)                                           cat = 2;
         else continue;   // outdoors, a door further inside is not the way on
         if (used) cat = 1;
+        // A locked door opens only with its key or a lockpick screen — the
+        // last resort, after every door that simply opens.
+        if (e.locked) cat = 0;
 
         float dx = e.position.x - pp.x, dy = e.position.y - pp.y;
         float d2 = dx * dx + dy * dy;
@@ -691,6 +801,11 @@ bool PickCrossDoor()
     }
     if (g_cross_used_doors.size() < 32) g_cross_used_doors.push_back(best->form_id);
     F3A_INFO("Autowalk: next door '%s' (rank %d)", best->name.c_str(), bestCat);
+    // The orbit check measures the way to THIS door: the closest approach to
+    // the previous one (often a few units) made every probe here look like no
+    // improvement, and a walk of several doors stopped after ~8 s.
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
     g_cross_door_refr = best->refr;
     g_cross_door_form = best->form_id;
     g_cross_door_pos  = best->position;
@@ -786,6 +901,8 @@ void TickCross(float dt)
                                  g_waypoints) && !g_waypoints.empty();
         if (arrived_in_space) {
             g_cross = false;
+            g_best_dist = 1e9f;
+            g_noimprove = 0;
             g_waypoints.clear(); g_wp_index = 0;
             g_have_path = navmesh::BuildPath(game::GetPlayerPosition(),
                           g_target_pos, g_waypoints) && !g_waypoints.empty();
@@ -853,6 +970,14 @@ void TickCross(float dt)
         if (g_recover_timer <= 0.0f) g_last_probe_dist = dd;
     } else {
         Steer(g_cross_door_pos);
+    }
+
+    // A door we opened on the way is still swinging: not a stall.
+    if (g_door_cooldown > 0.0f) {
+        g_door_cooldown -= dt;
+        if (g_door_cooldown <= 0.0f) g_last_probe_dist = dd;
+        g_probe_timer = 0.0f;
+        return;
     }
 
     // Progress probe toward the door: no progress → try a plain closed door in
@@ -973,6 +1098,7 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     g_recover_dir    = 1;
     g_last_door      = 0;
     g_door_cooldown  = 0.0f;
+    g_lost_said      = false;
     g_door_hold      = 0.0f;
     g_door_refr      = nullptr;
 
@@ -1007,6 +1133,8 @@ void StartTo(const game::Vec3& pos, const std::string& name,
 
     // Try a real path first: whether the target is even reachable on foot is the
     // evidence we need below when there's no reference to test the space with.
+    g_avoid.clear();
+    g_rebuild_cooldown = 0.0f;
     g_waypoints.clear();
     g_wp_index  = 0;
     g_have_path = navmesh::BuildPath(game::GetPlayerPosition(), pos,
@@ -1064,6 +1192,7 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     }
 
     Steer(CurrentGoal());
+    RequestEngineRoute();
 
     char buf[256];
     std::snprintf(buf, sizeof(buf), "Idę do: %s%s",
@@ -1110,7 +1239,7 @@ bool TryTravelLeg()
                 tolk::Priority::System, true);
 
     Move(false, false, false, false);
-    poll::RequestTeleport(best->refr);
+    poll::RequestTeleport(best->refr, best->form_id);
     // Reuse the cross-space machine to wait out the load and re-evaluate on the
     // far side: it either resumes the plain walk (same space as the target now)
     // or picks the load door that gets us in.
@@ -1136,7 +1265,7 @@ bool StartToQuest()
     std::string label = qt.name;
     std::string q = game::GetTrackedQuestName();
     if (!q.empty()) label = q + ": " + qt.name;
-    StartTo(qt.position, label, qt.refr, 0);
+    StartTo(qt.position, label, qt.refr, qt.refid);
     g_follow_quest = true;          // StartTo cleared it
     return true;
 }
@@ -1174,7 +1303,7 @@ bool FollowQuestRetarget()
     std::string q = game::GetTrackedQuestName();
     if (!q.empty()) label = q + ": " + qt.name;
     tolk::Speak("Cel zadania zmieniony.", tolk::Priority::System, true);
-    StartTo(qt.position, label, qt.refr, 0);
+    StartTo(qt.position, label, qt.refr, qt.refid);
     g_follow_quest = true;
     return true;
 }
@@ -1202,7 +1331,14 @@ void Tick(float dt)
     }
     auto active = menu::ActiveMenu();
     if (active != menu::Id::None && active != menu::Id::HUDMain) {
-        if (g_cross) { mover::Clear(); return; }   // LoadingMenu during a door
+        // Only the load a door of ours triggers keeps a crossing alive. Any
+        // other menu (Pip-Boy, a lockpick screen at a locked door, pause)
+        // ends it, as it ends an ordinary walk — before, the crossing waited
+        // under it and walked off on its own the moment it closed.
+        if (g_cross && (active == menu::Id::Loading || g_cross_wait > 0.0f)) {
+            mover::Clear();
+            return;
+        }
         StopWalking(nullptr);
         return;
     }
@@ -1275,7 +1411,7 @@ void Tick(float dt)
             g_path_retry_timer = 0.0f;
             g_waypoints.clear(); g_wp_index = 0;
             if (navmesh::BuildPath(game::GetPlayerPosition(), g_target_pos,
-                                   g_waypoints) && !g_waypoints.empty()) {
+                                   g_waypoints, &g_avoid) && !g_waypoints.empty()) {
                 g_have_path = true;
                 g_last_probe_dist = dist;   // fresh progress base for the new route
                 tolk::Speak("Trasa wyznaczona.", tolk::Priority::Background, false);
@@ -1289,7 +1425,37 @@ void Tick(float dt)
         }
     }
 
+    AdoptEngineRoute();
     AdvanceWaypoints();
+
+    // Lost the route? Far from the waypoint we are meant to be heading for —
+    // pushed aside, slid down a slope, went round something the long way —
+    // then the old route starts from somewhere we no longer are. Work out a
+    // new one from here, and say so.
+    if (g_rebuild_cooldown > 0.0f) g_rebuild_cooldown -= dt;
+    if (g_have_path && g_wp_index < g_waypoints.size() && g_rebuild_cooldown <= 0.0f &&
+        g_recover_timer <= 0.0f) {
+        // Off the LEG being walked (previous waypoint -> current one), not
+        // merely far from the next point: the engine's routes have long legs,
+        // and on one of those the next point is far away by design — which
+        // set this off over and over on a walk that was going fine.
+        auto pp = game::GetPlayerPosition();
+        const auto& w = g_waypoints[g_wp_index];
+        const auto& a = g_wp_index > 0 ? g_waypoints[g_wp_index - 1] : w;
+        float sx = w.x - a.x, sy = w.y - a.y;
+        float len2 = sx * sx + sy * sy;
+        float t = len2 > 1.0f ? ((pp.x - a.x) * sx + (pp.y - a.y) * sy) / len2 : 1.0f;
+        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+        float dx = a.x + t * sx - pp.x, dy = a.y + t * sy - pp.y;
+        if (std::sqrt(dx * dx + dy * dy) > kLostDist) {
+            // Said once per episode; a second rebuild in a row is silent.
+            if (!RebuildPath(g_lost_said ? nullptr : "Zgubiłem trasę, przeliczam."))
+                g_rebuild_cooldown = kRebuildEvery;   // try again in a moment
+            g_lost_said = true;
+        } else {
+            g_lost_said = false;
+        }
+    }
 
     if (g_recover_timer > 0.0f) {
         // Recovery: strafe sideways to slip past the obstacle. On the first few
@@ -1362,6 +1528,11 @@ void Tick(float dt)
                     StopWalking("Utknąłem. Spróbuj naprowadzania ręcznego.");
                     return;
                 }
+                // Wedged twice in a row: the route itself may be the problem
+                // (a gap the navmesh claims is there). Work it out afresh from
+                // here before more sidestepping.
+                if (g_stuck_count == 2 && g_rebuild_cooldown <= 0.0f)
+                    RebuildPath("Przeliczam trasę.");
                 g_recover_dir   = -g_recover_dir;   // try the other side
                 g_recover_timer = kRecoverSecs;
                 TriggerJump();   // hop while strafing — frees ledges/lips/rubble
