@@ -142,6 +142,9 @@ bool Load(const wchar_t* ini_path)
     s.hide_empty_containers = ReadBool(L"Voice", L"HideEmptyContainers", true, ini_path);
     s.engine_path           = ReadBool(L"Voice", L"EnginePath", true, ini_path);
     s.hint_mode             = ReadInt (L"Voice", L"Hints", 1, ini_path);
+    s.engine_aim_deg        = ReadInt (L"Voice", L"EngineAim", 15, ini_path);
+    if (s.engine_aim_deg < 0)  s.engine_aim_deg = 0;
+    if (s.engine_aim_deg > 45) s.engine_aim_deg = 45;
     s.compass_units         = ReadInt (L"Voice", L"CompassUnits",       0, ini_path);
     s.autowalk_turn_gain    = ReadInt (L"Voice", L"AutoWalkTurnGain",   4, ini_path);
     s.activate_pick_radius  = ReadInt (L"Voice", L"ActivatePickRadius", 150, ini_path);

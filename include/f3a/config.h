@@ -151,6 +151,9 @@ struct Settings {
     // The game's control hints ("Aby oddać strzał, ..."): 0 = never read,
     // 1 = once per game session (default), 2 = every time they show.
     int    hint_mode = 1;
+    // While the aim key (]) is held, the engine's own bullet correction may
+    // bend a shot up to this many degrees onto a hostile actor. 0 = off.
+    int    engine_aim_deg = 15;
     int    compass_units = 0;           // 0 = clock face ("godzina trzecia"), 1 = degrees
     // AutoWalk mouse-turn gain: mouse counts injected per degree of heading
     // error. Higher = turns faster (may overshoot/spin), lower = gentler/slower.

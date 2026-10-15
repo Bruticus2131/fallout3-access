@@ -92,6 +92,21 @@ bool VatsTargetState(std::string* out);
 // call and must not run on the poll thread. -1 until sampled.
 int PlayerSpecial(int i);
 
+// The SPECIAL book's page, the attribute picked on its summary page and the
+// points to share out, sampled on the main thread with PlayerSpecial (see
+// game::GetSpecialBookState). False until sampled or when unreadable.
+bool SpecialBookState(int* page, int* indexStat, int* maxPoints);
+
+// The game's own description of SPECIAL attribute i (0 Strength .. 6 Luck),
+// read on the main thread the first time the book opens. Empty if not (yet)
+// read.
+std::string SpecialDescription(int i);
+
+// Widen the engine's own bullet correction while the aim key is held (see
+// game::SetEngineAutoAim). Applied and undone on the main thread; also undone
+// when the mod is switched off or gameplay ends. Safe from any thread.
+void SetEngineAimAssist(bool on);
+
 // Announce the first/third-person view a moment after the F key is pressed (once
 // the camera zoom has settled). Called from the F hotkey on the worker thread;
 // the read + speech happen on the main thread in PollViewChange.

@@ -58,6 +58,22 @@ bool g_lost_said = false;   // "lost the route" already said in this episode
 constexpr float kRebuildEvery   = 3.0f;
 float        g_rebuild_cooldown = 0.0f;
 constexpr float kWaypointRadius = 96.0f;   // advance when this close (~1.5 m)
+
+// The engine's pathfinder is the PRIMARY route, as in the FNV mod; ours (the
+// navmesh A*) is worked out too, but only walked when the engine has nothing.
+game::Vec3 g_route_goal{};          // where the last engine request is to lead
+bool   g_route_engine   = false;    // the route being walked is the engine's
+bool   g_route_partial  = false;    // ...and it ends short of its goal
+float  g_leg_start_dist = 0.0f;     // distance to the goal when that leg began
+int    g_route_legs     = 0;        // engine legs asked for on this walk
+float  g_engine_wait    = 0.0f;     // s left to stand and wait for its answer
+bool   g_engine_given_up = false;   // a short leg gained nothing: ours from here
+bool   g_engine_said_none = false;  // its last answer was "no route"
+game::Vec3 g_probe_pos{};           // where the player stood at the last stall probe
+constexpr float kEngineWaitSecs  = 1.5f;
+constexpr int   kMaxRouteLegs    = 100;     // the FNV mod's cap
+constexpr float kPartialResidual = 256.0f;  // route ends this far short = partial
+constexpr float kLegMinGain      = 500.0f;  // a leg must gain this to ask for another
 // While we have no path, keep retrying BuildPath as we move — once we near the
 // stairs / a connected mesh region the path (which handles height) is found.
 float        g_path_retry_timer = 0.0f;
@@ -354,13 +370,34 @@ game::Vec3 CurrentGoal()
     return g_target_pos;
 }
 
-// Ask the game's own pathfinder for the route as well (it routes NPCs: doors,
-// stairs, the links between navmeshes). Our navmesh route walks meanwhile; the
-// engine's replaces it when it arrives — see AdoptEngineRoute.
-void RequestEngineRoute()
+// Ask the game's own pathfinder for a route (it routes NPCs: doors, stairs,
+// the links between navmeshes). False when it can't be asked — no reference to
+// route to, switched off, or given up on for this walk.
+bool RequestEngineRouteTo(const void* refr, uint32_t form, const game::Vec3& goal,
+                          float radius)
 {
-    if (!g_target_refr || !g_target_form || g_cross) return;
-    mover::RequestEnginePath(g_target_refr, g_target_form, kArriveDist);
+    if (!refr || !form || g_engine_given_up || !config::Get().engine_path) return false;
+    g_route_goal = goal;
+    mover::RequestEnginePath(refr, form, radius);
+    return true;
+}
+
+// The route for what the walk is doing now: the door it is heading for in
+// cross mode, the target otherwise.
+bool RequestEngineRoute()
+{
+    if (g_cross)
+        return g_cross_door_refr &&
+               RequestEngineRouteTo(g_cross_door_refr, g_cross_door_form,
+                                    g_cross_door_pos, kCrossDoorReach * 0.5f);
+    return RequestEngineRouteTo(g_target_refr, g_target_form, g_target_pos, kArriveDist);
+}
+
+float DistanceToRouteGoal()
+{
+    auto pp = game::GetPlayerPosition();
+    float dx = g_route_goal.x - pp.x, dy = g_route_goal.y - pp.y;
+    return std::sqrt(dx * dx + dy * dy);
 }
 
 // A route that runs through somewhere this walk has learned to avoid (a locked
@@ -387,6 +424,32 @@ bool RouteHitsAvoided(const std::vector<game::Vec3>& wp)
     return false;
 }
 
+// Start a freshly adopted route at the leg the player is on now, not at its
+// first point: the answer takes a moment, and turning back to where the
+// player stood when asking is a step backwards. Only the route's first stretch
+// is searched, so a route that doubles back past the player is not cut short.
+void SnapToRoute()
+{
+    g_wp_index = 0;
+    if (g_waypoints.size() < 2) return;
+    auto pp = game::GetPlayerPosition();
+    float best = 1e30f, walked = 0.0f;
+    size_t bestI = 1;
+    for (size_t i = 1; i < g_waypoints.size() && walked <= 800.0f; ++i) {
+        const auto& a = g_waypoints[i - 1];
+        const auto& b = g_waypoints[i];
+        float sx = b.x - a.x, sy = b.y - a.y;
+        float len2 = sx * sx + sy * sy;
+        float t = len2 > 1.0f ? ((pp.x - a.x) * sx + (pp.y - a.y) * sy) / len2 : 1.0f;
+        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+        float lx = a.x + t * sx - pp.x, ly = a.y + t * sy - pp.y;
+        float d2 = lx * lx + ly * ly;
+        if (d2 < best) { best = d2; bestI = i; }
+        walked += std::sqrt(len2);
+    }
+    g_wp_index = bestI;
+}
+
 // Take the game's route once it is ready.
 void AdoptEngineRoute()
 {
@@ -394,8 +457,11 @@ void AdoptEngineRoute()
     if (st != 2 && st != 3) return;
     std::vector<game::Vec3> wp;
     mover::TakeEnginePath(&wp);
+    g_engine_wait = 0.0f;                // answered, one way or the other
     if (st == 3 || wp.empty()) {
-        F3A_INFO("autowalk: no engine route - keeping the navmesh one (%u waypoint(s))",
+        g_engine_said_none = true;
+        F3A_INFO("autowalk: no engine route - %s (%u waypoint(s))",
+                 g_have_path ? "walking our own" : "none of ours either",
                  (unsigned)g_waypoints.size());
         return;
     }
@@ -403,12 +469,36 @@ void AdoptEngineRoute()
         F3A_INFO("autowalk: engine route goes through an avoided door - ignored");
         return;
     }
-    F3A_INFO("autowalk: engine route adopted, %u waypoint(s) (navmesh had %u)",
-             (unsigned)wp.size(), (unsigned)g_waypoints.size());
-    g_waypoints = std::move(wp);
-    g_wp_index  = 0;
-    g_have_path = true;
+    // Partial: it ends well short of where it was asked to go. The engine
+    // routes only as far as the navmesh it has loaded; the next leg is asked
+    // for when this one is walked (see Tick).
+    const auto& end = wp.back();
+    float rx = end.x - g_route_goal.x, ry = end.y - g_route_goal.y;
+    float residual = std::sqrt(rx * rx + ry * ry);
+    bool partial = residual > kPartialResidual;
+    F3A_INFO("autowalk: engine route adopted, %u waypoint(s)%s (ours had %u)",
+             (unsigned)wp.size(), partial ? ", PARTIAL" : "", (unsigned)g_waypoints.size());
+    if (partial) F3A_INFO("autowalk: it ends %.0f units short of its goal", residual);
+    g_waypoints     = std::move(wp);
+    g_have_path     = true;
+    g_route_engine  = true;
+    g_route_partial = partial;
+    g_leg_start_dist = DistanceToRouteGoal();
+    SnapToRoute();
     g_last_probe_dist = DistanceToTarget();
+}
+
+// Before walking a route of the engine's, the player waits for it: drop what
+// was being followed and ask. Used for the door in cross mode, where our own
+// navmesh route (to the target) means nothing.
+void RouteToDoor()
+{
+    g_waypoints.clear();
+    g_wp_index      = 0;
+    g_have_path     = false;
+    g_route_engine  = false;
+    g_route_partial = false;
+    if (RequestEngineRoute()) g_engine_wait = kEngineWaitSecs;
 }
 
 // Work the route out again from where the player stands now, steering round
@@ -432,23 +522,88 @@ bool RebuildPath(const char* why)
         g_waypoints = std::move(wp);
         g_wp_index  = 0;
         g_have_path = true;
+        g_route_engine  = false;      // ours, until the engine's answer replaces it
+        g_route_partial = false;
     }
     RequestEngineRoute();
     if (why && *why) tolk::Speak(why, tolk::Priority::Ui, false);
     return ok;
 }
 
-// Advance past waypoints we've already reached.
+// Advance past waypoints we've already reached — or already passed: the
+// player projected onto the leg being walked (previous waypoint -> this one)
+// is at its end, and not far off to the side of it. The look-ahead steering
+// below rounds a bend without touching its corner, so "within reach of the
+// waypoint" alone would leave the route pointing back at a corner already
+// behind the player (the FNV mod advances the same way).
 void AdvanceWaypoints()
 {
     if (!g_have_path) return;
     auto pp = game::GetPlayerPosition();
-    while (g_wp_index < g_waypoints.size()) {
+    for (int guard = 0; guard < 16 && g_wp_index < g_waypoints.size(); ++guard) {
         const auto& w = g_waypoints[g_wp_index];
         float dx = w.x - pp.x, dy = w.y - pp.y;
-        if (std::sqrt(dx * dx + dy * dy) > kWaypointRadius) break;
+        bool reached = std::sqrt(dx * dx + dy * dy) <= kWaypointRadius;
+        bool passed  = false;
+        if (!reached && g_wp_index > 0) {
+            const auto& a = g_waypoints[g_wp_index - 1];
+            float sx = w.x - a.x, sy = w.y - a.y;
+            float len2 = sx * sx + sy * sy;
+            if (len2 > 1.0f) {
+                float t = ((pp.x - a.x) * sx + (pp.y - a.y) * sy) / len2;
+                float lx = a.x + t * sx - pp.x, ly = a.y + t * sy - pp.y;
+                passed = t >= 0.92f && lx * lx + ly * ly <= 4.0f * kWaypointRadius * kWaypointRadius;
+            }
+        }
+        if (!reached && !passed) break;
         ++g_wp_index;
     }
+}
+
+// The point to steer at, the FNV mod's "corridor-hugging" way: the player is
+// projected onto the leg being walked and the aim is taken a little further
+// along the route, so a bend is rounded smoothly instead of walking corner to
+// corner — but never round a corner sharper than 60°, which would cut its
+// inside into a wall. `corner` gets the real next waypoint, for braking.
+constexpr float kLookAhead      = 60.0f;   // 1.5x the turning radius (160 u/s / 4 rad/s)
+constexpr float kSharpCornerCos = 0.5f;    // cos 60°
+
+game::Vec3 LookAheadGoal(game::Vec3* corner)
+{
+    game::Vec3 goal = CurrentGoal();
+    if (corner) *corner = goal;
+    if (!g_have_path || g_wp_index == 0 || g_wp_index >= g_waypoints.size()) return goal;
+    auto pp = game::GetPlayerPosition();
+    const auto& a = g_waypoints[g_wp_index - 1];
+    const auto& b = g_waypoints[g_wp_index];
+    float abx = b.x - a.x, aby = b.y - a.y;
+    float len2 = abx * abx + aby * aby;
+    float t = len2 > 1.0f ? ((pp.x - a.x) * abx + (pp.y - a.y) * aby) / len2 : 1.0f;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    float curX = a.x + abx * t, curY = a.y + aby * t;
+    size_t next = g_wp_index;
+    float nx = b.x, ny = b.y;
+    float remaining = kLookAhead;
+    for (int guard = 0; guard < 64; ++guard) {
+        float dx = nx - curX, dy = ny - curY;
+        float seg = std::sqrt(dx * dx + dy * dy);
+        bool last = next + 1 >= g_waypoints.size();
+        if (remaining <= seg || last) {
+            float f = seg > 1.0f ? remaining / seg : 1.0f;
+            if (f > 1.0f) f = 1.0f;
+            return { curX + dx * f, curY + dy * f, g_waypoints[next].z };
+        }
+        const auto& on = g_waypoints[next + 1];
+        float ox = on.x - nx, oy = on.y - ny;
+        float olen = std::sqrt(ox * ox + oy * oy);
+        if (seg > 1.0f && olen > 1.0f && (dx * ox + dy * oy) / (seg * olen) < kSharpCornerCos)
+            return g_waypoints[next];               // stop at a sharp corner
+        remaining -= seg;
+        curX = nx; curY = ny;
+        ++next;
+        nx = on.x; ny = on.y;
+    }
+    return goal;
 }
 
 // Steer toward the goal. FIRST person: mouse-free STRAFE — slide toward the goal
@@ -456,7 +611,7 @@ void AdvanceWaypoints()
 // relative and rotZ = camera in first person, so the combo stays correct as we
 // slide). THIRD person: the camera orbits independently of movement, so fall
 // back to mouse-turn + forward. Returns |relative bearing|.
-float Steer(const game::Vec3& goal);
+float Steer(const game::Vec3& goal, const game::Vec3* corner = nullptr);
 
 // Sidestep an obstacle WITHOUT dropping back to key injection.
 //
@@ -484,7 +639,7 @@ void SidestepNative(int dir, const game::Vec3& goal, bool backOut)
     Steer(aside);
 }
 
-float Steer(const game::Vec3& goal)
+float Steer(const game::Vec3& goal, const game::Vec3* corner)
 {
     auto  pp  = game::GetPlayerPosition();
     float rel = game::ComputeBearing(pp, game::GetPlayerYaw(), goal).relative_yaw;
@@ -496,7 +651,10 @@ float Steer(const game::Vec3& goal)
     if (config::Get().native_walk) {
         if (mover::Available()) {
             Move(false, false, false, false);      // make sure no key is stuck down
-            mover::SetGoal(goal.x, goal.y, /*run*/true);
+            if (corner)
+                mover::SetGoalWithCorner(goal.x, goal.y, /*run*/true, corner->x, corner->y);
+            else
+                mover::SetGoal(goal.x, goal.y, /*run*/true);
             return std::fabs(rel);
         }
         WarnNoMover();      // say so, and steer nowhere rather than press keys
@@ -524,6 +682,38 @@ float Steer(const game::Vec3& goal)
 // aim that keeps yanking the view back at a target is not something you can
 // walk away from.
 void DropAimLock() { poll::StopAimTrack(); }
+
+// On arrival, turn the view onto the target, as the FNV mod does: the middle
+// of its body, measured from the camera, held for a moment so the engine's
+// own view update does not undo it. The crosshair is then on it for E.
+constexpr int kLookAtFrames = 30;
+
+void LookAtTarget()
+{
+    if (!g_target_refr || !g_target_form) return;
+    game::Vec3 at{};
+    if (!game::GetRefPosition(g_target_refr, g_target_form, &at)) return;   // gone
+    game::Vec3 body{};
+    if (game::GetAimPointFor(g_target_refr, &body, nullptr)) at = body;
+    poll::RequestAimTrack(g_target_refr, g_target_form, at, 0.0f, kLookAtFrames);
+}
+
+void StopWalking(const char* reason_utf8);   // defined below
+
+// The walk is over at the target: say so and face it.
+void Arrive(const char* say)
+{
+    StopWalking(say);
+    LookAtTarget();
+}
+
+// Steer along the route: at the look-ahead point, braking for the real corner.
+float SteerRoute()
+{
+    game::Vec3 corner{};
+    game::Vec3 goal = LookAheadGoal(&corner);
+    return Steer(goal, &corner);
+}
 
 void StopWalking(const char* reason_utf8)
 {
@@ -563,6 +753,9 @@ void StopWalking(const char* reason_utf8)
     g_cross_wait    = 0.0f;
     g_cross_door_refr = nullptr;
     g_cross_used_doors.clear();   // a new walk gets a clean map of the building
+    g_engine_wait    = 0.0f;
+    g_route_engine   = false;
+    g_route_partial  = false;
     g_state = State::Idle;
     if (reason_utf8 && *reason_utf8)
         tolk::Speak(reason_utf8, tolk::Priority::System, true);
@@ -852,6 +1045,7 @@ void BeginCross()
     g_cross_stuck      = 0;
     g_probe_timer      = 0.0f;
     if (!PickCrossDoor()) { CrossFallbackTeleport(); return; }
+    RouteToDoor();
     g_last_probe_dist = std::sqrt(
         (g_cross_door_pos.x - game::GetPlayerPosition().x) *
         (g_cross_door_pos.x - game::GetPlayerPosition().x) +
@@ -906,6 +1100,9 @@ void TickCross(float dt)
             g_waypoints.clear(); g_wp_index = 0;
             g_have_path = navmesh::BuildPath(game::GetPlayerPosition(),
                           g_target_pos, g_waypoints) && !g_waypoints.empty();
+            g_route_engine  = false;
+            g_route_partial = false;
+            if (RequestEngineRoute()) g_engine_wait = kEngineWaitSecs;   // engine first
             g_last_probe_dist = DistanceToTarget();
             g_probe_timer = 0.0f;
             g_stuck_count = 0;
@@ -927,6 +1124,7 @@ void TickCross(float dt)
             CrossFallbackTeleport();
             return;
         }
+        RouteToDoor();
         g_cross_stuck = 0;
         g_probe_timer = 0.0f;
         g_last_probe_dist = std::sqrt(
@@ -941,7 +1139,12 @@ void TickCross(float dt)
 
     if (!g_cross_door_refr) {                 // lost the door → repick or teleport
         if (!PickCrossDoor()) { CrossFallbackTeleport(); return; }
+        RouteToDoor();
+        return;
     }
+    AdoptEngineRoute();
+    g_engine_said_none = false;     // a door route's "none" means nothing for the target
+    AdvanceWaypoints();
 
     auto  pp = game::GetPlayerPosition();
     float dx = g_cross_door_pos.x - pp.x, dy = g_cross_door_pos.y - pp.y;
@@ -949,6 +1152,9 @@ void TickCross(float dt)
 
     if (dd <= kCrossDoorReach) {              // at the door → go through it
         game::QueueActivate(g_cross_door_refr, g_cross_door_form);
+        mover::CancelEnginePath();
+        g_waypoints.clear(); g_wp_index = 0; g_have_path = false;
+        g_route_engine = false; g_route_partial = false;
         g_last_door       = g_cross_door_form;
         g_cross_door_refr = nullptr;
         g_cross_prev_cell = game::GetPlayerCell();
@@ -968,8 +1174,10 @@ void TickCross(float dt)
             Move(true, g_recover_dir < 0, false, g_recover_dir > 0);
         g_recover_timer -= dt;
         if (g_recover_timer <= 0.0f) g_last_probe_dist = dd;
+    } else if (g_route_engine && g_have_path && g_wp_index < g_waypoints.size()) {
+        SteerRoute();                         // the engine's way to the door
     } else {
-        Steer(g_cross_door_pos);
+        Steer(g_cross_door_pos);              // no route: straight at it
     }
 
     // A door we opened on the way is still swinging: not a stall.
@@ -987,6 +1195,13 @@ void TickCross(float dt)
         g_probe_timer = 0.0f;
         float progress = g_last_probe_dist - dd;
         g_last_probe_dist = dd;
+        // On the engine's route the way to the door can lead away from it
+        // first; there a stall means NOT MOVING, as in the FNV mod.
+        auto ppNow = game::GetPlayerPosition();
+        float mvx = ppNow.x - g_probe_pos.x, mvy = ppNow.y - g_probe_pos.y;
+        g_probe_pos = ppNow;
+        if (g_route_engine && g_have_path && g_wp_index < g_waypoints.size())
+            progress = std::sqrt(mvx * mvx + mvy * mvy);
         // Circling: near the target but no longer getting nearer. The existing
         // backstop only covers 175 units for 2.5 s, so an orbit at any wider
         // radius went on forever. Alex's walker calls this "arrival at the
@@ -1113,6 +1328,14 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     g_cross_teleported = false;
     g_cross_from_cell  = nullptr;
 
+    g_route_engine     = false;
+    g_route_partial    = false;
+    g_route_legs       = 0;
+    g_engine_wait      = 0.0f;
+    g_engine_given_up  = false;
+    g_engine_said_none = false;
+    g_probe_pos        = game::GetPlayerPosition();
+
     g_path_retry_timer = 0.0f;
     g_floor_warned     = false;
     g_follow_quest     = false;   // a plain target; StartToQuest re-sets this
@@ -1191,14 +1414,17 @@ void StartTo(const game::Vec3& pos, const std::string& name,
         return;
     }
 
-    Steer(CurrentGoal());
-    RequestEngineRoute();
+    // The engine's route first: stand for a moment (Tick) while it answers,
+    // and walk ours only if it has none. Without a reference to route to, ours
+    // straight away.
+    if (RequestEngineRoute()) {
+        g_engine_wait = kEngineWaitSecs;
+        g_route_legs  = 1;
+    } else {
+        SteerRoute();
+    }
 
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "Idę do: %s%s",
-                  name.c_str(),
-                  g_have_path ? ", trasa wyznaczona" : "");
-    tolk::Speak(buf, tolk::Priority::System, true);
+    tolk::Speak("Idę do: " + name, tolk::Priority::System, true);
 }
 
 namespace {
@@ -1354,6 +1580,22 @@ void Tick(float dt)
     // marker that no longer matters.
     if (FollowQuestRetarget()) return;
 
+    // Waiting for the engine's route (start of a walk, the next leg of a long
+    // one, a door in cross mode): stand for a moment rather than set off along
+    // a route that is about to be replaced. If it is slow, ours takes over —
+    // and its answer is still adopted when it comes.
+    if (g_engine_wait > 0.0f) {
+        AdoptEngineRoute();                  // clears g_engine_wait on an answer
+        if (g_engine_wait > 0.0f) {
+            g_engine_wait -= dt;
+            g_probe_timer = 0.0f;            // standing on purpose is no stall
+            g_probe_pos   = game::GetPlayerPosition();
+            if (g_engine_wait > 0.0f) return;
+            F3A_INFO("autowalk: the engine has not answered yet - %s",
+                     g_have_path ? "walking our own route meanwhile" : "no route yet");
+        }
+    }
+
     // Cross-worldspace routing runs its own steering (walk to a door, pass
     // through, re-evaluate) instead of the straight-line/navmesh walk below.
     if (g_cross) { TickCross(dt); return; }
@@ -1368,7 +1610,7 @@ void Tick(float dt)
     if (dist <= kArriveDist && sameFloor) {
         char buf[192];
         std::snprintf(buf, sizeof(buf), "Dotarłeś: %s", g_target_name.c_str());
-        StopWalking(buf);
+        Arrive(buf);
         return;
     }
 
@@ -1382,7 +1624,7 @@ void Tick(float dt)
         char buf[192];
         std::snprintf(buf, sizeof(buf), "Jesteś w rejonie celu: %s",
                       g_target_name.c_str());
-        StopWalking(buf);
+        Arrive(buf);
         return;
     }
 
@@ -1393,7 +1635,7 @@ void Tick(float dt)
             char buf[192];
             std::snprintf(buf, sizeof(buf), "Jesteś przy celu: %s",
                           g_target_name.c_str());
-            StopWalking(buf);
+            Arrive(buf);
             return;
         }
     } else {
@@ -1413,9 +1655,13 @@ void Tick(float dt)
             if (navmesh::BuildPath(game::GetPlayerPosition(), g_target_pos,
                                    g_waypoints, &g_avoid) && !g_waypoints.empty()) {
                 g_have_path = true;
+                g_route_engine  = false;
+                g_route_partial = false;
                 g_last_probe_dist = dist;   // fresh progress base for the new route
                 tolk::Speak("Trasa wyznaczona.", tolk::Priority::Background, false);
             }
+            // And the engine again, unless it is already working on one.
+            if (mover::EnginePathState() != 1) RequestEngineRoute();
         }
         if (!g_floor_warned && !sameFloor) {
             g_floor_warned = true;
@@ -1427,6 +1673,51 @@ void Tick(float dt)
 
     AdoptEngineRoute();
     AdvanceWaypoints();
+
+    // The engine's route ended short of the target — it routes only as far as
+    // the navmesh it has loaded. Ask for the next leg from here, as the FNV mod
+    // does, while each leg still gains real ground; otherwise walk ours.
+    if (g_route_engine && g_route_partial && g_have_path &&
+        g_wp_index >= g_waypoints.size()) {
+        g_route_partial = false;
+        float gain = g_leg_start_dist - DistanceToRouteGoal();
+        if (gain > kLegMinGain && g_route_legs < kMaxRouteLegs && RequestEngineRoute()) {
+            ++g_route_legs;
+            F3A_INFO("autowalk: engine leg %d ended short (gained %.0f) - asking for the next",
+                     g_route_legs, gain);
+            mover::Clear();
+            g_engine_wait = kEngineWaitSecs;
+            return;
+        }
+        F3A_INFO("autowalk: engine leg ended short and gained %.0f - our own route from here",
+                 gain);
+        g_engine_given_up = true;
+        g_route_engine    = false;
+        if (!RebuildPath(nullptr)) {
+            // Neither the engine nor our mesh goes any further: this is as
+            // close as walking gets — a rifle-range target behind its
+            // counter, a marker on a roof. Stop here and face it (the FNV
+            // mod's "closest reachable point"), instead of pushing on into
+            // the counter.
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "Bliżej nie dojdę: %s.", g_target_name.c_str());
+            Arrive(buf);
+            return;
+        }
+    }
+
+    // The engine says there is no route, our mesh has none either, and the
+    // target is close: it is out of reach from here (behind a counter, up on
+    // a ledge). Stop and face it rather than walk at it in a straight line.
+    if (g_engine_said_none) {
+        g_engine_said_none = false;
+        if (!g_have_path && DistanceToTarget() <= 600.0f) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "Bliżej nie dojdę: %s.", g_target_name.c_str());
+            Arrive(buf);
+            return;
+        }
+    }
 
     // Lost the route? Far from the waypoint we are meant to be heading for —
     // pushed aside, slid down a slope, went round something the long way —
@@ -1471,7 +1762,7 @@ void Tick(float dt)
         if (g_recover_timer <= 0.0f)
             g_last_probe_dist = DistanceToTarget();   // fresh progress base
     } else {
-        Steer(CurrentGoal());     // strafe (1st person) or mouse-turn (3rd)
+        SteerRoute();             // along the route, rounding its bends
     }
 
     // While a just-opened door swings, don't count us as stuck — keep walking
@@ -1492,9 +1783,18 @@ void Tick(float dt)
         // the probe never ran — so a walk that could not quite reach its target
         // was never recognised as arrived-or-stuck, and just pushed forever.
         bool driving = g_forward_down || mover::Active();
+        auto ppNow = game::GetPlayerPosition();
+        float mvx = ppNow.x - g_probe_pos.x, mvy = ppNow.y - g_probe_pos.y;
+        g_probe_pos = ppNow;
+        const bool onEngineRoute = g_route_engine && g_have_path &&
+                                   g_wp_index < g_waypoints.size();
         if (g_recover_timer <= 0.0f && driving && g_door_cooldown <= 0.0f) {
             float progress = g_last_probe_dist - dist;   // + = got closer
             g_last_probe_dist = dist;
+            // The engine's route may lead away from the target first (round a
+            // wall, down a corridor); there a stall means NOT MOVING, as in the
+            // FNV mod — measured as distance covered, not distance gained.
+            if (onEngineRoute) progress = std::sqrt(mvx * mvx + mvy * mvy);
             if (progress < kMinProgress) {
                 // Stalled right next to the target → we've effectively arrived
                 // (the exact origin may be unreachable). Announce arrival, not
@@ -1503,7 +1803,7 @@ void Tick(float dt)
                     char buf[192];
                     std::snprintf(buf, sizeof(buf), "Jesteś przy celu: %s",
                                   g_target_name.c_str());
-                    StopWalking(buf);
+                    Arrive(buf);
                     return;
                 }
                 // Blocked further out — a closed door is the usual culprit. Open
@@ -1514,7 +1814,9 @@ void Tick(float dt)
                 // a rock, or an awkward corner) → SKIP to the next waypoint so one
                 // bad hop doesn't stall the whole route. Changing the heading
                 // often frees us; recovery/jump below still run as backup.
-                if (g_have_path && g_wp_index + 1 < g_waypoints.size()) {
+                // Not on the engine's route: its waypoints follow walls and
+                // doorways, and skipping them cuts straight into one.
+                if (!onEngineRoute && g_have_path && g_wp_index + 1 < g_waypoints.size()) {
                     // Escalate: the longer we've been wedged here, the further we
                     // skip ahead (capped) to find a heading PAST the obstacle
                     // cluster rather than re-hitting the same blocked waypoint.
@@ -1531,7 +1833,8 @@ void Tick(float dt)
                 // Wedged twice in a row: the route itself may be the problem
                 // (a gap the navmesh claims is there). Work it out afresh from
                 // here before more sidestepping.
-                if (g_stuck_count == 2 && g_rebuild_cooldown <= 0.0f)
+                // On the engine's route at once (it repaths, as the FNV mod does).
+                if (g_stuck_count == (onEngineRoute ? 1 : 2) && g_rebuild_cooldown <= 0.0f)
                     RebuildPath("Przeliczam trasę.");
                 g_recover_dir   = -g_recover_dir;   // try the other side
                 g_recover_timer = kRecoverSecs;

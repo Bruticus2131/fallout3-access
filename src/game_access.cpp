@@ -827,6 +827,140 @@ bool IsKnownHostile(uint32_t refid)
     return false;
 }
 
+// ---- The engine's bullet correction (FO3 1.7.0.3) --------------------------
+//
+// Read from Fallout3.exe (2026-10-15). The shot-direction code 0x00773570
+// (called from the fire sites) bends a ranged shot toward the target at
+// PlayerCharacter+0x8E4 by at most fAutoAimMaxDegrees (fAutoAimMaxDegrees3rd-
+// Person when +0x5A9 is set; the VATS and melee settings are other branches,
+// left alone). That target is chosen by 0x007794B0 from the high-process
+// actors: alive, with 3D, flagged hostile in the player's compass-target list
+// (+0x900), nearer than fAutoAimMaxDistance, inside a screen window of
+// ±fAutoAimScreenPercentage*0.005 round the crosshair, and reached by a ray.
+// Each Setting is { vtable, float value @+4, const char* name @+8 }; the
+// names are checked before anything is written, so another build stays off.
+namespace {
+struct AutoAimSetting { UInt32 addr; const char* name; };
+const AutoAimSetting kAutoAim[] = {
+    { 0x00F5FC84, "fAutoAimMaxDegrees" },
+    { 0x00F5FC90, "fAutoAimMaxDegrees3rdPerson" },
+    { 0x00F5FC78, "fAutoAimScreenPercentage" },
+    { 0x00F5FC6C, "fAutoAimMaxDistance" },
+};
+constexpr int kAutoAimCount = sizeof(kAutoAim) / sizeof(kAutoAim[0]);
+float g_autoaim_saved[kAutoAimCount] = {};
+bool  g_autoaim_applied  = false;
+int   g_autoaim_verified = -1;          // -1 unknown, 0 no, 1 yes
+
+bool AutoAimSettingsOk()
+{
+    if (g_autoaim_verified < 0) {
+        bool ok = true;
+        for (const auto& st : kAutoAim) {
+            auto* p = reinterpret_cast<const UInt8*>(st.addr);
+            if (!Readable(p, 12)) { ok = false; break; }
+            const char* nm = *reinterpret_cast<const char* const*>(p + 8);
+            if (!nm || !Readable(nm, 32) || std::strcmp(nm, st.name) != 0) { ok = false; break; }
+        }
+        g_autoaim_verified = ok ? 1 : 0;
+        F3A_INFO("EngineAim: game settings %s", ok ? "verified"
+                 : "do not match this build - engine bullet correction stays off");
+    }
+    return g_autoaim_verified == 1;
+}
+
+float* AutoAimValue(int i) { return reinterpret_cast<float*>(kAutoAim[i].addr + 4); }
+} // namespace
+
+void SetEngineAutoAim(bool on, float degrees)
+{
+    if (!OnMainThread() || on == g_autoaim_applied || !AutoAimSettingsOk()) return;
+    if (on) {
+        for (int i = 0; i < kAutoAimCount; ++i) g_autoaim_saved[i] = *AutoAimValue(i);
+        // Cone: the degrees asked for. Window: wide enough for an actor that
+        // far off the crosshair to be picked at all (about 4x, by the 0.005
+        // scale above). Range: as far as the scanner looks for enemies.
+        const float want[kAutoAimCount] = { degrees, degrees, degrees * 4.0f, 5000.0f };
+        for (int i = 0; i < kAutoAimCount; ++i) {
+            float v = g_autoaim_saved[i];
+            if (std::isfinite(want[i]) && want[i] > v) v = want[i];   // never narrower
+            *AutoAimValue(i) = v;
+        }
+        g_autoaim_applied = true;
+        F3A_INFO("EngineAim: on - cone %.1f (3rd person %.1f), window %.1f, range %.0f "
+                 "(game values %.1f, %.1f, %.1f, %.0f)",
+                 *AutoAimValue(0), *AutoAimValue(1), *AutoAimValue(2), *AutoAimValue(3),
+                 g_autoaim_saved[0], g_autoaim_saved[1], g_autoaim_saved[2],
+                 g_autoaim_saved[3]);
+    } else {
+        for (int i = 0; i < kAutoAimCount; ++i) *AutoAimValue(i) = g_autoaim_saved[i];
+        g_autoaim_applied = false;
+        F3A_INFO("EngineAim: off - game values restored");
+    }
+}
+
+// SPECIALBookMenu, FO3 1.7.0.3 (vtable 0x00E04834). The same fields the FNV
+// mod reads, at the same offsets — read from its HandleClick 0x00676430 and
+// its page-to-attribute routine 0x00675BE0: +0x48 the page (0 cover, 1-7 =
+// actor values 5-11, 8 the summary page), +0x4C the attribute picked on the
+// summary page (1-7; index_up/index_down step it), +0x58 the points there
+// are to spend (compared with the sum of the seven by the increase button).
+Menu* FindMenuByType(UInt32 type);   // defined below
+bool GetSpecialBookState(int* page, int* indexStat, int* maxPoints)
+{
+    if (!OnMainThread()) return false;
+    Menu* m = FindMenuByType(kMenuType_SPECIALBook);
+    if (!m || !Readable(m, 0x5C)) return false;
+    if (*reinterpret_cast<const UInt32*>(m) != 0x00E04834) return false;
+    auto* b = reinterpret_cast<const UInt8*>(m);
+    if (page)      *page      = *reinterpret_cast<const SInt32*>(b + 0x48);
+    if (indexStat) *indexStat = *reinterpret_cast<const SInt32*>(b + 0x4C);
+    if (maxPoints) *maxPoints = *reinterpret_cast<const SInt32*>(b + 0x58);
+    return true;
+}
+
+// The SPECIAL attributes' AVIF forms are 0x3E8 (Strength) .. 0x3EE (Luck) in
+// Fallout3.esm. ActorValueInfo = TESForm (0x18) + TESFullName (0x18) +
+// TESDescription (0x24, vtable 0x00DBCBE8, Get = slot 4 = 0x00453960) — the
+// FNV mod reads the same component the same way. Get loads the text from the
+// plugin file into a shared buffer, so it is copied at once.
+std::string GetSpecialDescription(int i)
+{
+    if (!OnMainThread() || i < 0 || i > 6) return {};
+    constexpr UInt32 kLookupFormByID = 0x00455190;   // FOSE GameAPI.cpp, 1.7.0.3
+    static const unsigned char kLookupSig[] = { 0x51, 0x8B, 0x0D, 0x14, 0xDD, 0x06, 0x01 };
+    static const unsigned char kGetSig[]    = { 0xA1, 0xCC, 0xCD, 0x06, 0x01 };
+    const void* lookup = reinterpret_cast<const void*>(kLookupFormByID);
+    const void* get    = reinterpret_cast<const void*>(0x00453960);
+    if (!Readable(lookup, sizeof(kLookupSig)) ||
+        std::memcmp(lookup, kLookupSig, sizeof(kLookupSig)) != 0 ||
+        !Readable(get, sizeof(kGetSig)) ||
+        std::memcmp(get, kGetSig, sizeof(kGetSig)) != 0)
+        return {};
+    using LookupFn = TESForm* (__cdecl*)(UInt32);
+    TESForm* f = reinterpret_cast<LookupFn>(kLookupFormByID)(0x3E8u + (UInt32)i);
+    if (!f || !Readable(f, 0x2C)) return {};
+    auto* desc = reinterpret_cast<UInt8*>(f) + 0x24;
+    if (*reinterpret_cast<const UInt32*>(desc) != 0x00DBCBE8) return {};
+    using GetFn = const char* (__thiscall*)(void*, void*, UInt32);
+    const char* text = reinterpret_cast<GetFn>(0x00453960)(desc, f, 0x43534544u);  // 'DESC'
+    if (!text || !Readable(text, 1) || !*text) return {};
+    std::string out = GameStrToUtf8(text);
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\r' || out.back() == '\n'))
+        out.pop_back();
+    return out;
+}
+
+uint32_t EngineAutoAimTargetId()
+{
+    if (!OnMainThread()) return 0;
+    auto* p = reinterpret_cast<const UInt8*>(rt::Player());
+    if (!p || !Readable(p + 0x8E4, 4)) return 0;
+    auto* r = *reinterpret_cast<TESObjectREFR* const*>(p + 0x8E4);
+    if (!r || !Readable(r, 0x10)) return 0;
+    return r->refID;
+}
+
 const void* GetPlayerCell()
 {
     auto* p = rt::Player();
@@ -2764,6 +2898,21 @@ bool FindBoneWorldPos(TESObjectREFR* r, Vec3* out, const char** boneName)
 }
 } // namespace
 
+// Objects whose HITTABLE part is not the middle of their bounds. Measured from
+// the model's own collision hull — the shape a bullet actually registers on —
+// in model space (x, y, z from the origin, before the reference's rotation).
+namespace {
+struct HitCentre { UInt32 baseId; float x, y, z; };
+const HitCentre kHitCentres[] = {
+    // CG02Target, the vault's BB-gun practice target (all three on the range
+    // share it). Its bounds span the whole stand, z -50..67, so their middle
+    // (z +8.5) is the bare post: every shot aimed there missed. The part that
+    // takes the hit is a disc ~26 units across at the top — the collision hull
+    // of clutter\questitems\cg02targetpractice01.nif, centred here.
+    { 0x000304DB, -2.4f, 42.5f, 54.7f },
+};
+} // namespace
+
 bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
 {
     if (how) *how = "none";
@@ -2798,6 +2947,21 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
         if (GetCollisionAABBCenter(refr, &cx, &cy, &cz)) {
             *out = { cx, cy, cz };
             if (how) *how = "collision";
+            return true;
+        }
+    }
+
+    // A known hittable part first (see kHitCentres), rotated into the
+    // reference's facing like the bounds centre below.
+    if (r->baseForm && !IsBadReadPtr(r->baseForm, 0x10)) {
+        UInt32 bid = r->baseForm->refID;
+        for (const auto& h : kHitCentres) {
+            if (h.baseId != bid) continue;
+            float c = std::cos(r->rotZ), sn = std::sin(r->rotZ);
+            out->x = r->posX + (h.x * c - h.y * sn);
+            out->y = r->posY + (h.x * sn + h.y * c);
+            out->z = r->posZ + h.z;
+            if (how) *how = "hit-centre";
             return true;
         }
     }
@@ -5186,53 +5350,87 @@ bool RsmItemCommitted(Tile* item)
     }
     return false;
 }
-void FindRaceSexFocus(Tile* t, int depth, std::string& out, bool wantHover)
+// Text of a RaceSex tile, cleaned for speech: no trailing spaces, colon or the
+// "more" arrow ("Modyfikuj >", "Domyślne:").
+std::string RsmText(const char* raw)
 {
-    if (!t || depth > 12 || !out.empty()) return;
-    if (TileVisible(t)) {
-        bool match = false;
-        if (wantHover) {
-            // The moving cursor: list options AND the WSTECZ/DALEJ buttons at the
-            // bottom (RSM_back_button/RSM_next_button) — they're not list items.
-            match = TileMouseover(t) &&
-                    (TileNameHas(t, "RSM_list_item") ||
-                     TileNameHas(t, "RSM_back_button") ||
-                     TileNameHas(t, "RSM_next_button"));
-        } else {
-            match = TileNameHas(t, "RSM_list_item") && RsmItemCommitted(t);
-        }
-        if (match) {
-            if (const char* s = TileStringTrait(t)) { out = GameStrToUtf8(s); return; }
-        }
+    std::string t = raw ? GameStrToUtf8(raw) : std::string();
+    while (!t.empty() && (t.back() == ' ' || t.back() == '\t' || t.back() == ':' ||
+                          t.back() == '>'))
+        t.pop_back();
+    while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+    return t;
+}
+
+// A slider's value as the menu shows it: its RSM_slider_value text, or —
+// where that is blank, as on the face-shape sliders — the number in user1
+// (the FNV mod's order; user5 is not a string on FO3).
+std::string RsmSliderValue(Tile* slider)
+{
+    if (Tile* v = FindChildByName(slider, "RSM_slider_value", 1)) {
+        std::string t = RsmText(TileStringTrait(v));
+        if (!t.empty()) return t;
     }
-    struct Node { Tile::ChildNode* item; Node* next; };
-    auto* node = reinterpret_cast<Node*>(&t->childList);
-    for (int s = 0; node && s < 4096 && out.empty(); ++s) {
-        Tile::ChildNode* cn = node->item;
-        if (cn && cn->child) FindRaceSexFocus(cn->child, depth + 1, out, wantHover);
-        node = node->next;
+    float n = TileNum(slider, kTileValue_user1);
+    if (!std::isfinite(n)) return {};
+    char buf[32];
+    if (n == (float)(int)n) std::snprintf(buf, sizeof(buf), "%d", (int)n);
+    else {
+        std::snprintf(buf, sizeof(buf), "%.1f", n);
+        for (char* q = buf; *q; ++q) if (*q == '.') *q = ',';
     }
+    return buf;
 }
 } // namespace
 
-// Character creation (RaceSexMenu): the focused category/option (Płeć, Rasa,
-// Włosy, the race list, …) is the RSM_list_item whose RSM_selection_indicator
-// child is visible. Returns its text so navigation can be heard. nullopt if the
-// menu isn't open / nothing focused. (Face fine-tuning sliders are a TODO.)
-std::optional<std::string> GetRaceSexSelection()
+// Character creation (RaceSexMenu). The FNV mod's reading, on FO3's tiles (a
+// menu dump of the face page settled the layout): every item of every page
+// is a direct child of RSM_Background, and the ones of other pages are
+// hidden. A page's header is the RSM_list_item that is NOT a target (so it
+// cannot be focused) and whose user0 is the page number held in the menu
+// root's user0. The item the keyboard is on carries mouseover — the FNV mod
+// uses activeTileAlt, which FO3's interface manager does not have.
+bool GetRaceSexState(RaceSexState* out)
 {
-    // Search the whole menu tree (don't depend on the RaceSexMenu being detected
-    // as a dispatched "open" menu — like the terminal, it isn't reliably).
-    auto* ifm = rt::IFM();
-    if (!ifm || !ifm->menuRoot) return std::nullopt;
-    Tile* root = reinterpret_cast<Tile*>(ifm->menuRoot);
-    std::string out;
-    FindRaceSexFocus(root, 0, out, /*wantHover=*/true);    // the moving cursor
-    if (out.empty())
-        FindRaceSexFocus(root, 0, out, /*wantHover=*/false); // committed selection
-    while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
-    if (out.empty()) return std::nullopt;
-    return out;
+    if (!out) return false;
+    *out = RaceSexState{};
+    Tile* root = FindVisibleMenuTile(kMenuType_RaceSex);
+    if (!root) return false;
+    Tile* bg = FindChildByName(root, "RSM_Background", 3);
+    if (!bg) return false;
+    out->page = (int)TileNum(root, kTileValue_user0);
+
+    std::string anyHeader;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&bg->childList);
+    for (int safety = 0; node && safety < 1024; ++safety) {
+        if (!Readable(node, sizeof(Node))) break;
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+        Tile* t = cn->child;
+        if (!TileVisible(t)) continue;
+        const bool item   = TileNameHas(t, "RSM_list_item");
+        const bool slider = TileNameHas(t, "RSM_slider_option");
+        const bool button = TileNameHas(t, "RSM_back_button") ||
+                            TileNameHas(t, "RSM_next_button");
+        if (item && TileNum(t, kTileValue_target) == 0.0f) {
+            std::string h = RsmText(TileStringTrait(t));
+            if ((int)TileNum(t, kTileValue_user0) == out->page && out->header.empty())
+                out->header = h;
+            else if (anyHeader.empty())
+                anyHeader = h;
+            continue;
+        }
+        if (out->kind != 0 || !(item || slider || button) || !TileMouseover(t)) continue;
+        out->focus = t;
+        out->kind  = slider ? 2 : item ? 1 : 3;
+        out->label = RsmText(TileStringTrait(t));
+        if (slider) out->value = RsmSliderValue(t);
+        if (item)   out->selected = RsmItemCommitted(t);
+    }
+    if (out->header.empty()) out->header = anyHeader;
+    return true;
 }
 
 namespace {
@@ -5570,14 +5768,17 @@ Tile* FindMenuTileAny(UInt32 menuType)
     return nullptr;
 }
 
-// Text of a tile's direct children, in order. `letters` = the children each
-// hold one character of an animated headline: joined without a separator,
-// with a space wherever the gap to the next letter is wider than a letter
-// (the spaces are gaps in the layout, not characters).
+// Text of a tile's direct children. `letters` = the children each hold one
+// character of an animated headline. Those are joined in SCREEN order — by
+// line, then left to right — not in the order of the child list: the list
+// holds them back to front, and read in list order the quest "Kroki dziecka"
+// came out as "AKCEIZD IKORK". A space goes wherever a blank tile, a new line
+// or a gap wider than a letter separates them.
 std::string JoinChildStrings(Tile* parent, const char* sep, bool letters)
 {
     std::string out;
-    float prevRight = -1.0f;
+    struct Glyph { float x, y, w, h; std::string s; int order; int line; };
+    std::vector<Glyph> glyphs;
     struct Node { Tile::ChildNode* item; Node* next; };
     auto* node = reinterpret_cast<Node*>(&parent->childList);
     for (int i = 0; node && i < 256; ++i) {
@@ -5589,16 +5790,56 @@ std::string JoinChildStrings(Tile* parent, const char* sep, bool letters)
         if (!s || !*s) continue;
         std::string part = GameStrToUtf8(s);
         if (letters) {
-            float x = TileNum(cn->child, kTileValue_x);
-            float w = TileNum(cn->child, kTileValue_width);
-            if (prevRight >= 0.0f && x > prevRight + 4.0f &&
-                !out.empty() && out.back() != ' ')
-                out += ' ';
-            out += part;
-            prevRight = x + (w > 0.0f ? w : 0.0f);
+            auto num = [&](UInt32 id) {
+                float v = TileNum(cn->child, id);
+                return std::isfinite(v) ? v : 0.0f;
+            };
+            glyphs.push_back({ num(kTileValue_x), num(kTileValue_y),
+                               num(kTileValue_width), num(kTileValue_height),
+                               part, (int)glyphs.size(), 0 });
         } else {
             if (!out.empty() && sep) out += sep;
             out += part;
+        }
+    }
+    if (letters && !glyphs.empty()) {
+        // Evidence for the next time: if the letters carry no position at all,
+        // the order below is still the list's.
+        static bool s_logged_flat = false;
+        bool flat = true;
+        for (const auto& g : glyphs) if (g.x != 0.0f || g.y != 0.0f) { flat = false; break; }
+        if (flat && !s_logged_flat) {
+            s_logged_flat = true;
+            F3A_INFO("QuestAdded: %u letter tiles carry no position - list order kept",
+                     (unsigned)glyphs.size());
+        }
+        // Lines first: a step down of more than half a letter starts a new one.
+        std::stable_sort(glyphs.begin(), glyphs.end(),
+                         [](const Glyph& a, const Glyph& b) { return a.y < b.y; });
+        int line = 0;
+        float lineY = glyphs[0].y;
+        for (auto& g : glyphs) {
+            float step = g.h > 16.0f ? g.h * 0.5f : 8.0f;
+            if (g.y - lineY > step) { ++line; lineY = g.y; }
+            g.line = line;
+        }
+        std::stable_sort(glyphs.begin(), glyphs.end(),
+                         [](const Glyph& a, const Glyph& b) {
+                             if (a.line != b.line) return a.line < b.line;
+                             if (a.x != b.x) return a.x < b.x;
+                             return a.order < b.order;
+                         });
+        float prevRight = -1.0f;
+        int   prevLine  = -1;
+        for (const auto& g : glyphs) {
+            bool blank = g.s.find_first_not_of(" \t\r\n") == std::string::npos;
+            bool gap = blank ||
+                       (prevLine >= 0 && g.line != prevLine) ||
+                       (prevRight >= 0.0f && g.x > prevRight + 4.0f);
+            if (gap && !out.empty() && out.back() != ' ') out += ' ';
+            if (!blank) out += g.s;
+            prevRight = g.x + (g.w > 0.0f ? g.w : 0.0f);
+            prevLine  = g.line;
         }
     }
     // Trim.
@@ -5669,6 +5910,11 @@ bool HudTileIsNoise(Tile* t)
         "Compass", "clock", "Clock", "meter", "Meter", "bar", "Bar",
         "Messages", "Info", "crippled", "Crippled", "xp", "XP", "rad", "Rad",
         "sneak", "Sneak", "reticle", "Reticle", "enemyhealth", "EnemyHealth",
+        // The bottom panels: health with the compass, and action points with
+        // the ammo counter and weapon condition. Their labels ("AMUNICJA",
+        // "KND") were read at every load, and the ammo count ("11/24") after
+        // every shot and reload. Ammo and AP are numbers to ask for, not news.
+        "HitPoints", "ActionPoints",
         // Quest popups and objectives: read by their own reader, which also
         // works under other menus (poll::PollQuestReminder).
         "QuestReminder",

@@ -50,6 +50,10 @@ std::string g_learned[kNumSpecials];
 
 bool g_open = false;
 int  g_open_wait = 0;    // ticks spent waiting for the first value sample
+// The book's own state, as last spoken (see Tick): the page and the attribute
+// picked on the summary page.
+int  g_page = -2;
+int  g_book_index = -1;
 bool g_up = false, g_down = false, g_left = false, g_right = false, g_enter = false;
 
 // Where the highlight sits. With no text in the menu this follows the player's
@@ -63,6 +67,10 @@ std::string Name(int i) { return strings::Render(kNameKeys[i]); }
 
 std::string Description(int i)
 {
+    // The game's own text, read from its data the first time the book opens —
+    // a player opening the book has no Pip-Boy yet to learn it from.
+    std::string game = poll::SpecialDescription(i);
+    if (!game.empty()) return game;
     if (!g_learned[i].empty()) return g_learned[i];   // the game's own words
     return strings::Render(kDescKeys[i]);
 }
@@ -82,6 +90,37 @@ std::string Describe(int i, bool withDescription)
     if (v >= 0) { s += " "; s += std::to_string(v); }
     if (withDescription) { s += ". "; s += Description(i); }
     return s;
+}
+
+// Points still to share out: the book's total less what the seven hold.
+// -1 when the book's total couldn't be read.
+int PointsLeft(int maxPoints)
+{
+    if (maxPoints <= 0) return -1;
+    int sum = 0;
+    for (int i = 0; i < kNumSpecials; ++i) {
+        int v = ReadValue(i);
+        if (v < 0) return -1;
+        sum += v;
+    }
+    return maxPoints - sum;
+}
+
+std::string PointsLeftText(int maxPoints)
+{
+    int left = PointsLeft(maxPoints);
+    if (left < 0) return {};
+    return ", pozostało punktów: " + std::to_string(left);
+}
+
+// The attribute a page shows (0-6), as the game maps it (0x00675BE0): pages
+// 1-7 are the attributes in order, page 8 is the summary page with the
+// attribute picked there. -1 for the cover.
+int StatForPage(int page, int indexStat)
+{
+    if (page >= 1 && page <= 7) return page - 1;
+    if (page == 8 && indexStat >= 1 && indexStat <= 7) return indexStat - 1;
+    return -1;
 }
 
 std::string AllValues()
@@ -172,22 +211,75 @@ void Tick(float)
         return;
     }
 
+    int page = -1, indexStat = 0, maxPoints = 0;
+    const bool book = poll::SpecialBookState(&page, &indexStat, &maxPoints);
+
     if (!g_open) {
-        // The values come from the main thread's sample, which may not have
-        // been taken yet on the first tick: wait for it (briefly), so the
-        // opening line carries the numbers.
-        if (ReadValue(0) < 0 && ++g_open_wait < 6) return;
+        // The values and the page come from the main thread's sample, which
+        // may not have been taken yet on the first tick: wait for it
+        // (briefly), so the opening line carries the numbers.
+        if ((ReadValue(0) < 0 || !book) && ++g_open_wait < 6) return;
         g_open_wait = 0;
         g_open  = true;
         g_index = 0;
+        g_page  = -2;
+        g_book_index = -1;
         for (int i = 0; i < kNumSpecials; ++i) g_values[i] = ReadValue(i);
         SeedKeys();                      // a held key on open must not fire
-        F3A_INFO("SpecialBook: opened (menu carries no text)");
+        F3A_INFO("SpecialBook: opened (book state %s)", book ? "readable" : "NOT readable");
         tolk::Speak(strings::RenderArgs(strings::Key::SpecialBookIntroFmt,
-                                        AllValues().c_str()),
+                        (AllValues() + PointsLeftText(maxPoints)).c_str()),
                     tolk::Priority::Ui, true);
+        if (!book) return;
+    }
+
+    // THE BOOK SAYS WHERE IT IS (as in the FNV mod): the page it shows and
+    // the attribute picked on its summary page are read from the menu itself.
+    // The old way followed our own guess of which keys move the selection,
+    // and the game's keys are not those — the mod said "Percepcja" while the
+    // value the keys changed was Strength.
+    if (book) {
+        if (KeyEdge(VK_RETURN, &g_enter)) {
+            int st = StatForPage(page, indexStat);
+            std::string say = AllValues() + PointsLeftText(maxPoints);
+            if (st >= 0) say += ". " + Describe(st, true);
+            tolk::Speak(say, tolk::Priority::Ui, true);
+        }
+        bool queue = false;              // after the opening line, not over it
+        if (g_page == -2) queue = true;
+        if (page != g_page || (page == 8 && indexStat != g_book_index)) {
+            bool newPage = page != g_page;
+            g_page = page;
+            g_book_index = indexStat;
+            for (int i = 0; i < kNumSpecials; ++i) g_values[i] = ReadValue(i);
+            int st = StatForPage(page, indexStat);
+            std::string say;
+            if (page == 0) say = "Okładka";
+            else if (page == 8 && newPage) say = "Podsumowanie. ";
+            if (st >= 0) {
+                g_index = st;
+                say += Describe(st, /*withDescription=*/false) + PointsLeftText(maxPoints) +
+                       ". " + Description(st);
+            }
+            F3A_INFO("SpecialBook: page %d, summary pick %d -> %s", page, indexStat,
+                     st >= 0 ? Name(st).c_str() : "-");
+            if (!say.empty()) tolk::Speak(say, tolk::Priority::Ui, !queue);
+            return;
+        }
+        // A value changed: say which attribute and its new number, so it is
+        // never a guess which one the keys moved.
+        for (int i = 0; i < kNumSpecials; ++i) {
+            int v = ReadValue(i);
+            if (v < 0 || v == g_values[i]) continue;
+            g_values[i] = v;
+            tolk::Speak(Name(i) + " " + std::to_string(v) + PointsLeftText(maxPoints),
+                        tolk::Priority::Ui, true);
+            break;
+        }
         return;
     }
+
+    // The book's state could not be read (another build): the old guesswork.
 
     // A value change is the ground truth about where the highlight is, and it
     // announces itself — that comes before any key handling.

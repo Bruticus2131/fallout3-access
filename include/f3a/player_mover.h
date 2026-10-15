@@ -45,6 +45,12 @@ void ProbePath();
 // the player cannot be left walking on with nothing driving them.
 void SetGoal(float x, float y, bool run);
 
+// The same, plus the route's next real corner. The walk steers at a point a
+// little ahead along the route (smoother), but brakes for whichever is the
+// sharper turn — that point or the corner — so a bend is never taken at full
+// speed just because the look-ahead had already rounded it (the FNV mod's rule).
+void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY);
+
 // Stop driving: the engine goes back to processing the player's own input.
 // Safe from any thread — the stop itself is performed by the hook on the game's
 // own thread, on the next frame.

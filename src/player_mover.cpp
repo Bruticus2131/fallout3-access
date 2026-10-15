@@ -59,6 +59,10 @@ std::atomic<bool>  g_installed{ false };
 std::atomic<bool>  g_active{ false };
 std::atomic<float> g_goal_x{ 0.0f };
 std::atomic<float> g_goal_y{ 0.0f };
+// The route's next corner, for braking (see SetGoalWithCorner).
+std::atomic<bool>  g_corner_on{ false };
+std::atomic<float> g_corner_x{ 0.0f };
+std::atomic<float> g_corner_y{ 0.0f };
 std::atomic<bool>  g_run{ false };
 float g_heading = 0.0f;          // radians, engine convention (0 = +Y/north)
 bool  g_heading_seeded = false;
@@ -135,12 +139,18 @@ float NormalizeAngle(float a)
 
 // Speed scale through a turn: crawl while badly misaligned, full speed once
 // pointed the right way. Mirrors what the engine's own followers do.
+// Speed for a heading error, in the bands the engine's own NPC follower uses
+// (the FNV mod mirrors ComputeTurnAndSpeed): full speed to ~45°, then half,
+// and a crawl — never a dead stop — through hairpins, so the player keeps
+// moving while turning and a turn never slides off at full speed. The old
+// ramp braked from 11° on, which made every slight bend a slowdown.
 float TurnSpeedScale(float absErrRad)
 {
-    if (absErrRad < 0.20f) return 1.0f;    // ~11 deg — effectively aligned
-    if (absErrRad > 1.20f) return 0.15f;   // ~69 deg — near a right-angle turn
-    float t = (absErrRad - 0.20f) / 1.0f;
-    return 1.0f - t * 0.85f;
+    if (absErrRad > 2.71f) return 0.05f;   // > ~155°: turning round
+    if (absErrRad > 2.01f) return 0.10f;   // > ~115°
+    if (absErrRad > 1.60f) return 0.20f;   // > ~92°
+    if (absErrRad > 0.79f) return 0.50f;   // > ~45°
+    return 1.0f;
 }
 
 void SetMoverFlags(void* mover, bool moving, bool running)
@@ -653,10 +663,23 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     // field that decides WHERE "forward" points.
     player->rotZ = g_heading;
 
+    // Brake for the sharper of the two turns: toward the look-ahead point we
+    // steer at, and toward the route's real corner (when one was given and is
+    // not right underfoot, where its bearing means nothing).
+    float brake = std::fabs(err);
+    if (g_corner_on.load()) {
+        float cx = g_corner_x.load() - player->posX;
+        float cy = g_corner_y.load() - player->posY;
+        if (cx * cx + cy * cy > 32.0f * 32.0f) {
+            float cerr = std::fabs(NormalizeAngle(std::atan2(cx, cy) - g_heading));
+            if (cerr > brake) brake = cerr;
+        }
+    }
+
     bool running = g_run.load();
     float speed = static_cast<float>(config::Get().autowalk_speed);
     if (!running) speed *= 0.5f;
-    speed *= TurnSpeedScale(std::fabs(err));
+    speed *= TurnSpeedScale(brake);
 
     // Publish "moving forward" on the mover so scripts and the HUD agree that the
     // player is walking, then move the player ourselves.
@@ -819,8 +842,22 @@ void Shutdown()
 bool Available() { return g_installed.load(); }
 bool Active()    { return g_active.load(); }
 
+void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY)
+{
+    g_corner_x.store(cornerX);
+    g_corner_y.store(cornerY);
+    g_corner_on.store(std::isfinite(cornerX) && std::isfinite(cornerY));
+    g_goal_x.store(x);
+    g_goal_y.store(y);
+    g_run.store(run);
+    g_goal_stamp.fetch_add(1);      // feeds the watchdog in the hook
+    if (!g_active.exchange(true))
+        g_reseed_pending.store(true);   // the hook resets its state (next frame)
+}
+
 void SetGoal(float x, float y, bool run)
 {
+    g_corner_on.store(false);
     g_goal_x.store(x);
     g_goal_y.store(y);
     g_run.store(run);

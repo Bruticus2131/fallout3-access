@@ -13,6 +13,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <thread>
 #include <unordered_set>
@@ -326,10 +327,16 @@ void PollTerminal()
     tolk::Speak(body, tolk::Priority::Ui, /*interrupt=*/false);
 }
 
-// Character creation (RaceSexMenu): the focused category/option isn't picked up
-// by the generic pollers (no activeTile), so read it specially — announce the
-// focused list item on change so sex/race/hair/etc. can be navigated by ear.
-std::string g_rsm_text;
+// Character creation (RaceSexMenu): the generic pollers don't pick it up (no
+// activeTile), so it is read specially, as the FNV mod reads it — the page's
+// name when the page changes, the focused item when the focus moves ("Kobieta,
+// wybrane", "Domyślne: 2", "Dalej"), and just the new number when a slider is
+// moved. Sliders used to be skipped entirely: on the face page the focus sits
+// on one, so the mod said nothing there at all.
+int         g_rsm_page  = -2;
+const void* g_rsm_focus = nullptr;
+std::string g_rsm_label;
+std::string g_rsm_value;
 int         g_rsm_throttle = 0;
 
 void PollRaceSex()
@@ -337,11 +344,37 @@ void PollRaceSex()
     if (!g_system_ready) return;
     if (--g_rsm_throttle > 0) return;
     g_rsm_throttle = 2;
-    auto sel = game::GetRaceSexSelection();
-    if (!sel) { g_rsm_text.clear(); return; }
-    if (*sel == g_rsm_text) return;
-    g_rsm_text = *sel;
-    tolk::Speak(*sel, tolk::Priority::Ui, true);
+    game::RaceSexState st;
+    if (!game::GetRaceSexState(&st)) {
+        g_rsm_page = -2; g_rsm_focus = nullptr;
+        g_rsm_label.clear(); g_rsm_value.clear();
+        return;
+    }
+    bool pageSaid = false;
+    if (st.page != g_rsm_page) {
+        g_rsm_page  = st.page;
+        g_rsm_focus = nullptr;
+        if (!st.header.empty()) {
+            tolk::Speak(st.header, tolk::Priority::Ui, true);
+            pageSaid = true;
+        }
+    }
+    if (st.kind == 0) return;
+    if (st.focus != g_rsm_focus || st.label != g_rsm_label) {
+        g_rsm_focus = st.focus;
+        g_rsm_label = st.label;
+        g_rsm_value = st.value;
+        std::string say = st.label;
+        if (st.kind == 2 && !st.value.empty())
+            say = say.empty() ? st.value : say + ": " + st.value;
+        if (st.kind == 1 && st.selected) say += ", wybrane";
+        if (!say.empty()) tolk::Speak(say, tolk::Priority::Ui, !pageSaid);  // after the page name
+        return;
+    }
+    if (st.kind == 2 && st.value != g_rsm_value) {
+        g_rsm_value = st.value;
+        if (!st.value.empty()) tolk::Speak(st.value, tolk::Priority::Ui, true);
+    }
 }
 
 // HUD corner notifications (quest updates, items received, XP, discoveries) —
@@ -704,6 +737,13 @@ void PollSpecialChange()
         settle = kSpecialSettleTicks;
         return;
     }
+    // In the SPECIAL book the book module says every change itself, with the
+    // attribute's name; this second voice repeated it a second later. The
+    // baseline is taken afresh (silently) once the book closes.
+    if (menu::IsOpen(menu::Id::SpecialBookMenu)) {
+        g_special_init = false;
+        return;
+    }
     if (settle > 0) { --settle; return; }
     if (--g_special_throttle > 0) return;
     g_special_throttle = 6;                 // ~6 ticks between polls
@@ -850,6 +890,12 @@ std::atomic<int>         g_aimtrack_frames{ 0 };
 // marker, most of the time. Without this the whole tracker silently did
 // nothing for exactly the targets the player most needs it for.
 std::atomic<int> g_aimtrack_x{ 0 }, g_aimtrack_y{ 0 }, g_aimtrack_z{ 0 };
+// Where on the reference the aim point lies — the asked-for point minus the
+// reference's origin when the lock was taken (float bits). The held aim
+// follows the reference as it moves, and must keep aiming at THAT point: the
+// middle of a body or of a target board, not the origin, which sits at an
+// actor's feet and at a rifle target's base, off to one side of the board.
+std::atomic<int> g_aimtrack_offx{ 0 }, g_aimtrack_offy{ 0 }, g_aimtrack_offz{ 0 };
 
 // Closed-loop pitch correction.
 //
@@ -1131,6 +1177,14 @@ bool                  g_vats_pick_live = false;   // main thread only
 // menu is open (see PlayerSpecial).
 std::atomic<int>  g_special_live[7];
 std::atomic<bool> g_special_live_ok{ false };
+std::atomic<int>  g_book_page{ -1 }, g_book_index{ 0 }, g_book_max{ 0 };
+std::atomic<bool> g_book_ok{ false };
+// The attributes' own descriptions, read once on the main thread.
+std::mutex        g_special_desc_mx;
+std::string       g_special_desc[7];
+bool              g_special_desc_tried = false;   // main thread only
+// The aim key is held: widen the engine's bullet correction (main thread).
+std::atomic<bool> g_engine_aim_want{ false };
 
 // Press the inventory's "Upuść" button (HandleClick → main thread only).
 std::atomic<bool> g_drop_pending{ false };
@@ -1269,6 +1323,32 @@ void MainThreadWork()
         PollViewChange();
     }
     TickNativeAim();
+    // The engine's own bullet correction, widened while the aim key is held
+    // and put back the moment it is not — or the mod is off, or a load starts.
+    {
+        static bool     s_on = false;
+        static DWORD    s_log_at = 0;
+        static uint32_t s_seen = 0xFFFFFFFFu;
+        const int deg = config::Get().engine_aim_deg;
+        bool want = g_engine_aim_want.load() && deg > 0 && config::IsEnabled() &&
+                    IsGameplayActive();
+        if (want != s_on) {
+            game::SetEngineAutoAim(want, (float)deg);
+            s_on = want;
+            s_seen = 0xFFFFFFFFu;
+        }
+        // Which actor the game itself has picked to bend the shots onto — the
+        // evidence that the correction is in play, logged when it changes.
+        if (s_on && GetTickCount() - s_log_at >= 500) {
+            s_log_at = GetTickCount();
+            uint32_t t = game::EngineAutoAimTargetId();
+            if (t != s_seen) {
+                s_seen = t;
+                F3A_INFO("EngineAim: the game's target is %08X (our lock %08X)",
+                         t, g_aimtrack_refid.load());
+            }
+        }
+    }
     if (g_teleport_pending.exchange(false))
         game::TeleportPlayerToRef(g_teleport_refr, g_teleport_refid);
     AnnounceStatus();
@@ -1334,8 +1414,27 @@ void MainThreadWork()
             g_special_live[i].store(v >= 0.0f ? (int)(v + 0.5f) : -1);
         }
         g_special_live_ok.store(true);
-    } else if (g_special_live_ok.load()) {
+        if (!g_special_desc_tried) {
+            g_special_desc_tried = true;
+            int got = 0;
+            for (int i = 0; i < 7; ++i) {
+                std::string d = game::GetSpecialDescription(i);
+                if (!d.empty()) ++got;
+                std::lock_guard<std::mutex> lk(g_special_desc_mx);
+                g_special_desc[i] = std::move(d);
+            }
+            F3A_INFO("SpecialBook: %d of 7 descriptions read from the game", got);
+        }
+        int pg = -1, ix = 0, mx = 0;
+        if (game::GetSpecialBookState(&pg, &ix, &mx)) {
+            g_book_page.store(pg); g_book_index.store(ix); g_book_max.store(mx);
+            g_book_ok.store(true);
+        } else {
+            g_book_ok.store(false);
+        }
+    } else if (g_special_live_ok.load() || g_book_ok.load()) {
         g_special_live_ok.store(false);
+        g_book_ok.store(false);
     }
 
     // The loot overlay lives ON the HUD, so there is no menu transition to hang
@@ -1953,6 +2052,24 @@ bool VatsPickState(game::VatsPick* out)
     return false;
 }
 
+void SetEngineAimAssist(bool on) { g_engine_aim_want.store(on); }
+
+std::string SpecialDescription(int i)
+{
+    if (i < 0 || i >= 7) return {};
+    std::lock_guard<std::mutex> lk(g_special_desc_mx);
+    return g_special_desc[i];
+}
+
+bool SpecialBookState(int* page, int* indexStat, int* maxPoints)
+{
+    if (!g_book_ok.load()) return false;
+    if (page)      *page      = g_book_page.load();
+    if (indexStat) *indexStat = g_book_index.load();
+    if (maxPoints) *maxPoints = g_book_max.load();
+    return true;
+}
+
 int PlayerSpecial(int i)
 {
     if (i < 0 || i >= 7 || !g_special_live_ok.load()) return -1;
@@ -2311,8 +2428,13 @@ void AimTick()
         // Live reference position when there is one (it may be walking away),
         // otherwise the point we were given.
         game::Vec3 tp{};
-        if (!game::GetRefPosition(g_aimtrack_refr.load(),
-                                  g_aimtrack_refid.load(), &tp)) {
+        if (game::GetRefPosition(g_aimtrack_refr.load(),
+                                 g_aimtrack_refid.load(), &tp)) {
+            // The live origin plus where on it we were asked to aim.
+            tp.x += BitsToF(g_aimtrack_offx.load());
+            tp.y += BitsToF(g_aimtrack_offy.load());
+            tp.z += BitsToF(g_aimtrack_offz.load());
+        } else {
             tp.x = BitsToF(g_aimtrack_x.load());
             tp.y = BitsToF(g_aimtrack_y.load());
             tp.z = BitsToF(g_aimtrack_z.load());
@@ -2571,6 +2693,24 @@ void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
         g_hit_watch_refr.store(refr);
         g_hit_watch_id.store(refid);
         g_kill_pending.store(false);
+    }
+    // Remember where on the reference the point lies (see g_aimtrack_offx).
+    // Until now the held aim re-aimed at the bare origin every frame, so a
+    // lock asked for the middle of a target board turned ~4 degrees off it,
+    // onto the board's base — and onto an enemy's feet.
+    {
+        game::Vec3 origin{};
+        float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+        if (refr && refid && game::GetRefPosition(refr, refid, &origin)) {
+            ox = at.x - origin.x; oy = at.y - origin.y; oz = at.z - origin.z;
+            if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
+                !(ox * ox + oy * oy + oz * oz <= 1000.0f * 1000.0f)) {
+                ox = oy = oz = 0.0f;       // implausible: aim at the origin
+            }
+        }
+        g_aimtrack_offx.store(FToBits(ox));
+        g_aimtrack_offy.store(FToBits(oy));
+        g_aimtrack_offz.store(FToBits(oz));
     }
     g_aimtrack_x.store(FToBits(at.x));
     g_aimtrack_y.store(FToBits(at.y));

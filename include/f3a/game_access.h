@@ -111,6 +111,28 @@ bool IsKnownHostile(uint32_t refid);
 void NoteMainThread();
 bool OnMainThread();
 
+// The engine's own free-aim bullet correction ("auto-aim"): on every shot the
+// game bends the bullet toward the hostile actor it picked (the one nearest
+// the crosshair, in range and in sight), by up to fAutoAimMaxDegrees. `on`
+// widens that cone (3rd person too) to `degrees`, the screen window the actor
+// is picked in, and the range; `off` puts the game's own values back.
+// MAIN THREAD ONLY. Does nothing if the settings don't check out on this build.
+void SetEngineAutoAim(bool on, float degrees);
+// The actor the engine's auto-aim has picked (PlayerCharacter+0x8E4), 0 = none.
+uint32_t EngineAutoAimTargetId();
+
+// The vault's SPECIAL book (SPECIALBookMenu): which page is open — 0 cover,
+// 1-7 Strength..Luck, 8 the summary page — the attribute chosen on the summary
+// page (1-7), and the points there are to share out. False when the book
+// isn't open or isn't the class this was read from. MAIN THREAD ONLY.
+bool GetSpecialBookState(int* page, int* indexStat, int* maxPoints);
+
+// The game's own description of a SPECIAL attribute (0 Strength .. 6 Luck):
+// the text the Pip-Boy shows, from the attribute's AVIF record, in the game's
+// language. Empty if it can't be read. MAIN THREAD ONLY (the game reads it
+// from the plugin file).
+std::string GetSpecialDescription(int i);
+
 // Forget the cached world-map markers (another save has other discoveries).
 void ClearMapMarkerCache();
 
@@ -867,9 +889,21 @@ bool IsTerminalOpen();
 // selectable command list. Ordered top-to-bottom. Read live as each appears.
 std::vector<std::string> CollectTerminalChrome();
 
-// Character creation (RaceSexMenu) focused category/option text — the
-// RSM_list_item whose selection indicator is visible. nullopt if not in/focused.
-std::optional<std::string> GetRaceSexSelection();
+// Character creation (RaceSexMenu), read the way the FNV mod reads it: the page
+// (the menu root's user0) and that page's header ("3. Twarz"), and the item the
+// keyboard is on — the RSM_Background child carrying mouseover: a list item, a
+// slider ("Domyślne", "Broda"...) or the WSTECZ/DALEJ button. False when the
+// menu isn't up.
+struct RaceSexState {
+    int         page = -1;
+    std::string header;
+    const void* focus = nullptr;   // identity only: tells a focus change
+    int         kind  = 0;         // 0 nothing, 1 list item, 2 slider, 3 button
+    std::string label;
+    std::string value;             // a slider's value as the menu shows it
+    bool        selected = false;  // a list item that is the current choice
+};
+bool GetRaceSexState(RaceSexState* out);
 
 // True while the player's controls are disabled (char creation, cutscenes,
 // forced dialogue) — used to gate gameplay-only cues.

@@ -573,6 +573,11 @@ void AimHoldPress()
     in.type = INPUT_MOUSE;
     in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
     SendInput(1, &in, sizeof(in));
+    // And the game's own bullet correction, widened for as long as the key is
+    // held: our aim only has to get near an enemy, the engine bends the shot
+    // the rest of the way. Only on our key — a sighted player's mouse aim
+    // keeps the game's normal values.
+    poll::SetEngineAimAssist(true);
 
 }
 
@@ -580,6 +585,7 @@ void AimHoldPress()
 // the button is never left stuck down.
 void AimHoldRelease()
 {
+    poll::SetEngineAimAssist(false);
     if (!g_aim_held) return;
     g_aim_held = false;
     INPUT in{};
@@ -805,99 +811,12 @@ void CrosshairInfo()
 // C/X + PgUp/PgDn, so there's no risk of aiming at a friendly NPC); otherwise
 // at the nearest actor. You fire yourself; press G afterwards to hear what the
 // crosshair caught (and tell me, so we can tune the pitch).
+void CommaAim();   // defined below, beside the target picker
+
 void AimAtTarget()
 {
     if (!GameplayAndHud()) return;
-
-    // Combat first: if any HOSTILE is nearby, aim at the NEAREST one regardless
-    // of a (possibly stale) scanner selection. This is an instant geometric aim
-    // (SetAngle), so WASD keeps working — reposition freely, then shoot. Repeat
-    // the key to re-lock a moving enemy (e.g. a charging dog).
-    {
-        auto host = game::ScanNearby(config::Get().nearby_scan_radius * 2, 1,
-                                     /*actors_only=*/true, /*hostiles_only=*/true);
-        if (!host.empty()) {
-            game::AimLookAt(host[0].position);
-            auto pp = game::GetPlayerPosition();
-            float dx = host[0].position.x - pp.x, dy = host[0].position.y - pp.y;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            tolk::Speak("Cel: " + host[0].name + ", " +
-                        strings::FormatDistance(dist) + ". Strzelaj.",
-                        tolk::Priority::Combat, true);
-            g_aim_cycle = 0;
-            return;
-        }
-    }
-
-    game::Vec3 tgt{}; std::string name; bool have = false;
-
-    if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
-        g_scan_list[g_scan_index].has_marker &&
-        g_scan_list[g_scan_index].kind != game::WorldEntity::Kind::Quest) {
-        // 1) A scanner object you picked with C/X + PgUp/PgDn.
-        tgt  = g_scan_list[g_scan_index].position;
-        name = g_scan_list[g_scan_index].name;
-        have = true;
-        g_aim_cycle = 0;
-    } else {
-        // 2) "Shoot the N targets": the targets are unnamed (scanner-invisible)
-        //    but the objective marks one, and the rest share its base object.
-        //    Aim at one per press and CYCLE, so you can hit all of them with
-        //    repeated `,` + shoot.
-        auto tg = game::GetShootingTargets(4000);
-        if (!tg.empty()) {
-            F3A_INFO("AimTargets: %d found", (int)tg.size());
-            for (size_t i = 0; i < tg.size(); ++i)
-                F3A_INFO("  target[%d] id=0x%08X pos=(%.0f,%.0f,%.0f)",
-                         (int)i, tg[i].form_id, tg[i].position.x,
-                         tg[i].position.y, tg[i].position.z);
-            if (g_aim_cycle >= (int)tg.size()) g_aim_cycle = 0;
-            const auto& t = tg[g_aim_cycle];
-            char idx[24];
-            std::snprintf(idx, sizeof(idx), "Cel %d z %d", g_aim_cycle + 1,
-                          (int)tg.size());
-            bool third = game::IsThirdPerson();
-            F3A_INFO("AimStart %s third=%d id=0x%08X", idx, (int)third, t.form_id);
-            // Don't hard-bail on third person any more — always run the aim (and
-            // log it). If the POV read is wrong it shouldn't block aiming; if
-            // it's right, the mouse turn just works less well and we'll see it.
-            StopAimLoop();               // a burst in flight lets go first
-            g_aim_on    = true;
-            g_aim_id    = t.form_id;
-            g_aim_pos   = t.position;
-            g_aim_phase = 0;
-            g_aim_face_only = false;
-            g_aim_budget = 150;
-            g_aim_pstep  = 0;
-            g_aim_wait   = 0;
-            g_pitch_started = false;
-            g_pitch_sign    = 1;
-            g_pitch_gain    = 6.0f;      // fresh gains for each aim: the last
-            g_yaw_gain      = 4.0f;      // one's overshoot halvings must not
-            g_yaw_prev_set  = false;     // make this one crawl
-            g_aim_label  = idx;
-            tolk::Speak(std::string(idx) + ", celuję.", tolk::Priority::Ui, true);
-            g_aim_cycle = (g_aim_cycle + 1) % (int)tg.size();
-            return;
-        }
-        // 3) The nearest actor as a last resort.
-        auto act = game::ScanNearby(config::Get().nearby_scan_radius * 2, 1,
-                                    true, false);   // actors only, nearest
-        if (!act.empty()) { tgt = act[0].position; name = act[0].name; have = true; }
-        g_aim_cycle = 0;
-    }
-    if (!have) {
-        tolk::Speak("Brak celu. Zaznacz cel skanerem (C lub X).",
-                    tolk::Priority::System, true);
-        return;
-    }
-
-    game::AimLookAt(tgt);
-    auto pp = game::GetPlayerPosition();
-    float dx = tgt.x - pp.x, dy = tgt.y - pp.y;
-    float dist = std::sqrt(dx * dx + dy * dy);
-    tolk::Speak("Celuję w: " + name + ", " + strings::FormatDistance(dist) +
-                ". Strzelaj.", tolk::Priority::Ui, true);
+    CommaAim();
 }
 
 // What Home / tracking should point at: the object selected in the scanner (any
@@ -1186,6 +1105,27 @@ bool PickCombatTarget(AimTarget* out)
     return PickAimTarget(out);
 }
 
+// Turn the view onto a target and hold it there for `frames` main-thread
+// frames (negative = until StopAimTrack) — the FNV mod's look-at: the middle
+// of the body, measured from the camera, re-applied every frame so the
+// engine's own view update cannot undo it.
+void LockAimOn(AimTarget& at, int frames)
+{
+    ApplyAimOffset(&at);
+    // TURN THE VIEW at once; the held aim keeps it there.
+    AimAtPoint(at.pos, at.up);
+    // A reference is preferred (it tracks a target that moves), but a bare
+    // position is enough — and it is all a quest marker or a fixed practice
+    // target ever has. Refusing those is what made the aim lock do nothing.
+    poll::RequestAimTrack(at.refr, at.refid, at.pos, at.up, frames);
+    // Then let the engine's rays have the last word on WHERE on the target a
+    // shot can land. Only for a real reference: a bare quest-marker position
+    // has nothing for a ray to confirm.
+    if (at.refid) poll::RequestRayAimRefine(at.refid);
+    g_hold_target = at.refid;
+    poll::WatchAimLos(at.refid);     // the ray runs on the game's thread
+}
+
 bool LockAimOnCurrentTarget(std::string* outName, float* outDist)
 {
     AimTarget at;
@@ -1195,23 +1135,7 @@ bool LockAimOnCurrentTarget(std::string* outName, float* outDist)
         auto b  = game::ComputeBearing(pp, game::GetPlayerYaw(), at.pos);
         *outDist = b.distance;
     }
-    ApplyAimOffset(&at);
-    // TURN THE VIEW. This was missing: holding the aim key registered a target
-    // and then watched it, but never pointed the player at it — so unless you
-    // happened to be facing the right way already, the mod was reporting on an
-    // aim it had never taken. The `,` key did this and the aim key did not,
-    // which is why one of them seemed to work.
-    AimAtPoint(at.pos, at.up);
-    // A reference is preferred (it tracks a target that moves), but a bare
-    // position is enough — and it is all a quest marker or a fixed practice
-    // target ever has. Refusing those is what made the aim lock do nothing.
-    poll::RequestAimTrack(at.refr, at.refid, at.pos, at.up, kHoldAimFrames);
-    // Then let the engine's rays have the last word on WHERE on the target a
-    // shot can land. Only for a real reference: a bare quest-marker position
-    // has nothing for a ray to confirm.
-    if (at.refid) poll::RequestRayAimRefine(at.refid);
-    g_hold_target = at.refid;
-    poll::WatchAimLos(at.refid);     // the ray runs on the game's thread
+    LockAimOn(at, kHoldAimFrames);
     if (outName) *outName = at.name;
     return true;
 }
@@ -1224,6 +1148,52 @@ void TrackStop(const char* why)
     g_track_refid = 0;
     if (!g_aim_held) poll::StopAimTrack();   // the aim key keeps its own lock
     if (why) tolk::Speak(why, tolk::Priority::Ui, true);
+}
+
+// `,` — turn the view onto a target, the FNV mod's way (LockAimOn), and keep
+// it there long enough to fire. Enemies first: the one picked in the scanner,
+// else the nearest. With no fight on, the practice targets of the vault's
+// BB-gun objective, one per press in turn; else the scanner's pick or the
+// nearest person. It used to aim at an enemy's FEET (its origin, one frame)
+// and swept the practice targets with the mouse, firing an automatic burst.
+constexpr int kCommaHoldFrames = 300;   // ~5 s: time to fire
+
+void CommaAim()
+{
+    StopAimLoop();
+    TrackStop(nullptr);
+    AimTarget at;
+    std::string label;
+    auto host = game::ScanNearby(config::Get().nearby_scan_radius * 2, 8,
+                                 /*actors_only=*/true, /*hostiles_only=*/true);
+    if (!host.empty() && PickCombatTarget(&at)) {
+        label = "Cel: " + at.name;
+        g_aim_cycle = 0;
+    } else {
+        auto tg = game::GetShootingTargets(4000);
+        if (!tg.empty()) {
+            if (g_aim_cycle >= (int)tg.size()) g_aim_cycle = 0;
+            FillAimPoint(&at, tg[g_aim_cycle]);
+            char idx[32];
+            std::snprintf(idx, sizeof(idx), "Cel %d z %d", g_aim_cycle + 1, (int)tg.size());
+            label = idx;
+            g_aim_cycle = (g_aim_cycle + 1) % (int)tg.size();
+        } else if (PickAimTarget(&at)) {
+            label = "Celuję w: " + at.name;
+            g_aim_cycle = 0;
+        } else {
+            tolk::Speak("Brak celu. Zaznacz cel skanerem (C lub X).",
+                        tolk::Priority::System, true);
+            return;
+        }
+    }
+    LockAimOn(at, kCommaHoldFrames);
+    auto pp = game::GetPlayerPosition();
+    float dist = game::ComputeBearing(pp, game::GetPlayerYaw(), at.pos).distance;
+    F3A_INFO("CommaAim: %s (refid %08X) at (%.0f,%.0f,%.0f)", label.c_str(),
+             (unsigned)at.refid, at.pos.x, at.pos.y, at.pos.z);
+    tolk::Speak(label + ", " + strings::FormatDistance(dist) + ". Strzelaj.",
+                tolk::Priority::Combat, true);
 }
 
 // Re-aim at the tracked target. Called every tick while tracking.
@@ -1339,28 +1309,13 @@ void CenterCamera()
     // Nothing is fired: when the crosshair is on the target the mod says so and
     // the player shoots.
     if (at.refr) {
-        game::Vec3 point{};
-        const char* how = "origin";
-        if (!game::GetAimPointFor(at.refr, &point, &how)) point = at.pos;
-
-        poll::RequestFacePoint(point);      // fast first pass on the heading
+        // The FNV mod's look-at (LockAimOn): the body's middle, measured from
+        // the camera, re-applied every frame and held — it used to be closed
+        // by a mouse loop that only converged when nothing moved.
         StopAimLoop();
-        g_aim_on        = true;             // then close BOTH angles by mouse
-        g_aim_id        = at.refid;
-        g_aim_pos       = point;
-        g_aim_phase     = 0;                // yaw first, then pitch
-        g_aim_face_only = true;             // converge pitch, then stop
-        g_aim_budget    = 150;
-        g_aim_pstep     = 0;
-        g_aim_wait      = 2;
-        g_pitch_started = false;
-        g_pitch_sign    = 1;
-        g_pitch_gain    = 6.0f;             // fresh gain for each aim
-        g_yaw_gain      = 4.0f;
-        g_yaw_prev_set  = false;
-        g_aim_label     = at.name;
-        F3A_INFO("Home aim: '%s' point=%s (%.0f,%.0f,%.0f)",
-                 at.name.c_str(), how, point.x, point.y, point.z);
+        F3A_INFO("Home aim: '%s' at (%.0f,%.0f,%.0f)",
+                 at.name.c_str(), at.pos.x, at.pos.y, at.pos.z);
+        LockAimOn(at, kHoldAimFrames);
         SayNameAndDistance(at);
         return;
     }
