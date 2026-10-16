@@ -238,6 +238,9 @@ void PollActiveTile()
     // the container's is in use, and reading that tile here is what made the
     // other column's items cut in.
     if (menu::ActiveMenu() == menu::Id::Container) return;
+    // The level-up screen too: its module reads the row with its value and
+    // description, and this reader would say the row a second time.
+    if (menu::ActiveMenu() == menu::Id::LevelUp) return;
 
     InterfaceManager* ifm = fose_rt::IFM();
     if (!ifm) return;
@@ -597,6 +600,7 @@ void PollKeyboardSelection()
     if (!g_system_ready) return;
     if (menu::ActiveMenu() == menu::Id::TextEdit) return;   // TextEdit reader owns it
     if (menu::ActiveMenu() == menu::Id::Container) return;  // the container module owns it
+    if (menu::ActiveMenu() == menu::Id::LevelUp) return;    // the level-up module owns it
 
     auto sel = game::GetKeyboardSelection();
     if (!sel || (sel->label.empty() && sel->value.empty())) {

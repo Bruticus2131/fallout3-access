@@ -24,3 +24,9 @@ FalloutNVAccess/
 FalloutNVAccess.7z
 friend-idea.txt
 .claude/
+
+# Reference material from other projects, kept locally only.
+sso-integration-demo/
+third_party/NSE-sources-*/
+# Draft of the e-mail to Nexus Mods (not part of the project).
+docs/nexus/sso-request-email.md

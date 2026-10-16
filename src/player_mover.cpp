@@ -363,14 +363,17 @@ constexpr float         kEpTeleportJump = 4096.0f;   // as the FNV mod
 
 // Hand a result to the walk, unless a newer request or a cancel came in since
 // this one was taken (then it answers a question nobody is asking any more).
-void EnginePathPublish(std::vector<game::Vec3>&& pts, int state)
+bool g_ep_crossed = false;   // last result went on into another area (mutex)
+
+void EnginePathPublish(std::vector<game::Vec3>&& pts, int state, bool crossed = false)
 {
     std::lock_guard<std::mutex> lk(g_ep_mutex);
     if (g_ep_work_seq != g_ep_seq) {
         F3A_INFO("EnginePath: result of an older request dropped");
         return;
     }
-    g_ep_points = std::move(pts);
+    g_ep_points  = std::move(pts);
+    g_ep_crossed = crossed;
     g_ep_state.store(state);
 }
 
@@ -541,7 +544,7 @@ void TickEnginePath(void* mover, float dt)
     // not a way to the target, and walking it ends at a wall.
     if (state == 7) pts.clear();
     bool any = !pts.empty();
-    EnginePathPublish(std::move(pts), any ? 2 : 3);
+    EnginePathPublish(std::move(pts), any ? 2 : 3, otherArea > 0);
 }
 
 void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
@@ -905,6 +908,12 @@ void CancelEnginePath()
 }
 
 int EnginePathState() { return g_ep_state.load(); }
+
+bool EnginePathLeadsElsewhere()
+{
+    std::lock_guard<std::mutex> lk(g_ep_mutex);
+    return g_ep_crossed;
+}
 
 bool TakeEnginePath(std::vector<game::Vec3>* out)
 {

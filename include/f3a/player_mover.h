@@ -77,5 +77,9 @@ void CancelEnginePath();
 int  EnginePathState();
 // Take the finished route (state 2 or 3 → back to 0). False if not finished.
 bool TakeEnginePath(std::vector<game::Vec3>* out);
+// Did the last route the game worked out go on into another cell or
+// worldspace (through a door)? Those points are left out of the route, which
+// then ends at that door.
+bool EnginePathLeadsElsewhere();
 
 } // namespace f3a::mover

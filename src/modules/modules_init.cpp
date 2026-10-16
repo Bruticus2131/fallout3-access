@@ -24,6 +24,7 @@ void InitAll()
     mapnav::Init();
     quantity::Init();
     lootmenu::Init();
+    levelup::Init();
     if (c.enable_worldscan) sonar::Init();
     F3A_INFO("Modules initialized.");
 }
@@ -47,6 +48,7 @@ void ShutdownAll()
     mapnav::Shutdown();
     quantity::Shutdown();
     lootmenu::Shutdown();
+    levelup::Shutdown();
     sonar::Shutdown();
 }
 

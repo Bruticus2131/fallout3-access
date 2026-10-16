@@ -9,9 +9,15 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.4.3"
+#define AppVersion   "0.4.4"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
+; Nexus Mods SSO application id ("slug"), issued by Nexus staff. While it is
+; empty the "sign in with Nexus Mods" choice is not offered. Can also be given
+; on the command line: ISCC /DNexusAppSlug=<slug> installer\fallout3-access.iss
+#ifndef NexusAppSlug
+  #define NexusAppSlug ""
+#endif
 
 [Setup]
 AppId={{9C2E5C1E-2C5B-4E7B-9E3E-F3A0AC0E5510}
@@ -56,6 +62,8 @@ var
   FilePage:    TInputFileWizardPage;     // only when the manual route is chosen
   OptPage:     TInputOptionWizardPage;
   GameNeedsPatch: Boolean;
+  SsoIndex:    Integer;                  // MethodPage choice for SSO, -1 = not offered
+  SsoKey:      String;                   // API key obtained through SSO
 
 // Steam and GOG both record the install path here, so most users never have to
 // find it themselves. A previous run of this installer is asked FIRST: that is
@@ -233,6 +241,13 @@ begin
     True, False);
   MethodPage.Add('Pobiorę sam — otwórz stronę i pozwól wskazać plik (nie wymaga konta Premium)');
   MethodPage.Add('Mam klucz API Nexusa i konto Premium — pobierz automatycznie');
+  SsoIndex := -1;
+  SsoKey := '';
+  if '{#NexusAppSlug}' <> '' then
+  begin
+    MethodPage.Add('Zaloguj się przez Nexus Mods (konto Premium) — pobierz automatycznie');
+    SsoIndex := 2;
+  end;
   MethodPage.Values[0] := True;
 
   KeyPage := CreateInputQueryPage(MethodPage.ID,
@@ -270,6 +285,41 @@ begin
     Result := (not GameNeedsPatch) or (not MethodPage.Values[0]);
 end;
 
+// Was "sign in with Nexus Mods" chosen? (Only offered once the app id is set.)
+function SsoChosen(): Boolean;
+begin
+  Result := False;
+  if SsoIndex >= 0 then
+    Result := MethodPage.Values[SsoIndex];
+end;
+
+// Sign in through Nexus Mods SSO: the helper script talks to the SSO server,
+// opens the authorise page in the browser and writes the key it receives to a
+// temporary file. Returns the key, or '' when the sign-in did not complete.
+function NexusSsoLogin(): String;
+var
+  Params, KeyFile, LogFile: String;
+  Key: AnsiString;
+  ResultCode: Integer;
+begin
+  Result := '';
+  MsgBox('Za chwilę otworzę stronę Nexus Mods w przeglądarce. Zaloguj się, kliknij ' +
+         'Authorise (Autoryzuj), a potem wróć do instalatora — przejdzie dalej sam.',
+         mbInformation, MB_OK);
+  ExtractTemporaryFile('f3a-install.ps1');
+  KeyFile := ExpandConstant('{tmp}\nexus-key.txt');
+  LogFile := ExpandConstant('{tmp}\nexus-sso-log.txt');
+  DeleteFile(KeyFile);
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\f3a-install.ps1') + '"' +
+            ' -NexusSsoLogin -NexusAppSlug "{#NexusAppSlug}" -AppVersion "{#AppVersion}"' +
+            ' -KeyOutFile "' + KeyFile + '" -LogPath "' + LogFile + '"';
+  if not Exec('powershell.exe', Params, '', SW_SHOWMINNOACTIVE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if (ResultCode = 0) and LoadStringFromFile(KeyFile, Key) then
+    Result := Trim(String(Key));
+  DeleteFile(KeyFile);
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   ErrorCode: Integer;
@@ -298,6 +348,17 @@ begin
       // Open the mod page for them; the next page takes the downloaded file.
       ShellExecAsOriginalUser('open', 'https://www.nexusmods.com/fallout3/mods/24913',
                               '', '', SW_SHOW, ewNoWait, ErrorCode);
+    end
+    else if SsoChosen() then
+    begin
+      if SsoKey = '' then
+        SsoKey := NexusSsoLogin();
+      if SsoKey = '' then
+      begin
+        MsgBox('Nie udało się zalogować przez Nexus Mods. Spróbuj jeszcze raz albo wybierz ' +
+               'inną metodę.', mbError, MB_OK);
+        Result := False;
+      end;
     end;
   end
 
@@ -327,10 +388,13 @@ begin
             ExpandConstant('{app}\f3a-install.ps1') + '"' +
             // No trailing backslash: "...\" would escape the closing quote.
             ' -GamePath "' + RemoveBackslashUnlessRoot(GamePage.Values[0]) + '"' +
-            ' -LogPath "' + LogFile + '"';
+            ' -LogPath "' + LogFile + '"' +
+            ' -AppVersion "{#AppVersion}"';
 
   if not GameNeedsPatch then
     Params := Params + ' -SkipPatcher'
+  else if SsoChosen() and (SsoKey <> '') then
+    Params := Params + ' -NexusApiKey "' + SsoKey + '"'
   else if MethodPage.Values[1] and (Trim(KeyPage.Values[0]) <> '') then
     Params := Params + ' -NexusApiKey "' + Trim(KeyPage.Values[0]) + '"'
   else if Trim(FilePage.Values[0]) <> '' then

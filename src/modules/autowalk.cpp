@@ -69,6 +69,7 @@ int    g_route_legs     = 0;        // engine legs asked for on this walk
 float  g_engine_wait    = 0.0f;     // s left to stand and wait for its answer
 bool   g_engine_given_up = false;   // a short leg gained nothing: ours from here
 bool   g_engine_said_none = false;  // its last answer was "no route"
+bool   g_cross_engine   = false;    // cross mode: the game's route to the TARGET is awaited
 game::Vec3 g_probe_pos{};           // where the player stood at the last stall probe
 constexpr float kEngineWaitSecs  = 1.5f;
 constexpr int   kMaxRouteLegs    = 100;     // the FNV mod's cap
@@ -756,6 +757,7 @@ void StopWalking(const char* reason_utf8)
     g_engine_wait    = 0.0f;
     g_route_engine   = false;
     g_route_partial  = false;
+    g_cross_engine   = false;
     g_state = State::Idle;
     if (reason_utf8 && *reason_utf8)
         tolk::Speak(reason_utf8, tolk::Priority::System, true);
@@ -944,7 +946,10 @@ std::string DescribeObstacle()
 bool PickCrossDoor()
 {
     auto pp   = game::GetPlayerPosition();
-    auto ents = game::ScanNearby(kCrossScan, 48, /*actors_only*/false, false);
+    // Many entries: in a furnished vault the 48 nearest things were all
+    // chairs and lockers, and the one door that led on was not among them —
+    // so the walk set off through a door back the way it came.
+    auto ents = game::ScanNearby(kCrossScan, 400, /*actors_only*/false, false);
     const void* hereCell = game::GetPlayerCell();
     const bool  indoors  = game::PlayerIsInInterior();
     const game::WorldEntity* best = nullptr;
@@ -1033,6 +1038,61 @@ void CrossFallbackTeleport()
     StopWalking("Nie mogę dojść pieszo. Otwórz mapę świata i użyj szybkiej podróży.");
 }
 
+// The load door the game's route runs through: the one nearest the point
+// where that route leaves this area (its last point here).
+bool PickDoorNear(const game::Vec3& at)
+{
+    auto ents = game::ScanNearby(kCrossScan, 400, /*actors_only*/false, false);
+    const game::WorldEntity* best = nullptr;
+    float bestd = 300.0f * 300.0f;
+    for (const auto& e : ents) {
+        if (e.kind != game::WorldEntity::Kind::Door || !e.refr || !e.form_id) continue;
+        if (!game::IsLoadDoor(e.refr)) continue;
+        float dx = e.position.x - at.x, dy = e.position.y - at.y;
+        float d2 = dx * dx + dy * dy;
+        if (!(std::fabs(e.position.z - at.z) <= 250.0f)) continue;
+        if (d2 < bestd) { bestd = d2; best = &e; }
+    }
+    if (!best) return false;
+    if (g_cross_used_doors.size() < 32) g_cross_used_doors.push_back(best->form_id);
+    F3A_INFO("Autowalk: the game's route leaves through '%s' (%.0f units from its end)",
+             best->name.c_str(), std::sqrt(bestd));
+    g_cross_door_refr = best->refr;
+    g_cross_door_form = best->form_id;
+    g_cross_door_pos  = best->position;
+    g_cross_door_name = best->name;
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
+    return true;
+}
+
+// Our own door ranking (PickCrossDoor) and the game's route to that door.
+// False when there is no door at all (the walk has then been stopped).
+bool CrossPickDoorOurselves()
+{
+    if (!PickCrossDoor()) { CrossFallbackTeleport(); return false; }
+    RouteToDoor();
+    return true;
+}
+
+// The next door to go through. The game's own pathfinder is asked first —
+// for the TARGET itself: it routes across doors as it does for NPCs, and the
+// door its route leads through is the one to take (TickCross picks it up
+// when the answer comes). Our own ranking only when it has nothing.
+bool CrossNextHop()
+{
+    g_cross_door_refr = nullptr;
+    g_waypoints.clear(); g_wp_index = 0; g_have_path = false;
+    g_route_engine = false; g_route_partial = false;
+    if (g_target_refr && g_target_form &&
+        RequestEngineRouteTo(g_target_refr, g_target_form, g_target_pos, kArriveDist)) {
+        g_cross_engine = true;
+        g_engine_wait  = kEngineWaitSecs;
+        return true;
+    }
+    return CrossPickDoorOurselves();
+}
+
 // Begin (or restart) cross-worldspace routing: remember the cell we're leaving,
 // then pick the first door. Teleports immediately if nothing connects.
 void BeginCross()
@@ -1044,8 +1104,8 @@ void BeginCross()
     g_cross_door_refr  = nullptr;
     g_cross_stuck      = 0;
     g_probe_timer      = 0.0f;
-    if (!PickCrossDoor()) { CrossFallbackTeleport(); return; }
-    RouteToDoor();
+    if (!CrossNextHop()) return;
+    if (!g_cross_door_refr) return;          // the game's answer names the door
     g_last_probe_dist = std::sqrt(
         (g_cross_door_pos.x - game::GetPlayerPosition().x) *
         (g_cross_door_pos.x - game::GetPlayerPosition().x) +
@@ -1120,13 +1180,14 @@ void TickCross(float dt)
         // (prev_cell) as "back", so PickCrossDoor won't send us straight back
         // through the door we arrived by.
         g_cross_from_cell = g_cross_prev_cell;
-        if (++g_hop_count > kMaxHops || !PickCrossDoor()) {
+        if (++g_hop_count > kMaxHops) {
             CrossFallbackTeleport();
             return;
         }
-        RouteToDoor();
+        if (!CrossNextHop()) return;
         g_cross_stuck = 0;
         g_probe_timer = 0.0f;
+        if (!g_cross_door_refr) return;      // the game's answer names the door
         g_last_probe_dist = std::sqrt(
             (g_cross_door_pos.x - game::GetPlayerPosition().x) *
             (g_cross_door_pos.x - game::GetPlayerPosition().x) +
@@ -1137,6 +1198,35 @@ void TickCross(float dt)
         return;
     }
 
+    if (!g_cross_door_refr && g_cross_engine) {
+        // The game has answered (or not in time) about a route to the TARGET.
+        g_cross_engine = false;
+        const bool engineRoute = g_route_engine && g_have_path && !g_waypoints.empty();
+        if (engineRoute && !mover::EnginePathLeadsElsewhere() && !g_route_partial) {
+            // It reaches the target without leaving this area: the cell
+            // records disagreed, the geometry does not. Just walk it.
+            F3A_INFO("autowalk: the game's route reaches the target here - walking it");
+            g_cross = false;
+            return;
+        }
+        if (engineRoute && mover::EnginePathLeadsElsewhere() &&
+            PickDoorNear(g_waypoints.back())) {
+            // Walk the game's route; at its end is the door it goes through.
+            g_cross_stuck = 0;
+            g_probe_timer = 0.0f;
+            auto pp0 = game::GetPlayerPosition();
+            float ddx = g_cross_door_pos.x - pp0.x, ddy = g_cross_door_pos.y - pp0.y;
+            g_last_probe_dist = std::sqrt(ddx * ddx + ddy * ddy);
+            tolk::Speak("Prowadzę do przejścia: " + g_cross_door_name,
+                        tolk::Priority::Background, false);
+        } else {
+            F3A_INFO("autowalk: no route of the game's through a door - choosing one ourselves");
+            if (!CrossPickDoorOurselves()) return;
+            tolk::Speak("Prowadzę do przejścia: " + g_cross_door_name,
+                        tolk::Priority::Background, false);
+            return;
+        }
+    }
     if (!g_cross_door_refr) {                 // lost the door → repick or teleport
         if (!PickCrossDoor()) { CrossFallbackTeleport(); return; }
         RouteToDoor();
@@ -1334,6 +1424,7 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     g_engine_wait      = 0.0f;
     g_engine_given_up  = false;
     g_engine_said_none = false;
+    g_cross_engine     = false;
     g_probe_pos        = game::GetPlayerPosition();
 
     g_path_retry_timer = 0.0f;

@@ -905,6 +905,24 @@ struct RaceSexState {
 };
 bool GetRaceSexState(RaceSexState* out);
 
+// The level-up screen, read from its own text tiles (what a sighted player
+// sees): the headline, the points counter, the selected entry's description,
+// and the entry or button the keyboard is on — a skill with its value, or a
+// perk (chosen or not). False when the screen isn't up.
+struct LevelUpState {
+    bool        perks = false;       // the perk page (else the skill page)
+    std::string headline;            // "WITAMY NA POZIOMIE 2"
+    std::string counter;             // "PRZYPISZ PUNKTY UMIEJĘTNOŚCI: 16"
+    std::string description;         // the selected entry's description
+    const void* focus = nullptr;     // identity only: tells a focus change
+    std::string label;               // "Handel", a perk name or a button
+    std::string value;               // a skill's value, "19"
+    bool        chosen = false;      // a perk marked as the one picked
+    bool        dimmed = false;      // greyed out: not available (yet)
+    bool        button = false;      // the focus is one of the buttons
+};
+bool GetLevelUpState(LevelUpState* out);
+
 // True while the player's controls are disabled (char creation, cutscenes,
 // forced dialogue) — used to gate gameplay-only cues.
 bool ArePlayerControlsDisabled();

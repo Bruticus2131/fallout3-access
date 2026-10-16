@@ -25,8 +25,16 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)] [string] $GamePath,
+    # Required for an install; not for -NexusSsoLogin, which only signs in.
+    [string] $GamePath = "",
     [string] $NexusApiKey = "",
+    # Sign in through Nexus Mods SSO and write the API key to -KeyOutFile, then
+    # stop. The wizard runs this before installing, so the key can be used.
+    [switch] $NexusSsoLogin,
+    [string] $NexusAppSlug = "",
+    [string] $KeyOutFile = "",
+    # Our version, sent to Nexus in the Application-Version header.
+    [string] $AppVersion = "0.0.0",
     # A patcher archive the user downloaded themselves; skips the Nexus call.
     [string] $PatcherArchive = "",
     [switch] $SkipPatcher,
@@ -44,9 +52,114 @@ $ProgressPreference = "SilentlyContinue"   # keeps Invoke-WebRequest quiet and f
 $script:Work = Join-Path $env:TEMP "f3a-install"
 New-Item -ItemType Directory -Force $script:Work | Out-Null
 
+# How the installer introduces itself to the Nexus Mods API, as Nexus asks
+# registered applications to: Application-Name / Application-Version and a
+# User-Agent that names the program and where it comes from.
+$script:NexusAppName = "Fallout 3 Access"
+function Get-NexusHeaders {
+    $h = @{
+        "Application-Name"    = $script:NexusAppName
+        "Application-Version" = $AppVersion
+        "User-Agent"          = "Fallout3Access-Installer/$AppVersion (+https://github.com/Bruticus2131/fallout3-access)"
+        "Accept"              = "application/json"
+    }
+    if ($NexusApiKey) { $h["apikey"] = $NexusApiKey }
+    return $h
+}
+
 function Write-Step([string] $Text) {
     Write-Host "== $Text"
     if ($LogPath) { Add-Content -Path $LogPath -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $Text) -Encoding utf8 }
+}
+
+# ---------------------------------------------------------------------------
+# Nexus Mods SSO (the protocol of github.com/Nexus-Mods/sso-integration-demo):
+# open a websocket to wss://sso.nexusmods.com, send our request id, receive a
+# connection token, open https://www.nexusmods.com/sso?id=<id>&application=<slug>
+# in the browser, and wait for the API key to arrive on the socket once the
+# user presses "Authorise". On a dropped connection, reconnect with the same id
+# and the connection token. The application slug is issued by Nexus staff.
+function Send-WsText($Ws, [string] $Text) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    $seg = [ArraySegment[byte]]::new($bytes)
+    $Ws.SendAsync($seg, [Net.WebSockets.WebSocketMessageType]::Text, $true,
+                  [Threading.CancellationToken]::None).Wait()
+}
+
+# One whole text message, or $null when the socket closed or the time ran out.
+function Receive-WsText($Ws, [datetime] $Deadline) {
+    $buffer = New-Object byte[] 8192
+    $ms = New-Object IO.MemoryStream
+    do {
+        $left = [int][Math]::Max(1000, ($Deadline - (Get-Date)).TotalMilliseconds)
+        $cts = New-Object Threading.CancellationTokenSource
+        $cts.CancelAfter($left)
+        $seg = [ArraySegment[byte]]::new($buffer)
+        $task = $Ws.ReceiveAsync($seg, $cts.Token)
+        try { $task.Wait() } catch { return $null }
+        $r = $task.Result
+        if ($r.MessageType -eq [Net.WebSockets.WebSocketMessageType]::Close) { return $null }
+        $ms.Write($buffer, 0, $r.Count)
+    } while (-not $r.EndOfMessage)
+    return [Text.Encoding]::UTF8.GetString($ms.ToArray())
+}
+
+function Get-NexusKeyViaSso([string] $Slug, [int] $TimeoutSec = 300) {
+    if (-not $Slug) { Write-Step "Nexus SSO: brak identyfikatora aplikacji"; return $null }
+    $id = [guid]::NewGuid().ToString()
+    $token = $null
+    $opened = $false
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $ws = New-Object Net.WebSockets.ClientWebSocket
+        try {
+            $ws.ConnectAsync([Uri]"wss://sso.nexusmods.com", [Threading.CancellationToken]::None).Wait()
+            Send-WsText $ws (@{ id = $id; token = $token; protocol = 2 } | ConvertTo-Json -Compress)
+            while ($ws.State -eq [Net.WebSockets.WebSocketState]::Open -and (Get-Date) -lt $deadline) {
+                $msg = Receive-WsText $ws $deadline
+                if ($null -eq $msg) { break }
+                $obj = $msg | ConvertFrom-Json
+                if (-not $obj.success) {
+                    Write-Step "Nexus SSO odmówił: $($obj.error)"
+                    return $null
+                }
+                if ($obj.data.connection_token) {
+                    $token = $obj.data.connection_token
+                    if (-not $opened) {
+                        $opened = $true
+                        Write-Step "Nexus SSO: otwieram przeglądarkę — zaloguj się i kliknij Authorise (Autoryzuj)"
+                        Start-Process "https://www.nexusmods.com/sso?id=$id&application=$Slug"
+                    }
+                }
+                if ($obj.data.api_key) {
+                    Write-Step "Nexus SSO: klucz otrzymany"
+                    return [string]$obj.data.api_key
+                }
+            }
+        } catch {
+            Write-Step "Nexus SSO: połączenie przerwane ($($_.Exception.Message)), łączę ponownie"
+            Start-Sleep -Seconds 2
+        } finally {
+            $ws.Dispose()
+        }
+    }
+    Write-Step "Nexus SSO: nie dostałem klucza w ciągu $TimeoutSec s"
+    return $null
+}
+
+if ($NexusSsoLogin) {
+    $key = Get-NexusKeyViaSso -Slug $NexusAppSlug
+    if (-not $key) { exit 2 }
+    if ($KeyOutFile) {
+        Set-Content -Path $KeyOutFile -Value $key -Encoding ASCII -NoNewline
+    } else {
+        Write-Output $key
+    }
+    exit 0
+}
+if (-not $GamePath) {
+    Write-Step "BŁĄD: nie podano folderu gry (-GamePath)"
+    exit 1
 }
 
 # A failed step THROWS instead of ending the script: one piece that cannot be
@@ -147,7 +260,7 @@ function Get-LatestModRelease {
 # limitation, not a failure of this installer, and is reported as such.
 function Get-NexusFile([int] $ModId, [string] $Game = "fallout3") {
     if (-not $NexusApiKey) { return $null }
-    $h = @{ "apikey" = $NexusApiKey; "User-Agent" = "f3a-installer"; "Accept" = "application/json" }
+    $h = Get-NexusHeaders
 
     Write-Step "Nexus: pobieram listę plików moda $ModId"
     try {
@@ -177,7 +290,7 @@ function Test-NexusKey {
     if (-not $NexusApiKey) { return $false }
     try {
         $u = Invoke-RestMethod -Uri "https://api.nexusmods.com/v1/users/validate.json" `
-                -Headers @{ "apikey" = $NexusApiKey; "User-Agent" = "f3a-installer" } -UseBasicParsing
+                -Headers (Get-NexusHeaders) -UseBasicParsing
         $prem = if ($u.is_premium) { "Premium" } else { "zwykłe (bez automatycznego pobierania)" }
         Write-Step "Klucz Nexusa działa. Konto: $($u.name), $prem"
         return [bool]$u.is_premium

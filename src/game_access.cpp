@@ -5434,6 +5434,86 @@ bool GetRaceSexState(RaceSexState* out)
 }
 
 namespace {
+// A tile's text for speech: game codepage to UTF-8, line breaks as spaces,
+// no leading or trailing blanks.
+std::string LumText(Tile* t)
+{
+    const char* raw = t ? TileStringTrait(t) : nullptr;
+    std::string s = raw ? GameStrToUtf8(raw) : std::string();
+    for (char& ch : s) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+    size_t b = s.find_first_not_of(' ');
+    if (b == std::string::npos) return {};
+    size_t e = s.find_last_not_of(' ');
+    return s.substr(b, e - b + 1);
+}
+} // namespace
+
+// LevelUpMenu, from a dump of it (FO3 1.7.0.3, Polish build): LUM_Headline_Title,
+// LUM_PointCounter and LUM_SelectionText carry the headline, the points left
+// and the selected entry's description; LUM_SkillList holds one row per skill
+// (ListItemText + LUM_Template_ItemValue) and LUM_PerkList one LUM_Perk per perk
+// (ListItemText + LUM_Template_ItemMarker, shown on the picked one); only the
+// page in use is visible. The row the keyboard is on carries mouseover — the
+// FNV mod reads the same three texts and the selected row.
+bool GetLevelUpState(LevelUpState* out)
+{
+    if (!out) return false;
+    *out = LevelUpState{};
+    Tile* root = FindVisibleMenuTile(kMenuType_LevelUp);
+    if (!root) return false;
+    out->headline    = LumText(FindChildByName(root, "LUM_Headline_Title", 6));
+    out->counter     = LumText(FindChildByName(root, "LUM_PointCounter", 6));
+    out->description = LumText(FindChildByName(root, "LUM_SelectionText", 6));
+    Tile* skills = FindChildByName(root, "LUM_SkillList", 5);
+    Tile* perks  = FindChildByName(root, "LUM_PerkList", 5);
+    out->perks = perks && TileVisible(perks) && !(skills && TileVisible(skills));
+    Tile* list = out->perks ? perks : skills;
+
+    struct Node { Tile::ChildNode* item; Node* next; };
+    if (list && TileVisible(list)) {
+        auto* node = reinterpret_cast<Node*>(&list->childList);
+        for (int safety = 0; node && safety < 1024; ++safety) {
+            if (!Readable(node, sizeof(Node))) break;
+            Tile::ChildNode* cn = node->item;
+            node = node->next;
+            if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+            Tile* row = cn->child;
+            if (TileNameHas(row, "lb_highlight_box") || TileNameHas(row, "lb_scrollbar")) continue;
+            if (!TileVisible(row) || !TileMouseover(row)) continue;
+            Tile* text = FindChildByName(row, "ListItemText", 1);
+            out->focus = row;
+            out->label = LumText(text);
+            if (out->label.empty()) out->label = LumText(row);
+            out->value = LumText(FindChildByName(row, "LUM_Template_ItemValue", 1));
+            Tile* marker = FindChildByName(row, "LUM_Template_ItemMarker", 1);
+            out->chosen = marker && TileVisible(marker);
+            out->dimmed = text && TileNum(text, kTileValue_alpha) < 250.0f;
+            return true;
+        }
+    }
+    // Not on a row: perhaps on one of the buttons (Wstecz, Od nowa, Kontynuuj).
+    if (Tile* buttons = FindChildByName(root, "LUM_ButtonRect", 5)) {
+        auto* node = reinterpret_cast<Node*>(&buttons->childList);
+        for (int safety = 0; node && safety < 64; ++safety) {
+            if (!Readable(node, sizeof(Node))) break;
+            Tile::ChildNode* cn = node->item;
+            node = node->next;
+            if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+            Tile* b = cn->child;
+            if (!TileVisible(b) || !TileMouseover(b)) continue;
+            Tile* text = FindChildByName(b, "button_text", 1);
+            out->focus  = b;
+            out->button = true;
+            out->label  = LumText(text);
+            if (out->label.empty()) out->label = LumText(b);
+            out->dimmed = text && TileNum(text, kTileValue_alpha) < 250.0f;
+            break;
+        }
+    }
+    return true;
+}
+
+namespace {
 // Gather the lock's sweet-spot band: several concentric LPM_SweetSpot tiles,
 // all centred on the same x; the NARROWEST is the tightest "will open" zone.
 void CollectSweetSpot(Tile* t, int depth, float& center, float& minw, int& n)

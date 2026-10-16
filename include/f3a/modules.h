@@ -36,6 +36,9 @@ namespace lootmenu { void Init(); void Shutdown(); void Tick(float dt); bool IsO
 // Pip-Boy sonar: one key plays a sweep round the player in which every nearby
 // enemy, person, crate, door and item answers from its own direction.
 namespace sonar { void Init(); void Shutdown(); void Tick(float dt); }
+// The level-up screen: headline, points left, entries with values and their
+// descriptions, in the game's own words.
+namespace levelup { void Init(); void Shutdown(); }
 
 // AutoWalk: walks the player to a scanner-selected target. Ticked from the
 // polling loop while in gameplay.

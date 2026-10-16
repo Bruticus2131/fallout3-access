@@ -142,11 +142,7 @@ void OnTextEditTick(float)
 void Init()
 {
     menu::RegisterMenu(menu::Id::Message, &OnOpen, &OnClose, &OnTick);
-    menu::RegisterMenu(menu::Id::LevelUp,
-        []() {
-            tolk::Speak(strings::Render(strings::Key::LevelUp),
-                        tolk::Priority::System, true);
-        });
+    // LevelUp: the levelup module reads the screen (headline included).
     menu::RegisterMenu(menu::Id::Book, &OnOpen, &OnClose, &OnTick);
     menu::RegisterMenu(menu::Id::TextEdit, &OnTextEditOpen, &OnTextEditClose,
                        &OnTextEditTick);
