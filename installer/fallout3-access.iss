@@ -42,6 +42,77 @@ PrivilegesRequired=admin
 Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
+; Every text of our own pages, in both languages. Code reads them through
+; CustomMessage('...') and the sections through {cm:...}; a text typed straight
+; into the code would be shown in that one language whatever the user picked.
+[CustomMessages]
+pl.ShowLog=Pokaż dziennik instalacji
+en.ShowLog=Show the installation log
+pl.GamePageCaption=Folder gry
+en.GamePageCaption=Game folder
+pl.GamePageDescription=Gdzie jest zainstalowany Fallout 3?
+en.GamePageDescription=Where is Fallout 3 installed?
+pl.GamePageText=Wskaż folder zawierający Fallout3.exe. Jeśli gra została wykryta, ścieżka jest już wpisana.
+en.GamePageText=Choose the folder that contains Fallout3.exe. If the game was found, the path is already filled in.
+pl.MethodPageCaption=Łatka obniżająca wersję
+en.MethodPageCaption=Downgrade patch
+pl.MethodPageDescription=Twoja wersja gry wymaga łatki, żeby FOSE działał
+en.MethodPageDescription=Your version of the game needs a patch for FOSE to work
+pl.MethodPageText=Łatkę udostępnia Nexus Mods. Nexus pozwala pobierać automatycznie tylko kontom Premium, więc domyślnie po prostu otworzę stronę, a Ty wskażesz pobrany plik.
+en.MethodPageText=The patch is hosted on Nexus Mods. Nexus allows automatic downloads only for Premium accounts, so by default the installer simply opens the page and you choose the downloaded file.
+pl.MethodManual=Pobiorę sam — otwórz stronę i pozwól wskazać plik (nie wymaga konta Premium)
+en.MethodManual=I will download it myself — open the page and let me choose the file (no Premium account needed)
+pl.MethodApiKey=Mam klucz API Nexusa i konto Premium — pobierz automatycznie
+en.MethodApiKey=I have a Nexus API key and a Premium account — download it automatically
+pl.MethodSso=Zaloguj się przez Nexus Mods (konto Premium) — pobierz automatycznie
+en.MethodSso=Sign in with Nexus Mods (Premium account) — download it automatically
+pl.KeyPageCaption=Klucz Nexus Mods
+en.KeyPageCaption=Nexus Mods key
+pl.KeyPageDescription=Klucz z ustawień konta
+en.KeyPageDescription=The key from your account settings
+pl.KeyPageText=Znajdziesz go na nexusmods.com w Ustawieniach konta, w sekcji API Access ("Personal API Key").
+en.KeyPageText=You will find it on nexusmods.com in your account settings, under API Access ("Personal API Key").
+pl.KeyPrompt=Klucz API:
+en.KeyPrompt=API key:
+pl.FilePageCaption=Pobrana łatka
+en.FilePageCaption=Downloaded patch
+pl.FilePageDescription=Wskaż archiwum pobrane z Nexusa
+en.FilePageDescription=Choose the archive downloaded from Nexus
+pl.FilePageText=Strona łatki otworzyła się w przeglądarce. Pobierz łatkę, a potem wskaż pobrany plik (zwykle trafia do folderu Pobrane).
+en.FilePageText=The patch page has opened in your browser. Download the patch, then choose the downloaded file (it usually goes to your Downloads folder).
+pl.FilePrompt=Plik łatki:
+en.FilePrompt=Patch file:
+pl.FileFilter=Archiwa|*.zip;*.7z;*.rar|Wszystkie pliki|*.*
+en.FileFilter=Archives|*.zip;*.7z;*.rar|All files|*.*
+pl.OptPageCaption=Co zainstalować
+en.OptPageCaption=What to install
+pl.OptPageDescription=Możesz pominąć elementy, które już masz
+en.OptPageDescription=You can skip the parts you already have
+pl.OptFose=Zainstaluj FOSE (wymagany do działania moda)
+en.OptFose=Install FOSE (the mod needs it to work)
+pl.OptMod=Zainstaluj / zaktualizuj Fallout 3 Access
+en.OptMod=Install / update Fallout 3 Access
+pl.SsoInfo=Za chwilę otworzę stronę Nexus Mods w przeglądarce. Zaloguj się, kliknij Authorise (Autoryzuj), a potem wróć do instalatora — przejdzie dalej sam.
+en.SsoInfo=The Nexus Mods page will now open in your browser. Sign in, click Authorise, then come back to the installer — it will continue on its own.
+pl.SsoFailed=Nie udało się zalogować przez Nexus Mods. Spróbuj jeszcze raz albo wybierz inną metodę.
+en.SsoFailed=Signing in with Nexus Mods did not work. Try again or choose another method.
+pl.NoGameExe=W tym folderze nie ma Fallout3.exe. Wskaż folder, w którym jest gra.
+en.NoGameExe=There is no Fallout3.exe in this folder. Choose the folder the game is in.
+pl.NoPatchNeeded=Twoja gra jest już w wersji 1.7.0.3 — łatka nie jest potrzebna.
+en.NoPatchNeeded=Your game is already version 1.7.0.3 — no patch is needed.
+pl.FileNotFound=Nie znajduję wskazanego pliku.
+en.FileNotFound=The chosen file cannot be found.
+pl.Working=Pobieram i instaluję składniki…
+en.Working=Downloading and installing the components…
+pl.NoPowerShell=Nie udało się uruchomić PowerShella.
+en.NoPowerShell=PowerShell could not be started.
+pl.DownloadFailed=Któregoś pliku nie udało się pobrać. Szczegóły w dzienniku: %1
+en.DownloadFailed=One of the files could not be downloaded. Details are in the log: %1
+pl.InstallFailed=Pobieranie się udało, ale instalacja plików nie. Szczegóły w dzienniku: %1
+en.InstallFailed=The download worked, but installing the files did not. Details are in the log: %1
+pl.FailedCode=Instalacja zakończyła się kodem %1. Szczegóły w dzienniku: %2
+en.FailedCode=The installation ended with code %1. Details are in the log: %2
+
 [Files]
 Source: "f3a-install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -51,7 +122,7 @@ Source: "f3a-install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Root: HKLM; Subkey: "Software\Fallout3Access"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{app}\install-log.txt"; Description: "Pokaż dziennik instalacji"; \
+Filename: "{app}\install-log.txt"; Description: "{cm:ShowLog}"; \
   Flags: postinstall shellexec skipifsilent unchecked
 
 [Code]
@@ -225,9 +296,8 @@ begin
   GameNeedsPatch := True;
 
   GamePage := CreateInputDirPage(wpWelcome,
-    'Folder gry', 'Gdzie jest zainstalowany Fallout 3?',
-    'Wskaż folder zawierający Fallout3.exe. Jeśli gra została wykryta, ścieżka jest już wpisana.',
-    False, '');
+    CustomMessage('GamePageCaption'), CustomMessage('GamePageDescription'),
+    CustomMessage('GamePageText'), False, '');
   GamePage.Add('');
   Detected := DetectGamePath();
   if Detected <> '' then
@@ -235,38 +305,34 @@ begin
 
   // Shown only when the game actually needs downgrading.
   MethodPage := CreateInputOptionPage(GamePage.ID,
-    'Łatka obniżająca wersję', 'Twoja wersja gry wymaga łatki, żeby FOSE działał',
-    'Łatkę udostępnia Nexus Mods. Nexus pozwala pobierać automatycznie tylko ' +
-    'kontom Premium, więc domyślnie po prostu otworzę stronę, a Ty wskażesz pobrany plik.',
-    True, False);
-  MethodPage.Add('Pobiorę sam — otwórz stronę i pozwól wskazać plik (nie wymaga konta Premium)');
-  MethodPage.Add('Mam klucz API Nexusa i konto Premium — pobierz automatycznie');
+    CustomMessage('MethodPageCaption'), CustomMessage('MethodPageDescription'),
+    CustomMessage('MethodPageText'), True, False);
+  MethodPage.Add(CustomMessage('MethodManual'));
+  MethodPage.Add(CustomMessage('MethodApiKey'));
   SsoIndex := -1;
   SsoKey := '';
   if '{#NexusAppSlug}' <> '' then
   begin
-    MethodPage.Add('Zaloguj się przez Nexus Mods (konto Premium) — pobierz automatycznie');
+    MethodPage.Add(CustomMessage('MethodSso'));
     SsoIndex := 2;
   end;
   MethodPage.Values[0] := True;
 
   KeyPage := CreateInputQueryPage(MethodPage.ID,
-    'Klucz Nexus Mods', 'Klucz z ustawień konta',
-    'Znajdziesz go na nexusmods.com w Ustawieniach konta, w sekcji API Access ' +
-    '("Personal API Key").');
-  KeyPage.Add('Klucz API:', False);
+    CustomMessage('KeyPageCaption'), CustomMessage('KeyPageDescription'),
+    CustomMessage('KeyPageText'));
+  KeyPage.Add(CustomMessage('KeyPrompt'), False);
 
   FilePage := CreateInputFilePage(MethodPage.ID,
-    'Pobrana łatka', 'Wskaż archiwum pobrane z Nexusa',
-    'Kliknij "Otwórz stronę", pobierz łatkę, a potem wskaż pobrany plik ' +
-    '(zwykle trafia do folderu Pobrane).');
-  FilePage.Add('Plik łatki:', 'Archiwa|*.zip;*.7z;*.rar|Wszystkie pliki|*.*', '');
+    CustomMessage('FilePageCaption'), CustomMessage('FilePageDescription'),
+    CustomMessage('FilePageText'));
+  FilePage.Add(CustomMessage('FilePrompt'), CustomMessage('FileFilter'), '');
 
   OptPage := CreateInputOptionPage(wpSelectDir,
-    'Co zainstalować', 'Możesz pominąć elementy, które już masz',
+    CustomMessage('OptPageCaption'), CustomMessage('OptPageDescription'),
     '', False, False);
-  OptPage.Add('Zainstaluj FOSE (wymagany do działania moda)');
-  OptPage.Add('Zainstaluj / zaktualizuj Fallout 3 Access');
+  OptPage.Add(CustomMessage('OptFose'));
+  OptPage.Add(CustomMessage('OptMod'));
   OptPage.Values[0] := True;
   OptPage.Values[1] := True;
 end;
@@ -303,16 +369,15 @@ var
   ResultCode: Integer;
 begin
   Result := '';
-  MsgBox('Za chwilę otworzę stronę Nexus Mods w przeglądarce. Zaloguj się, kliknij ' +
-         'Authorise (Autoryzuj), a potem wróć do instalatora — przejdzie dalej sam.',
-         mbInformation, MB_OK);
+  MsgBox(CustomMessage('SsoInfo'), mbInformation, MB_OK);
   ExtractTemporaryFile('f3a-install.ps1');
   KeyFile := ExpandConstant('{tmp}\nexus-key.txt');
   LogFile := ExpandConstant('{tmp}\nexus-sso-log.txt');
   DeleteFile(KeyFile);
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\f3a-install.ps1') + '"' +
             ' -NexusSsoLogin -NexusAppSlug "{#NexusAppSlug}" -AppVersion "{#AppVersion}"' +
-            ' -KeyOutFile "' + KeyFile + '" -LogPath "' + LogFile + '"';
+            ' -KeyOutFile "' + KeyFile + '" -LogPath "' + LogFile + '"' +
+            ' -Language "' + ActiveLanguage() + '"';
   if not Exec('powershell.exe', Params, '', SW_SHOWMINNOACTIVE, ewWaitUntilTerminated, ResultCode) then
     Exit;
   if (ResultCode = 0) and LoadStringFromFile(KeyFile, Key) then
@@ -330,15 +395,13 @@ begin
   begin
     if not FileExists(AddBackslash(GamePage.Values[0]) + 'Fallout3.exe') then
     begin
-      MsgBox('W tym folderze nie ma Fallout3.exe. Wskaż folder, w którym jest gra.',
-             mbError, MB_OK);
+      MsgBox(CustomMessage('NoGameExe'), mbError, MB_OK);
       Result := False;
       Exit;
     end;
     GameNeedsPatch := not GameIsSupportedBuild(GamePage.Values[0]);
     if not GameNeedsPatch then
-      MsgBox('Twoja gra jest już w wersji 1.7.0.3 — łatka nie jest potrzebna.',
-             mbInformation, MB_OK);
+      MsgBox(CustomMessage('NoPatchNeeded'), mbInformation, MB_OK);
   end
 
   else if CurPageID = MethodPage.ID then
@@ -355,8 +418,7 @@ begin
         SsoKey := NexusSsoLogin();
       if SsoKey = '' then
       begin
-        MsgBox('Nie udało się zalogować przez Nexus Mods. Spróbuj jeszcze raz albo wybierz ' +
-               'inną metodę.', mbError, MB_OK);
+        MsgBox(CustomMessage('SsoFailed'), mbError, MB_OK);
         Result := False;
       end;
     end;
@@ -366,7 +428,7 @@ begin
   begin
     if (Trim(FilePage.Values[0]) <> '') and (not FileExists(FilePage.Values[0])) then
     begin
-      MsgBox('Nie znajduję wskazanego pliku.', mbError, MB_OK);
+      MsgBox(CustomMessage('FileNotFound'), mbError, MB_OK);
       Result := False;
     end;
   end;
@@ -389,7 +451,8 @@ begin
             // No trailing backslash: "...\" would escape the closing quote.
             ' -GamePath "' + RemoveBackslashUnlessRoot(GamePage.Values[0]) + '"' +
             ' -LogPath "' + LogFile + '"' +
-            ' -AppVersion "{#AppVersion}"';
+            ' -AppVersion "{#AppVersion}"' +
+            ' -Language "' + ActiveLanguage() + '"';
 
   if not GameNeedsPatch then
     Params := Params + ' -SkipPatcher'
@@ -404,23 +467,20 @@ begin
 
   if not OptPage.Values[0] then Params := Params + ' -SkipFose';
 
-  WizardForm.StatusLabel.Caption := 'Pobieram i instaluję składniki…';
+  WizardForm.StatusLabel.Caption := CustomMessage('Working');
 
   if not Exec('powershell.exe', Params, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
   begin
-    MsgBox('Nie udało się uruchomić PowerShella.', mbError, MB_OK);
+    MsgBox(CustomMessage('NoPowerShell'), mbError, MB_OK);
     Exit;
   end;
 
   case ResultCode of
     0: // Remember the folder, so the next update opens already pointing at it.
        RegWriteStringValue(HKLM, 'Software\Fallout3Access', 'GamePath', GamePage.Values[0]);
-    2: MsgBox('Któregoś pliku nie udało się pobrać. Szczegóły w dzienniku: ' + LogFile,
-              mbInformation, MB_OK);
-    3: MsgBox('Pobieranie się udało, ale instalacja plików nie. Szczegóły w dzienniku: ' +
-              LogFile, mbError, MB_OK);
+    2: MsgBox(FmtMessage(CustomMessage('DownloadFailed'), [LogFile]), mbInformation, MB_OK);
+    3: MsgBox(FmtMessage(CustomMessage('InstallFailed'), [LogFile]), mbError, MB_OK);
   else
-    MsgBox('Instalacja zakończyła się kodem ' + IntToStr(ResultCode) +
-           '. Szczegóły w dzienniku: ' + LogFile, mbError, MB_OK);
+    MsgBox(FmtMessage(CustomMessage('FailedCode'), [IntToStr(ResultCode), LogFile]), mbError, MB_OK);
   end;
 end;

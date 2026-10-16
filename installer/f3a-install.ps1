@@ -39,7 +39,10 @@ param(
     [string] $PatcherArchive = "",
     [switch] $SkipPatcher,
     [switch] $SkipFose,
-    [string] $LogPath = ""
+    [string] $LogPath = "",
+    # "pl" or "en": the language the user picked in the wizard. Run on its own,
+    # the script follows the Windows display language.
+    [string] $Language = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,6 +68,17 @@ function Get-NexusHeaders {
     }
     if ($NexusApiKey) { $h["apikey"] = $NexusApiKey }
     return $h
+}
+
+if (-not $Language) {
+    $Language = if ((Get-UICulture).TwoLetterISOLanguageName -eq "pl") { "pl" } else { "en" }
+}
+$script:Pl = ($Language -eq "pl")
+
+# Every message is written in both languages at the place it is used; this
+# picks the one the user asked for.
+function T([string] $PlText, [string] $EnText) {
+    if ($script:Pl) { return $PlText } else { return $EnText }
 }
 
 function Write-Step([string] $Text) {
@@ -105,7 +119,7 @@ function Receive-WsText($Ws, [datetime] $Deadline) {
 }
 
 function Get-NexusKeyViaSso([string] $Slug, [int] $TimeoutSec = 300) {
-    if (-not $Slug) { Write-Step "Nexus SSO: brak identyfikatora aplikacji"; return $null }
+    if (-not $Slug) { Write-Step (T "Nexus SSO: brak identyfikatora aplikacji" "Nexus SSO: no application id"); return $null }
     $id = [guid]::NewGuid().ToString()
     $token = $null
     $opened = $false
@@ -120,30 +134,32 @@ function Get-NexusKeyViaSso([string] $Slug, [int] $TimeoutSec = 300) {
                 if ($null -eq $msg) { break }
                 $obj = $msg | ConvertFrom-Json
                 if (-not $obj.success) {
-                    Write-Step "Nexus SSO odmówił: $($obj.error)"
+                    Write-Step (T "Nexus SSO odmówił: $($obj.error)" "Nexus SSO refused: $($obj.error)")
                     return $null
                 }
                 if ($obj.data.connection_token) {
                     $token = $obj.data.connection_token
                     if (-not $opened) {
                         $opened = $true
-                        Write-Step "Nexus SSO: otwieram przeglądarkę — zaloguj się i kliknij Authorise (Autoryzuj)"
+                        Write-Step (T "Nexus SSO: otwieram przeglądarkę — zaloguj się i kliknij Authorise (Autoryzuj)" `
+                                      "Nexus SSO: opening the browser — sign in and click Authorise")
                         Start-Process "https://www.nexusmods.com/sso?id=$id&application=$Slug"
                     }
                 }
                 if ($obj.data.api_key) {
-                    Write-Step "Nexus SSO: klucz otrzymany"
+                    Write-Step (T "Nexus SSO: klucz otrzymany" "Nexus SSO: key received")
                     return [string]$obj.data.api_key
                 }
             }
         } catch {
-            Write-Step "Nexus SSO: połączenie przerwane ($($_.Exception.Message)), łączę ponownie"
+            Write-Step (T "Nexus SSO: połączenie przerwane ($($_.Exception.Message)), łączę ponownie" `
+                          "Nexus SSO: connection lost ($($_.Exception.Message)), reconnecting")
             Start-Sleep -Seconds 2
         } finally {
             $ws.Dispose()
         }
     }
-    Write-Step "Nexus SSO: nie dostałem klucza w ciągu $TimeoutSec s"
+    Write-Step (T "Nexus SSO: nie dostałem klucza w ciągu $TimeoutSec s" "Nexus SSO: no key received within $TimeoutSec s")
     return $null
 }
 
@@ -158,7 +174,7 @@ if ($NexusSsoLogin) {
     exit 0
 }
 if (-not $GamePath) {
-    Write-Step "BŁĄD: nie podano folderu gry (-GamePath)"
+    Write-Step (T "BŁĄD: nie podano folderu gry (-GamePath)" "ERROR: no game folder given (-GamePath)")
     exit 1
 }
 
@@ -168,7 +184,7 @@ if (-not $GamePath) {
 # is what happened when the mod was the last step of the run.
 $script:ExitCode = 0
 function Fail([string] $Text, [int] $Code) {
-    Write-Step "BŁĄD: $Text"
+    Write-Step ((T "BŁĄD: " "ERROR: ") + $Text)
     throw [System.Exception]::new("F3A:$Code")
 }
 
@@ -178,9 +194,9 @@ function Invoke-Step([string] $Name, [scriptblock] $Body) {
     } catch {
         $code = 3
         if ($_.Exception.Message -match '^F3A:(\d+)$') { $code = [int]$Matches[1] }
-        else { Write-Step "BŁĄD w kroku '$Name': $($_.Exception.Message)" }
+        else { Write-Step (T "BŁĄD w kroku '$Name': $($_.Exception.Message)" "ERROR in step '$Name': $($_.Exception.Message)") }
         if ($code -gt $script:ExitCode) { $script:ExitCode = $code }
-        Write-Step "Krok '$Name' nie powiódł się — instaluję dalej pozostałe."
+        Write-Step (T "Krok '$Name' nie powiódł się — instaluję dalej pozostałe." "Step '$Name' failed — installing the rest anyway.")
     }
 }
 
@@ -207,9 +223,9 @@ function Copy-Tree([string] $From, [string] $To) {
 
 function Test-GameFolder {
     if (-not (Test-Path (Join-Path $GamePath "Fallout3.exe"))) {
-        Fail "W podanym folderze nie ma Fallout3.exe: $GamePath" 1
+        Fail (T "W podanym folderze nie ma Fallout3.exe: $GamePath" "There is no Fallout3.exe in the given folder: $GamePath") 1
     }
-    Write-Step "Gra znaleziona: $GamePath"
+    Write-Step (T "Gra znaleziona: $GamePath" "Game found: $GamePath")
 }
 
 # The Anniversary update (1.7.0.4) breaks FOSE, and that is the single most
@@ -221,35 +237,35 @@ function Get-GameBuild {
     # against [int64] literals on purpose: a hashtable lookup silently misses
     # here, because FileInfo.Length is Int64 while a bare number key is Int32.
     switch ([int64]$exe.Length) {
-        15038976L { return "1.7.0.3 (obsługiwana)" }
+        15038976L { return (T "1.7.0.3 (obsługiwana)" "1.7.0.3 (supported)") }
     }
-    return "nieznana (rozmiar $($exe.Length) B)"
+    return (T "nieznana (rozmiar $($exe.Length) B)" "unknown (size $($exe.Length) bytes)")
 }
 
 # --- downloads ---------------------------------------------------------------
 
 function Get-File([string] $Url, [string] $OutFile, [hashtable] $Headers = $null) {
-    Write-Step "Pobieram: $Url"
+    Write-Step (T "Pobieram: $Url" "Downloading: $Url")
     try {
         if ($Headers) { Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers -UseBasicParsing }
         else          { Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing }
     } catch {
-        Fail "Nie udało się pobrać $Url — $($_.Exception.Message)" 2
+        Fail (T "Nie udało się pobrać $Url — $($_.Exception.Message)" "Could not download $Url — $($_.Exception.Message)") 2
     }
-    if (-not (Test-Path $OutFile)) { Fail "Plik nie powstał: $OutFile" 2 }
+    if (-not (Test-Path $OutFile)) { Fail (T "Plik nie powstał: $OutFile" "The file was not created: $OutFile") 2 }
 }
 
 function Get-LatestModRelease {
-    Write-Step "Szukam najnowszej wersji moda na GitHubie"
+    Write-Step (T "Szukam najnowszej wersji moda na GitHubie" "Looking for the latest version of the mod on GitHub")
     $api = "https://api.github.com/repos/Bruticus2131/fallout3-access/releases/latest"
     try {
         $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "f3a-installer" } -UseBasicParsing
     } catch {
-        Fail "Nie mogę sprawdzić wydań moda — $($_.Exception.Message)" 2
+        Fail (T "Nie mogę sprawdzić wydań moda — $($_.Exception.Message)" "Cannot check the mod's releases — $($_.Exception.Message)") 2
     }
     $asset = $rel.assets | Where-Object { $_.name -like "*.zip" } | Select-Object -First 1
-    if (-not $asset) { Fail "Wydanie $($rel.tag_name) nie ma pliku ZIP." 2 }
-    Write-Step "Najnowsza wersja: $($rel.tag_name)"
+    if (-not $asset) { Fail (T "Wydanie $($rel.tag_name) nie ma pliku ZIP." "Release $($rel.tag_name) has no ZIP file.") 2 }
+    Write-Step (T "Najnowsza wersja: $($rel.tag_name)" "Latest version: $($rel.tag_name)")
     $out = Join-Path $script:Work $asset.name
     Get-File $asset.browser_download_url $out
     return $out
@@ -262,22 +278,23 @@ function Get-NexusFile([int] $ModId, [string] $Game = "fallout3") {
     if (-not $NexusApiKey) { return $null }
     $h = Get-NexusHeaders
 
-    Write-Step "Nexus: pobieram listę plików moda $ModId"
+    Write-Step (T "Nexus: pobieram listę plików moda $ModId" "Nexus: getting the file list of mod $ModId")
     try {
         $files = Invoke-RestMethod -Uri "https://api.nexusmods.com/v1/games/$Game/mods/$ModId/files.json" -Headers $h -UseBasicParsing
     } catch {
-        Write-Step "Nexus odmówił dostępu do listy plików: $($_.Exception.Message)"
+        Write-Step (T "Nexus odmówił dostępu do listy plików: $($_.Exception.Message)" "Nexus refused access to the file list: $($_.Exception.Message)")
         return $null
     }
     $main = $files.files | Where-Object { $_.category_name -eq "MAIN" } | Sort-Object uploaded_timestamp -Descending | Select-Object -First 1
     if (-not $main) { $main = $files.files | Sort-Object uploaded_timestamp -Descending | Select-Object -First 1 }
-    if (-not $main) { Write-Step "Nexus: brak plików w modzie $ModId"; return $null }
+    if (-not $main) { Write-Step (T "Nexus: brak plików w modzie $ModId" "Nexus: mod $ModId has no files"); return $null }
 
-    Write-Step "Nexus: proszę o link do pliku '$($main.file_name)'"
+    Write-Step (T "Nexus: proszę o link do pliku '$($main.file_name)'" "Nexus: asking for a download link to '$($main.file_name)'")
     try {
         $link = Invoke-RestMethod -Uri "https://api.nexusmods.com/v1/games/$Game/mods/$ModId/files/$($main.file_id)/download_link.json" -Headers $h -UseBasicParsing
     } catch {
-        Write-Step "Nexus nie dał linku do pobrania. Tak odpowiada kontom bez Premium — ten jeden plik trzeba pobrać ręcznie."
+        Write-Step (T "Nexus nie dał linku do pobrania. Tak odpowiada kontom bez Premium — ten jeden plik trzeba pobrać ręcznie." `
+                      "Nexus gave no download link. That is its answer to accounts without Premium — this one file has to be downloaded by hand.")
         return $null
     }
     $url = $link[0].URI
@@ -291,11 +308,11 @@ function Test-NexusKey {
     try {
         $u = Invoke-RestMethod -Uri "https://api.nexusmods.com/v1/users/validate.json" `
                 -Headers (Get-NexusHeaders) -UseBasicParsing
-        $prem = if ($u.is_premium) { "Premium" } else { "zwykłe (bez automatycznego pobierania)" }
-        Write-Step "Klucz Nexusa działa. Konto: $($u.name), $prem"
+        $prem = if ($u.is_premium) { "Premium" } else { T "zwykłe (bez automatycznego pobierania)" "standard (no automatic downloads)" }
+        Write-Step (T "Klucz Nexusa działa. Konto: $($u.name), $prem" "The Nexus key works. Account: $($u.name), $prem")
         return [bool]$u.is_premium
     } catch {
-        Write-Step "Klucz Nexusa odrzucony: $($_.Exception.Message)"
+        Write-Step (T "Klucz Nexusa odrzucony: $($_.Exception.Message)" "The Nexus key was rejected: $($_.Exception.Message)")
         return $false
     }
 }
@@ -360,15 +377,15 @@ function Expand-Any([string] $Archive, [string] $Destination) {
 
     $sevenZip = Find-SevenZip
     if ($sevenZip) {
-        Write-Step "Rozpakowuje 7-Zipem"
+        Write-Step (T "Rozpakowuję 7-Zipem" "Unpacking with 7-Zip")
         & $sevenZip x $Archive "-o$Destination" -y | Out-Null
         if ($LASTEXITCODE -eq 0) { return }
-        Write-Step "7-Zip zwrocil blad ($LASTEXITCODE) - probuje WinRAR-em"
+        Write-Step (T "7-Zip zwrócił błąd ($LASTEXITCODE) — próbuję WinRAR-em" "7-Zip returned an error ($LASTEXITCODE) — trying WinRAR")
     }
 
     $winRar = Find-WinRar
     if ($winRar) {
-        Write-Step "Rozpakowuje WinRAR-em"
+        Write-Step (T "Rozpakowuję WinRAR-em" "Unpacking with WinRAR")
         # x keeps the folder structure, -y answers every prompt, -ibck keeps the
         # window out of the way. The destination needs its trailing backslash or
         # WinRAR reads it as a file name.
@@ -378,12 +395,15 @@ function Expand-Any([string] $Archive, [string] $Destination) {
         $got = Get-ChildItem $Destination -Recurse -File -ErrorAction SilentlyContinue |
                Select-Object -First 1
         if ($proc.ExitCode -eq 0 -and $got) { return }
-        Write-Step "WinRAR zwrocil blad ($($proc.ExitCode))"
+        Write-Step (T "WinRAR zwrócił błąd ($($proc.ExitCode))" "WinRAR returned an error ($($proc.ExitCode))")
     }
 
-    Fail ("Nie umiem rozpakowac $Archive - to nie jest ZIP, a nie znalazlem ani " +
-          "7-Zipa, ani WinRAR-a. Zainstaluj jeden z nich (7-Zip jest darmowy: " +
-          "https://www.7-zip.org ) i uruchom instalator ponownie.") 3
+    Fail (T ("Nie umiem rozpakować $Archive — to nie jest ZIP, a nie znalazłem ani " +
+             "7-Zipa, ani WinRAR-a. Zainstaluj jeden z nich (7-Zip jest darmowy: " +
+             "https://www.7-zip.org ) i uruchom instalator ponownie.") `
+            ("Cannot unpack $Archive — it is not a ZIP, and neither 7-Zip nor WinRAR " +
+             "was found. Install one of them (7-Zip is free: https://www.7-zip.org ) " +
+             "and run the installer again.")) 3
 }
 
 # --- install steps -----------------------------------------------------------
@@ -400,11 +420,11 @@ function Install-Mod([string] $Zip) {
     $iniPath = Join-Path $GamePath "Data\FOSE\Plugins\Fallout3Access.ini"
     $keepIni = $null
     if (Test-Path $iniPath) {
-        Write-Step "Aktualizacja: zachowuję Twoje ustawienia i przypisania klawiszy"
+        Write-Step (T "Aktualizacja: zachowuję Twoje ustawienia i przypisania klawiszy" "Update: keeping your settings and key bindings")
         $keepIni = Join-Path $script:Work "Fallout3Access.ini.keep"
         Copy-Item $iniPath $keepIni -Force
     } else {
-        Write-Step "Instaluję mod"
+        Write-Step (T "Instaluję mod" "Installing the mod")
     }
 
     # The archive is laid out as the game folder (Data\FOSE\Plugins\... plus the
@@ -412,34 +432,42 @@ function Install-Mod([string] $Zip) {
     # itself rather than trusting the layout: an archive that gained a top
     # folder would otherwise install everything one level too deep.
     $dll = Get-ChildItem -LiteralPath $dir -Recurse -File -Filter "fallout3_access.dll" | Select-Object -First 1
-    if (-not $dll) { Fail "W archiwum moda nie ma fallout3_access.dll." 3 }
+    if (-not $dll) { Fail (T "W archiwum moda nie ma fallout3_access.dll." "The mod archive has no fallout3_access.dll.") 3 }
     if ($dll.Directory.Parent.Parent.Name -ne "Data") {
-        Fail "Nieoczekiwany układ archiwum moda: $($dll.FullName)" 3
+        Fail (T "Nieoczekiwany układ archiwum moda: $($dll.FullName)" "Unexpected layout of the mod archive: $($dll.FullName)") 3
     }
     $root = $dll.Directory.Parent.Parent.Parent      # Plugins -> FOSE -> Data -> root
-    Write-Step "Kopiuję pliki moda do: $GamePath"
+    Write-Step (T "Kopiuję pliki moda do: $GamePath" "Copying the mod files to: $GamePath")
     Copy-Tree $root.FullName $GamePath
 
     $plugins = Join-Path $GamePath "Data\FOSE\Plugins"
     if ($keepIni) {
-        Copy-Item -LiteralPath $iniPath -Destination (Join-Path $plugins "Fallout3Access.ini.nowy") -Force
+        $newIni = T "Fallout3Access.ini.nowy" "Fallout3Access.ini.new"
+        Copy-Item -LiteralPath $iniPath -Destination (Join-Path $plugins $newIni) -Force
         Copy-Item -LiteralPath $keepIni -Destination $iniPath -Force
-        Write-Step "Wzorcowy plik nowej wersji leży obok jako Fallout3Access.ini.nowy"
+        Write-Step (T "Wzorcowy plik nowej wersji leży obok jako $newIni" "The new version's default file is next to it as $newIni")
+    } elseif (-not $script:Pl) {
+        # A fresh install speaks the language the installer was run in. An
+        # update keeps the player's own choice, with the rest of their settings.
+        $text = [IO.File]::ReadAllText($iniPath)
+        $text = $text -replace '(?m)^(Language\s*=\s*)pl\b', '${1}en'
+        [IO.File]::WriteAllText($iniPath, $text, (New-Object Text.UTF8Encoding($false)))
+        Write-Step "Mod language set to English (Language = en in Fallout3Access.ini)"
     }
 
     # Both files, where the game looks for them — checked, not assumed.
     foreach ($name in @("fallout3_access.dll", "Fallout3Access.ini")) {
         $f = Join-Path $plugins $name
-        if (-not (Test-Path -LiteralPath $f)) { Fail "Po kopiowaniu brak $name w $plugins" 3 }
-        Write-Step "Jest: $f"
+        if (-not (Test-Path -LiteralPath $f)) { Fail (T "Po kopiowaniu brak $name w $plugins" "After copying, $name is missing from $plugins") 3 }
+        Write-Step (T "Jest: $f" "Present: $f")
     }
-    Write-Step "Mod zainstalowany"
+    Write-Step (T "Mod zainstalowany" "Mod installed")
 }
 
 function Install-Fose([string] $Url) {
-    if ($SkipFose) { Write-Step "Pomijam FOSE (na życzenie)"; return }
+    if ($SkipFose) { Write-Step (T "Pomijam FOSE (na życzenie)" "Skipping FOSE (as asked)"); return }
     if (Test-Path (Join-Path $GamePath "fose_loader.exe")) {
-        Write-Step "FOSE już jest — pomijam"
+        Write-Step (T "FOSE już jest — pomijam" "FOSE is already there — skipping")
         return
     }
     $archive = Join-Path $script:Work "fose.7z"
@@ -449,39 +477,42 @@ function Install-Fose([string] $Url) {
     # FOSE archives keep the loader inside a versioned folder; find it wherever
     # it landed and copy that folder's contents next to Fallout3.exe.
     $loader = Get-ChildItem $dir -Recurse -Filter "fose_loader.exe" | Select-Object -First 1
-    if (-not $loader) { Fail "W archiwum FOSE nie ma fose_loader.exe" 3 }
+    if (-not $loader) { Fail (T "W archiwum FOSE nie ma fose_loader.exe" "The FOSE archive has no fose_loader.exe") 3 }
     # FILES only, no recursion: the archive also carries FOSE's complete source
     # tree beside the loader, and a recursive copy dumped all of it into the
     # game folder. Only the loader, its DLLs and the readmes belong there.
     Get-ChildItem $loader.Directory.FullName -File |
         Copy-Item -Destination $GamePath -Force
-    Write-Step "FOSE zainstalowany"
+    Write-Step (T "FOSE zainstalowany" "FOSE installed")
 }
 
 function Invoke-Patcher([string] $Archive) {
-    if ($SkipPatcher) { Write-Step "Pomijam patcher (na życzenie)"; return }
+    if ($SkipPatcher) { Write-Step (T "Pomijam patcher (na życzenie)" "Skipping the patcher (as asked)"); return }
     $dir = Join-Path $script:Work "patcher"
     Expand-Any $Archive $dir
     # Patcher.exe by NAME: the archive also carries xdelta3.exe, and running
     # "the first .exe found" could start that instead and patch nothing.
     $exe = Get-ChildItem -LiteralPath $dir -Recurse -File -Filter "Patcher.exe" | Select-Object -First 1
-    if (-not $exe) { Fail "W archiwum patchera nie ma Patcher.exe" 3 }
+    if (-not $exe) { Fail (T "W archiwum patchera nie ma Patcher.exe" "The patcher archive has no Patcher.exe") 3 }
     # The patcher only works from the game folder (its readme: unpack ALL files
     # next to Fallout3.exe, no subfolder), so it is copied there and run there.
-    Write-Step "Kopiuję patcher do folderu gry"
+    Write-Step (T "Kopiuję patcher do folderu gry" "Copying the patcher to the game folder")
     Copy-Tree $exe.Directory.FullName $GamePath
-    Write-Step "Uruchamiam patcher — potwierdź w jego oknie (Enter), potem wróć tutaj"
+    Write-Step (T "Uruchamiam patcher — potwierdź w jego oknie (Enter), potem wróć tutaj" `
+                  "Starting the patcher — confirm in its window (Enter), then come back here")
     $proc = Start-Process -FilePath (Join-Path $GamePath $exe.Name) -WorkingDirectory $GamePath -Wait -PassThru
-    Write-Step "Patcher zakończony (kod $($proc.ExitCode)). Wersja gry teraz: $(Get-GameBuild)"
+    Write-Step (T "Patcher zakończony (kod $($proc.ExitCode)). Wersja gry teraz: $(Get-GameBuild)" `
+                  "Patcher finished (code $($proc.ExitCode)). Game version now: $(Get-GameBuild)")
     if ((Get-GameBuild) -notlike "1.7.0.3*") {
-        Write-Step "UWAGA: gra nadal nie jest w wersji 1.7.0.3 — sprawdź okno patchera."
+        Write-Step (T "UWAGA: gra nadal nie jest w wersji 1.7.0.3 — sprawdź okno patchera." `
+                      "WARNING: the game is still not version 1.7.0.3 — check the patcher window.")
     }
 }
 
 # --- main --------------------------------------------------------------------
 
 Test-GameFolder
-Write-Step "Wersja gry: $(Get-GameBuild)"
+Write-Step (T "Wersja gry: $(Get-GameBuild)" "Game version: $(Get-GameBuild)")
 
 # The mod FIRST. It is the one piece this installer exists for, and the other
 # steps can fail for reasons outside anyone's control (a site down, a Nexus
@@ -495,20 +526,20 @@ $premium = Test-NexusKey
 # container, the highlighted entry, its place in the list, whether it is worn.
 function Install-LootMenu {
     $dll = Join-Path $GamePath "Data\FOSE\Plugins\F3LootMenu.dll"
-    if (Test-Path $dll) { Write-Step "Loot Menu Updated juz jest - pomijam"; return }
+    if (Test-Path $dll) { Write-Step (T "Loot Menu Updated już jest — pomijam" "Loot Menu Updated is already there — skipping"); return }
 
     $file = Get-NexusFile -ModId 27191
     if ($file) {
         $dir = Join-Path $script:Work "lootmenu"
         Expand-Any $file $dir
         Copy-Tree $dir $GamePath
-        if (Test-Path $dll) { Write-Step "Loot Menu Updated zainstalowany"; return }
-        Write-Step "Rozpakowalem Loot Menu, ale nie widze F3LootMenu.dll"
+        if (Test-Path $dll) { Write-Step (T "Loot Menu Updated zainstalowany" "Loot Menu Updated installed"); return }
+        Write-Step (T "Rozpakowałem Loot Menu, ale nie widzę F3LootMenu.dll" "Loot Menu was unpacked, but F3LootMenu.dll is not there")
     }
 
-    Write-Step "UWAGA: brakuje wymaganego moda Loot Menu Updated."
-    Write-Step "Pobierz go recznie: https://www.nexusmods.com/fallout3/mods/27191"
-    Write-Step "i wypakuj do folderu gry (plik trafia do Data\FOSE\Plugins)."
+    Write-Step (T "UWAGA: brakuje wymaganego moda Loot Menu Updated." "WARNING: the required mod Loot Menu Updated is missing.")
+    Write-Step (T "Pobierz go ręcznie: https://www.nexusmods.com/fallout3/mods/27191" "Download it by hand: https://www.nexusmods.com/fallout3/mods/27191")
+    Write-Step (T "i wypakuj do folderu gry (plik trafia do Data\FOSE\Plugins)." "and unpack it into the game folder (the file goes to Data\FOSE\Plugins).")
 }
 
 # The path differs from the stable download: 1.3 beta 2 lives under /beta/.
@@ -523,16 +554,16 @@ if (-not $SkipPatcher) {
         if ($patcher) {
             Invoke-Patcher $patcher
         } else {
-            Write-Step "Patcher nie został pobrany automatycznie."
-            Write-Step "Pobierz go ręcznie: https://www.nexusmods.com/fallout3/mods/24913"
-            Write-Step "potem uruchom ten instalator ponownie i wskaż pobrany plik."
+            Write-Step (T "Patcher nie został pobrany automatycznie." "The patcher was not downloaded automatically.")
+            Write-Step (T "Pobierz go ręcznie: https://www.nexusmods.com/fallout3/mods/24913" "Download it by hand: https://www.nexusmods.com/fallout3/mods/24913")
+            Write-Step (T "potem uruchom ten instalator ponownie i wskaż pobrany plik." "then run this installer again and choose the downloaded file.")
         }
     }
 }
 
 if ($script:ExitCode -eq 0) {
-    Write-Step "Gotowe. Uruchamiaj grę przez fose_loader.exe, nie Fallout3.exe."
+    Write-Step (T "Gotowe. Uruchamiaj grę przez fose_loader.exe, nie Fallout3.exe." "Done. Start the game with fose_loader.exe, not Fallout3.exe.")
 } else {
-    Write-Step "Zakończono z problemami (kod $($script:ExitCode)) — szczegóły powyżej."
+    Write-Step (T "Zakończono z problemami (kod $($script:ExitCode)) — szczegóły powyżej." "Finished with problems (code $($script:ExitCode)) — details above.")
 }
 exit $script:ExitCode
