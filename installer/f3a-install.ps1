@@ -465,6 +465,14 @@ function Install-Mod([string] $Zip) {
             [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
             Write-Step (T "Wyłączam odległość po podpowiedziach typu Rozmawiaj (CrosshairDistance = 0)" "Turning off the distance after prompts like Talk (CrosshairDistance = 0)")
         }
+        # Exploration announcements were on by default (0.4.5-0.5.2) and talked
+        # through every walk; auto-walk is quiet now, Shift+O turns them on.
+        $text = [IO.File]::ReadAllText($iniPath)
+        $fixed = $text -replace '(?m)^(\s*ExploreMode\s*=\s*)1\b', '${1}0'
+        if ($fixed -ne $text) {
+            [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
+            Write-Step (T "Autowalk idzie teraz w ciszy (ExploreMode = 0); Shift+O włącza znaleziska po drodze" "Auto-walk is quiet now (ExploreMode = 0); Shift+O turns on finds along the way")
+        }
         # PressRow was Insert, which NVDA takes for itself (its modifier key),
         # so the game never saw it. It is F2 now; move a kept file along.
         $text = [IO.File]::ReadAllText($iniPath)

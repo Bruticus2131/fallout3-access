@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 #     issues when the game loads us.
 
 project(Fallout3Access
-    VERSION 0.5.2
+    VERSION 0.5.3
     DESCRIPTION "Fallout 3 accessibility mod (screen reader integration)"
     LANGUAGES CXX
 )

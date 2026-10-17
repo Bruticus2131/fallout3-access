@@ -957,7 +957,14 @@ bool RebuildPath(const char* why)
         g_route_partial = false;
     }
     RequestEngineRoute();
-    if (why && *why) tolk::Speak(why, tolk::Priority::Ui, false);
+    // Said, but not over and over: a walk wedged in rubble rebuilds its route
+    // every few seconds, and hearing it each time is noise, not news.
+    static DWORD s_said_at = 0;
+    DWORD now = GetTickCount();
+    if (why && *why && (s_said_at == 0 || now - s_said_at >= 30000)) {
+        s_said_at = now;
+        tolk::Speak(why, tolk::Priority::Ui, false);
+    }
     return ok;
 }
 

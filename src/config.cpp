@@ -246,7 +246,7 @@ bool Load(const wchar_t* ini_path)
     s.nearby_scan_radius    = ReadInt (L"Voice", L"NearbyScanRadius",   1200, ini_path);
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
     s.hide_empty_containers = ReadBool(L"Voice", L"HideEmptyContainers", true, ini_path);
-    s.explore_mode          = ReadBool(L"Voice", L"ExploreMode",        true, ini_path);
+    s.explore_mode          = ReadBool(L"Voice", L"ExploreMode",        false, ini_path);
     s.explore_radius        = ReadInt (L"Voice", L"ExploreRadius",      900,  ini_path);
     if (s.explore_radius < 200 || s.explore_radius > 4000) s.explore_radius = 900;
     s.audio_desc            = ReadBool(L"Voice", L"AudioDescription",   true,  ini_path);
