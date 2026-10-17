@@ -246,6 +246,10 @@ DWORD VoiceQuietAt();
 // Audio description: the quests it watches, and a quest's stage and whether
 // it is running, read live (false when there is no such quest).
 void WatchQuestStages(const std::vector<uint32_t>& ids);
+
+// A save was loaded or a new game started (FOSE messages): the next Loading
+// menu close starts the session-scoped modules afresh.
+void NoteGameLoad();
 bool QuestStage(uint32_t id, int* stage, bool* running);
 
 // Ask for a ray map around a point. The sweep itself runs on the GAME's thread

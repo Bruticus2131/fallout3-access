@@ -131,6 +131,11 @@ int GetQuestStage(uint32_t questId, bool* running = nullptr);
 // thread runs our work only when Windows sends it a message, and in a scene
 // with the controls taken away (the birth) nothing does for half a minute.
 bool ReadQuestState(uint32_t questId, int* stage, bool* running);
+// The display name of a worldspace or an interior cell as the running game
+// has it - in the game's own language (the door table's names come from the
+// Polish data the table was built from). Plain data reads, any thread. Empty
+// when unknown or unnamed.
+std::string SpaceDisplayName(uint32_t formId);
 // Is this reference an actor (NPC or creature)? A plain data read.
 bool RefIsActor(const void* refr);
 // A placed creature (radroach, mole rat...) rather than a person.
@@ -517,6 +522,9 @@ bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID);
 //
 // Install the main-thread executor (IAT-hooks DispatchMessageA) once at load:
 void InstallMainThreadHook();
+// How many window messages the game has dispatched (each one runs our
+// main-thread work) - for the poll thread's pump.
+uint32_t MainThreadPumps();
 // Watch the game's films (Bink): which one is playing and how far in.
 void InstallMovieHooks();
 // The film playing now: its file name (lower case, no folder), the position

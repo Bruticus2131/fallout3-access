@@ -139,7 +139,11 @@ void Tick(float)
     }
     g_gone_ticks = 0;
 
-    const bool new_container = !g_open || g_last_title != v.title;
+    // Another container: another title - or the same title with another
+    // number of entries when nothing was taken (two "Szafka" lockers side by
+    // side; a take always follows the Use key).
+    const bool new_container = !g_open || g_last_title != v.title ||
+                               (g_last_total > 0 && v.total != g_last_total && !UseRecently());
     if (new_container) {
         g_open = true;
         g_last_title = v.title;
@@ -165,10 +169,10 @@ void Tick(float)
         int was = 1, now = 1;
         std::string wasName = SplitCount(g_last_item, &was);
         std::string nowName = SplitCount(v.item, &now);
-        if (g_last_total > 0 && v.total < g_last_total) {
+        if (g_last_total > 0 && v.total < g_last_total && UseRecently()) {
             SayTaken(g_last_item);
             taken = true;
-        } else if (!moved && wasName == nowName && now < was) {
+        } else if (!moved && wasName == nowName && now < was && UseRecently()) {
             char n[16];
             std::snprintf(n, sizeof(n), "%d", was - now);
             SayTaken(wasName + ", " + n);

@@ -58,6 +58,7 @@ struct Resume {
     const void* refr = nullptr;
     uint32_t    form = 0;
 } g_resume;
+uint32_t g_detour_form = 0;              // what the detour walks to
 
 bool InWorld()
 {
@@ -143,6 +144,7 @@ void Detour(const game::WorldEntity& e)
         g_resume.form  = autowalk::TargetFormId();
     }
     g_visited.insert(e.form_id);
+    g_detour_form = e.form_id;
     F3A_INFO("Explore: walking to '%s' (%08X)%s", e.name.c_str(), (unsigned)e.form_id,
              g_resume.on ? ", the trip waits" : "");
     autowalk::StartTo(e.position, Label(e), e.refr, e.form_id);
@@ -171,6 +173,10 @@ void GoKey()
                     tolk::Priority::Ui, true);
         return;
     }
+    // A walk started since the detour (End, a quest walk) replaced the trip:
+    // O then means the latest find, not the old trip.
+    if (g_resume.on && autowalk::IsWalking() && autowalk::TargetFormId() != g_detour_form)
+        g_resume = Resume{};
     if (g_resume.on) { ResumeTrip(); return; }
     if (!g_have_last) {
         tolk::Speak(strings::T("Nic nowego po drodze.", "Nothing new on the way."), tolk::Priority::Ui, true);
@@ -244,7 +250,7 @@ void NextKey()
 
 void Tick(float dt)
 {
-    if (!g_on || !config::Get().explore_mode) return;
+    if (!g_on) return;                 // Shift+O decides (it starts as the INI says)
     if (!autowalk::IsWalking() || !InWorld()) { g_timer = 0.0f; return; }
     g_timer += dt;
     if (g_timer < kTickEvery) return;
@@ -281,6 +287,17 @@ void Init()
     hotkeys::Bind(h.sweep_next, &NextKey);
     F3A_INFO("Explore module ready (exploration %s, radius %d).", g_on ? "on" : "off",
              config::Get().explore_radius);
+}
+
+void ResetSession()
+{
+    // A game was loaded: what was said or visited belongs to the old one, and
+    // the trip to resume points into it.
+    g_seen.clear();
+    g_visited.clear();
+    g_resume = Resume{};
+    g_have_last = false;
+    g_detour_form = 0;
 }
 
 void Shutdown()

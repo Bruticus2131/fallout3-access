@@ -23,12 +23,15 @@ namespace {
 // forced that mod's author to transcribe them by hand.
 //
 // So the words come from our own strings (both languages — this mod ships
-// publicly). Two things keep that honest:
+// publicly), and they are what a sighted child sees on the pages:
 //   * the attribute NAMES match the game's own wording, checked against a
 //     Pip-Boy dump rather than recalled;
-//   * the DESCRIPTIONS start as ours, but are REPLACED by the game's real text
-//     as soon as the Pip-Boy's SPECIAL page has shown it, so a player who has
-//     opened their Pip-Boy hears Bethesda's wording in their own language.
+//   * each attribute's page carries a little RHYME ("S znaczy SIŁA..."),
+//     transcribed from the page textures themselves (textures\terminals\
+//     babybook01-05.dds: the Polish release ships its own, loose in Data;
+//     the English ones are in Fallout - Textures.bsa). The Pip-Boy's
+//     descriptions are not in the book, so they are not read here.
+//   * the cover's title and the summary page's heading are the pages' own.
 // The VALUES are always read live from the player's stats, never guessed.
 constexpr int kNumSpecials = 7;
 
@@ -38,15 +41,27 @@ const strings::Key kNameKeys[kNumSpecials] = {
     strings::Key::SpecialIntelligence, strings::Key::SpecialAgility,
     strings::Key::SpecialLuck
 };
-const strings::Key kDescKeys[kNumSpecials] = {
-    strings::Key::SpecialDescStrength,     strings::Key::SpecialDescPerception,
-    strings::Key::SpecialDescEndurance,    strings::Key::SpecialDescCharisma,
-    strings::Key::SpecialDescIntelligence, strings::Key::SpecialDescAgility,
-    strings::Key::SpecialDescLuck
-};
 
-// Descriptions learned from the game's own Pip-Boy page, when available.
-std::string g_learned[kNumSpecials];
+// The rhyme on each attribute's page, as printed in the book (the Polish
+// page textures drop the accents on "dźwięczy" and "mówią" - their font has
+// no such letters; spelt right here so the voice says the word). Capitals in
+// the book are lowered: a synthesizer spells out a word in capitals.
+const char* const kRhymes[kNumSpecials][2] = {
+    { "S znaczy siła i silny jestem wielce. Mogę rzucać dalej i podnosić więcej!",
+      "S is for strength, and that means I am strong! I can carry more toys and swing stuff all day long!" },
+    { "P jest jak percepcja - wciąż dźwięczy mi w uchu! Oznacza zmysły węchu, wzroku, dotyku i słuchu!",
+      "P is for Perception, a long funny word! It means what I tasted, smelled, saw and heard!" },
+    { "E jak energia do zabaw, której u mnie dużo. Zdrów jestem, wytrzymały - dni mi się nie dłużą.",
+      "E is for Endurance, and that's how long I can play! I'm always really healthy, and have energy all day!" },
+    { "C to jest charyzma, wszyscy lubią mnie! W moim towarzystwie chcą spędzać całe dnie!",
+      "C is for Charisma, it's why people think I'm great! I make my friends all laugh and smile, and never want to hate!" },
+    { "J jak jasny umysł i inteligencja. Starsi mówią na to - rozumu potencja!",
+      "I is for Intelligence, it means I'm really smart! I use my brain for lots of stuff, like science, math and art!" },
+    { "A bo akrobata ze mnie przewspaniały. Cichy, szybki, zwinny - oto jam jest cały!",
+      "A is for Agility, that's how I get around! I move real fast and easy, and I never make a sound!" },
+    { "Ł to jak łut szczęścia i nikt nie zaprzeczy! Przytrafiają mi się same dobre rzeczy!",
+      "L is for luck, and it's simple, you see! It means that good things always happen to me!" },
+};
 
 bool g_open = false;
 int  g_open_wait = 0;    // ticks spent waiting for the first value sample
@@ -65,14 +80,11 @@ int g_values[kNumSpecials] = { -1, -1, -1, -1, -1, -1, -1 };
 
 std::string Name(int i) { return strings::Render(kNameKeys[i]); }
 
+// What the attribute's page says: its rhyme.
 std::string Description(int i)
 {
-    // The game's own text, read from its data the first time the book opens —
-    // a player opening the book has no Pip-Boy yet to learn it from.
-    std::string game = poll::SpecialDescription(i);
-    if (!game.empty()) return game;
-    if (!g_learned[i].empty()) return g_learned[i];   // the game's own words
-    return strings::Render(kDescKeys[i]);
+    if (i < 0 || i >= kNumSpecials) return {};
+    return strings::T(kRhymes[i][0], kRhymes[i][1]);
 }
 
 // Sampled on the main thread (poll::PlayerSpecial): this module runs on the
@@ -172,39 +184,8 @@ void SeedKeys()
 
 } // namespace
 
-// Called while the Pip-Boy's SPECIAL page is up: it shows the selected
-// attribute's real description in `stats_description`. Whichever attribute the
-// text names, we keep that description and use it in the book from then on —
-// which is how the player ends up hearing the game's own wording, in the game's
-// own language, instead of ours.
-void LearnFromStatsPage()
-{
-    constexpr uint32_t kStatsMenu = 0x3EB;            // FOSE's kMenuType_Stats
-    auto lines = game::GetMenuTextLines(kStatsMenu);
-    if (lines.empty()) return;
-
-    // The description is the long line; the attribute it belongs to is whichever
-    // name it starts with (the game's texts open with the attribute's name).
-    for (const auto& line : lines) {
-        if (line.size() < 40) continue;               // not a description
-        for (int i = 0; i < kNumSpecials; ++i) {
-            std::string n = Name(i);
-            if (n.empty() || line.compare(0, n.size(), n) != 0) continue;
-            if (g_learned[i] != line) {
-                g_learned[i] = line;
-                F3A_INFO("SpecialBook: learned description for %s from the game",
-                         n.c_str());
-            }
-            break;
-        }
-    }
-}
-
 void Tick(float)
 {
-    // Pick up the game's own descriptions whenever the Pip-Boy shows them.
-    if (menu::ActiveMenu() == menu::Id::Stats) LearnFromStatsPage();
-
     if (menu::ActiveMenu() != menu::Id::SpecialBookMenu) {
         if (g_open) g_open = false;
         g_open_wait = 0;
@@ -242,7 +223,8 @@ void Tick(float)
         if (KeyEdge(VK_RETURN, &g_enter)) {
             int st = StatForPage(page, indexStat);
             std::string say = AllValues() + PointsLeftText(maxPoints);
-            if (st >= 0) say += ". " + Describe(st, true);
+            // The rhyme only where the page shows one: not on the summary page.
+            if (st >= 0) say += ". " + Describe(st, page >= 1 && page <= 7);
             tolk::Speak(say, tolk::Priority::Ui, true);
         }
         bool queue = false;              // after the opening line, not over it
@@ -254,12 +236,15 @@ void Tick(float)
             for (int i = 0; i < kNumSpecials; ++i) g_values[i] = ReadValue(i);
             int st = StatForPage(page, indexStat);
             std::string say;
-            if (page == 0) say = strings::T("Okładka", "Cover");
-            else if (page == 8 && newPage) say = strings::T("Podsumowanie. ", "Summary. ");
+            // The pages' own words: the cover's title, the summary's heading
+            // and its "done" corner, each attribute's rhyme.
+            if (page == 0) say = strings::T("Okładka: Specjał dla ciebie", "Cover: You're Special!");
+            else if (page == 8 && newPage)
+                say = strings::T("Podsumujmy! W rogu: Gotowe! ", "Let's Review! In the corner: All Done! ");
             if (st >= 0) {
                 g_index = st;
-                say += Describe(st, /*withDescription=*/false) + PointsLeftText(maxPoints) +
-                       ". " + Description(st);
+                say += Describe(st, /*withDescription=*/false) + PointsLeftText(maxPoints);
+                if (page >= 1 && page <= 7) say += ". " + Description(st);
             }
             F3A_INFO("SpecialBook: page %d, summary pick %d -> %s", page, indexStat,
                      st >= 0 ? Name(st).c_str() : "-");

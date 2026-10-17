@@ -341,7 +341,9 @@ void Rescan()
 // now (changed save, walked through a door) — then it must be rebuilt.
 bool ScanListStale()
 {
-    return g_scan_full.empty() || g_scan_cell != game::GetPlayerCell();
+    // The category's own list: places and quest objects do not come from the
+    // physical scan, and an empty one there made every PgDn start over at 1.
+    return g_scan_list.empty() || g_scan_cell != game::GetPlayerCell();
 }
 
 void AnnounceCurrent()
@@ -962,7 +964,7 @@ void FillAimPoint(AimTarget* out, const game::WorldEntity& e)
 {
     // Redirect a quest marker onto whoever is standing at it, before anything
     // else looks at the entity.
-    if (e.kind == game::WorldEntity::Kind::Quest) {
+    if (e.kind == game::WorldEntity::Kind::Quest && !game::RefIsActor(e.refr)) {
         game::WorldEntity who{};
         if (ActorAtQuestMarker(e.position, &who)) {
             F3A_INFO("AimTarget: quest marker '%s' resolved to the actor '%s' "
@@ -1209,8 +1211,11 @@ bool PickCombatTarget(AimTarget* out, std::string* why = nullptr)
     }
     // One exception: a creature the objective itself points at ("Zabij
     // radrakana za pomocą wiatrówki") before the game counts it as hostile.
+    // Only the creature the objective itself names - not whoever stands near
+    // its marker (Dogmeat by a quest marker is no target).
     bool objective = g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
-                     g_scan_list[g_scan_index].kind == game::WorldEntity::Kind::Quest;
+                     g_scan_list[g_scan_index].kind == game::WorldEntity::Kind::Quest &&
+                     g_scan_list[g_scan_index].form_id == out->refid;
     if (out->actor && !out->hostile && objective && game::RefIsCreature(out->refr)) {
         F3A_INFO("AimTarget: '%s' is a creature the objective points at - taken",
                  out->name.c_str());

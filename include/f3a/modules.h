@@ -38,10 +38,11 @@ namespace lootmenu { void Init(); void Shutdown(); void Tick(float dt); bool IsO
 namespace sonar { void Init(); void Shutdown(); void Tick(float dt); }
 // Not missing things: finds announced on the way during auto-walk (O walks to
 // one and back), and the area sweep (U what is left, I walk to the next).
-namespace explore { void Init(); void Shutdown(); void Tick(float dt); }
+namespace explore { void Init(); void Shutdown(); void Tick(float dt); void ResetSession(); }
 // Audio description: scenes (quest stages) and people (first look), from
 // Fallout3Access\audiodesc_pl.txt, said in the gaps between voices.
-namespace audiodesc { void Init(); void Shutdown(); void Tick(float dt); void ToggleMovies(); void ResetSession(); }
+namespace audiodesc { void Init(); void Shutdown(); void Tick(float dt); void ToggleMovies();
+                      void OnLoadingClosed(bool gameLoad); }
 // The level-up screen: headline, points left, entries with values and their
 // descriptions, in the game's own words.
 namespace levelup { void Init(); void Shutdown(); }

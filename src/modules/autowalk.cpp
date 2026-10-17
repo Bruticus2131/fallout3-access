@@ -96,6 +96,15 @@ constexpr float kLegArrive = 250.0f;      // this near a leg's point: on to the 
 constexpr float kLongWalk  = 7000.0f;
 constexpr float kLegMax    = 3500.0f;     // a straight leg is at most this long
 bool OnLegs() { return g_leg < g_legs.size(); }
+// Legs from the walk graph carry the ground's real height: a leg counts as
+// reached only on its own level (a deck straight above is not reached).
+bool g_legs_graph = false;
+constexpr float kLegLevel = 220.0f;
+
+bool LegLevelOk(const game::Vec3& leg, const game::Vec3& pp)
+{
+    return !g_legs_graph || std::fabs(leg.z - pp.z) <= kLegLevel;
+}
 game::Vec3 LegGoal();                     // defined below (needs g_target_pos)
 
 // --- A door far away, on the way to another place --------------------------------
@@ -176,6 +185,7 @@ float        g_cross_wait       = 0.0f;
 float        g_cross_settle     = 0.0f;           // settle timer after the cell changed
 const void*  g_cross_prev_cell  = nullptr;        // cell at activation (detect the change)
 int          g_hop_count        = 0;              // load doors traversed this trip
+int          g_hop_limit        = 0;              // ...allowed: kMaxHops, or the table's chain + 6
 int          g_cross_stuck      = 0;              // stalls while approaching a door
 bool         g_cross_teleported = false;          // already used the teleport fallback
 const void*  g_cross_from_cell  = nullptr;        // cell we left (skip the door back)
@@ -630,6 +640,33 @@ bool DifferentAreas(const game::Vec3& a, const game::Vec3& b)
     return x >= 0 && y >= 0 && x != y;
 }
 
+// Another part of this place counts only when a sensible chain of doors leads
+// there (worlddoors caps it); a patch the graph cut off by mistake has none,
+// and the target is then simply walked to. Asked once per target and part.
+bool DoorChainHere()
+{
+    static uint32_t s_space = 0, s_form = 0;
+    static int s_from = -2, s_to = -2;
+    static float s_tx = 0, s_ty = 0;
+    static bool s_answer = false;
+    uint32_t ps = game::PlayerSpaceId();
+    auto pp = game::GetPlayerPosition();
+    int from = roadnet::Area(ps, pp), to = roadnet::Area(ps, g_target_pos);
+    if (ps == s_space && g_target_form == s_form && from == s_from && to == s_to &&
+        g_target_pos.x == s_tx && g_target_pos.y == s_ty)
+        return s_answer;
+    s_space = ps; s_form = g_target_form; s_from = from; s_to = to;
+    s_tx = g_target_pos.x; s_ty = g_target_pos.y;
+    worlddoors::Hop hop;
+    worlddoors::AreaFn areaFn = [](uint32_t space, const game::Vec3& p) { return roadnet::Area(space, p); };
+    s_answer = worlddoors::Loaded() &&
+               worlddoors::NextDoor(ps, pp, ps, g_target_pos, &hop, &g_table_missing, &areaFn);
+    if (!s_answer)
+        F3A_INFO("autowalk: '%s' is on another part of this place, but no sensible chain of "
+                 "doors leads there - walking to it", g_target_name.c_str());
+    return s_answer;
+}
+
 bool TargetHere()
 {
     bool here = false;
@@ -640,7 +677,7 @@ bool TargetHere()
         uint32_t ts = TargetSpace();
         here = ps != 0 && ts != 0 && ps == ts;
     }
-    if (here && DifferentAreas(game::GetPlayerPosition(), g_target_pos)) {
+    if (here && DifferentAreas(game::GetPlayerPosition(), g_target_pos) && DoorChainHere()) {
         static uint32_t s_logged_for = 0;
         if (s_logged_for != g_target_form) {
             s_logged_for = g_target_form;
@@ -685,10 +722,11 @@ void PlanLegs(const game::Vec3& goal)
             g_legs.push_back({ pp.x + dx * t, pp.y + dy * t, pp.z + (goal.z - pp.z) * t });
         }
     }
+    g_legs_graph = graph;
     // A first road point the player is already standing at is no leg.
     while (OnLegs()) {
         float lx = g_legs[g_leg].x - pp.x, ly = g_legs[g_leg].y - pp.y;
-        if (lx * lx + ly * ly > kLegArrive * kLegArrive) break;
+        if (lx * lx + ly * ly > kLegArrive * kLegArrive || !LegLevelOk(g_legs[g_leg], pp)) break;
         ++g_leg;
     }
     F3A_INFO("autowalk: long walk of %.0f units in %u leg(s), %s", d,
@@ -873,7 +911,8 @@ void AdoptEngineRoute()
     const auto& end = wp.back();
     float rx = end.x - g_route_goal.x, ry = end.y - g_route_goal.y;
     float residual = std::sqrt(rx * rx + ry * ry);
-    bool partial = residual > kPartialResidual;
+    // Ending under (or over) its goal, a floor away, is not reaching it.
+    bool partial = residual > kPartialResidual || std::fabs(end.z - g_route_goal.z) > kFloorDelta;
     F3A_INFO("autowalk: engine route adopted, %u waypoint(s)%s (ours had %u)",
              (unsigned)wp.size(), partial ? ", PARTIAL" : "", (unsigned)g_waypoints.size());
     if (partial) F3A_INFO("autowalk: it ends %.0f units short of its goal", residual);
@@ -979,10 +1018,11 @@ bool TryWalkGraph()
     g_legs = std::move(legs);
     g_leg = 0;
     g_legs_road = share >= 0.5f;
+    g_legs_graph = true;
     g_leg_skips = 0;
     while (OnLegs()) {
         float lx = g_legs[g_leg].x - pp.x, ly = g_legs[g_leg].y - pp.y;
-        if (lx * lx + ly * ly > kLegArrive * kLegArrive) break;
+        if (lx * lx + ly * ly > kLegArrive * kLegArrive || !LegLevelOk(g_legs[g_leg], pp)) break;
         ++g_leg;
     }
     if (!OnLegs()) return false;
@@ -1229,6 +1269,8 @@ void BeginFarDoorWalk(const worlddoors::Hop& hop)
     g_far_door_name = hop.to_name;
     g_far_travel    = hop.travel;
     g_far_door_pos  = hop.pos;
+    g_walkgraph_tried = false;
+    g_hop_limit = (std::max)(g_hop_limit, g_hop_count + hop.doors + 6);
     g_cross = false;
     g_cross_engine = false;
     g_cross_door_refr = nullptr;
@@ -1298,6 +1340,7 @@ void ReachedFarDoor()
     g_target_refr = g_final_refr;
     g_target_form = g_final_form;
     g_far_door = false;
+    g_walkgraph_tried = false;
     g_legs.clear();
     g_leg = 0;
     g_engine_given_up = false;      // the door and what lies beyond: engine first again
@@ -1789,6 +1832,7 @@ bool CrossByTable()
             continue;
         F3A_INFO("autowalk: door table: next door '%s' (%08X) to '%s', %d door(s) in all",
                  e.name.c_str(), (unsigned)e.form_id, hop.to_name.c_str(), hop.doors);
+        g_hop_limit = (std::max)(g_hop_limit, g_hop_count + hop.doors + 6);
         if (g_cross_used_doors.size() < 32) g_cross_used_doors.push_back(e.form_id);
         g_best_dist = 1e9f;
         g_noimprove = 0;
@@ -1809,6 +1853,19 @@ bool CrossByTable()
 bool CrossPickDoorOurselves()
 {
     if (CrossByTable()) return true;
+    // No chain of doors, and the target is in this very place (a patch of it
+    // the walk graph has cut off): our own door ranking would only find a
+    // door into ANOTHER place. Walk there instead and let the engine and the
+    // stuck handling decide.
+    uint32_t ps = game::PlayerSpaceId();
+    if (ps != 0 && ps == TargetSpace()) {
+        F3A_INFO("autowalk: no door chain, and the target is in this place - walking there");
+        g_cross = false;
+        g_cross_door_refr = nullptr;
+        PlanLegs(g_target_pos);
+        BeginCurrentLeg();
+        return true;
+    }
     if (!PickCrossDoor()) { CrossFallbackTeleport(); return false; }
     RouteToDoor();
     return true;
@@ -1924,7 +1981,7 @@ void TickCross(float dt)
         // (prev_cell) as "back", so PickCrossDoor won't send us straight back
         // through the door we arrived by.
         g_cross_from_cell = g_cross_prev_cell;
-        if (++g_hop_count > kMaxHops) {
+        if (++g_hop_count > (std::max)(kMaxHops, g_hop_limit)) {
             CrossFallbackTeleport();
             return;
         }
@@ -2206,6 +2263,7 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     g_cross_settle     = 0.0f;
     g_cross_prev_cell  = nullptr;
     g_hop_count        = 0;
+    g_hop_limit        = kMaxHops;
     g_cross_stuck      = 0;
     g_cross_teleported = false;
     g_cross_from_cell  = nullptr;
@@ -2527,6 +2585,7 @@ void Tick(float dt)
             g_avoid.clear();
             g_lockdoor_said.clear();
             g_avoid_space = sp;
+            g_walkgraph_tried = false;          // a new place: the graph may help again
         }
     }
 
@@ -2564,7 +2623,7 @@ void Tick(float dt)
     // rifle range you are meant to shoot from, and the walk kept shuffling
     // around it long after the player was standing exactly where the game
     // wanted them. Unconditional on purpose — no floor test, no path test.
-    if (!g_precise && g_follow_quest && config::Get().quest_arrive_dist > 0 &&
+    if (!g_precise && !g_far_door && g_follow_quest && config::Get().quest_arrive_dist > 0 &&
         dist <= (float)config::Get().quest_arrive_dist) {
         char buf[192];
         std::snprintf(buf, sizeof(buf), strings::T("Jesteś w rejonie celu: %s",
@@ -2581,6 +2640,16 @@ void Tick(float dt)
             // Right under (or over) the target, a floor away: under Arefu's
             // deck this is not arriving. The walk graph knows the way up.
             if (!sameFloor && TryWalkGraph()) { g_close_timer = 0.0f; return; }
+            // A roof or a ledge reached only through the building under it:
+            // the way is through its doors, not "here".
+            if (!sameFloor && DifferentAreas(game::GetPlayerPosition(), g_target_pos) &&
+                worlddoors::Loaded() && !g_cross) {
+                F3A_INFO("autowalk: under the target, which is on a part of this place "
+                         "reached through doors - crossing");
+                g_close_timer = 0.0f;
+                BeginCross();
+                return;
+            }
             char buf[192];
             std::snprintf(buf, sizeof(buf), strings::T("Jesteś przy celu: %s", "You're at the target: %s"),
                           g_target_name.c_str());
@@ -2631,7 +2700,8 @@ void Tick(float dt)
     if (OnLegs()) {
         bool routeDone = g_have_path && g_wp_index >= g_waypoints.size();
         float ld = ProgressDistance();
-        if (ld <= kLegArrive || (routeDone && ld <= 3.0f * kLegArrive)) {
+        bool level = LegLevelOk(g_legs[g_leg], game::GetPlayerPosition());
+        if (level && (ld <= kLegArrive || (routeDone && ld <= 3.0f * kLegArrive))) {
             g_leg_skips = 0;
             NextLeg();
             return;

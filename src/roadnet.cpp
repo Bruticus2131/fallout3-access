@@ -46,6 +46,10 @@ constexpr float kWalkMaxRatio = 10.0f;    // longer than this x the straight lin
 // Getting on and off the graph: a unit of height costs this many of distance,
 // so the graph point on the target's own level wins over one under it.
 constexpr float kWalkClimb    = 4.0f;
+// A leg's point also where the way climbs or drops steeply (a ramp, stairs):
+// spaced 1500 apart the points skipped them, and the engine was left to find
+// the ramp it had already failed to find.
+constexpr float kWalkStepZ    = 150.0f;
 constexpr uint8_t kFlagRoad   = 1;
 
 struct Node { float x, y, z; };
@@ -468,6 +472,7 @@ bool WalkRoute(const Net& n, const game::Vec3& from, const game::Vec3& to,
     }
     std::reverse(path.begin(), path.end());
     float length = 0.0f, road = 0.0f, acc = 0.0f;
+    float lastZ = n.nodes[path.front()].z;
     out->clear();
     for (size_t i = 1; i < path.size(); ++i) {
         const Node& p = n.nodes[path[i - 1]];
@@ -476,10 +481,21 @@ bool WalkRoute(const Net& n, const game::Vec3& from, const game::Vec3& to,
         length += d;
         if ((n.flags[path[i - 1]] & kFlagRoad) && (n.flags[path[i]] & kFlagRoad)) road += d;
         acc += d;
-        if (acc >= kWalkLeg && i + 1 < path.size()) {
+        float climb = std::fabs(q.z - lastZ);
+        bool steep = climb > kWalkStepZ && climb > 0.3f * acc;
+        if ((acc >= kWalkLeg || steep) && i + 1 < path.size()) {
             out->push_back({ q.x, q.y, q.z });
             acc = 0.0f;
+            lastZ = q.z;
         }
+    }
+    // The graph's last point too: the way may end up a ramp (Arefu's deck)
+    // within a leg's length of the target, and without it the walk had no leg
+    // at all - and "arrived" on the ground under the target.
+    {
+        const Node& last = n.nodes[path.back()];
+        if (path.size() >= 2 && (out->empty() || out->back().x != last.x || out->back().y != last.y))
+            out->push_back({ last.x, last.y, last.z });
     }
     const Node& first = n.nodes[path.front()];
     const Node& last  = n.nodes[path.back()];

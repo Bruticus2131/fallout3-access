@@ -112,15 +112,36 @@ namespace {
 // (Data\FOSE\Plugins\..\..\Fallout3.esm): the game setting sYes, in the first
 // group of the file, is "Tak" in the Polish release and "Yes" in the English
 // one. "pl", "en", "de", "fr", "es", "it", or empty when it cannot be told.
+std::string ReadGameLanguage(const std::wstring& path);
+
 std::string DetectGameLanguage(const wchar_t* ini_path)
 {
-    std::wstring path = ini_path;
-    for (int up = 0; up < 3; ++up) {                 // the INI, Plugins, FOSE
-        size_t slash = path.find_last_of(L"\\/");
-        if (slash == std::wstring::npos) return {};
-        path.resize(slash);
+    // The game's own folder first (beside Fallout3.exe), then beside the plugin.
+    std::vector<std::wstring> tries;
+    wchar_t exe[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
+        std::wstring p = exe;
+        size_t slash = p.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) tries.push_back(p.substr(0, slash) + L"\\Data\\Fallout3.esm");
     }
-    path += L"\\Fallout3.esm";
+    std::wstring path = ini_path;
+    bool ok = true;
+    for (int up = 0; up < 3 && ok; ++up) {           // the INI, Plugins, FOSE
+        size_t slash = path.find_last_of(L"\\/");
+        if (slash == std::wstring::npos) ok = false;
+        else path.resize(slash);
+    }
+    if (ok) tries.push_back(path + L"\\Fallout3.esm");
+    for (const auto& t : tries) {
+        std::string lang = ReadGameLanguage(t);
+        if (!lang.empty()) return lang;
+    }
+    F3A_WARN("Game language: could not be read from Fallout3.esm");
+    return {};
+}
+
+std::string ReadGameLanguage(const std::wstring& path)
+{
     FILE* f = _wfopen(path.c_str(), L"rb");
     if (!f) return {};
     std::string found;
@@ -180,6 +201,9 @@ bool Load(const wchar_t* ini_path)
     // Polish for the Polish release, English for every other.
     s.game_language = DetectGameLanguage(ini_path);
     s.language = s.game_language == "pl" ? "pl" : "en";
+    // Not readable at all: a Polish Windows is the better guess for Polish.
+    if (s.game_language.empty() && PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_POLISH)
+        s.language = "pl";
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
         F3A_WARN("INI not found at the expected path; using defaults (language '%s').",
                  s.language.c_str());

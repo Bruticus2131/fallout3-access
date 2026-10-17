@@ -43,6 +43,7 @@ static UINT ResolveGameCodepage()
     const auto& c = config::Get();
     const std::string& game = c.game_language.empty() ? c.language : c.game_language;
     if (game == "pl") return 1250;
+    if (game == "en" || game == "de" || game == "fr" || game == "es" || game == "it") return 1252;
     return CP_ACP;
 }
 
@@ -979,6 +980,11 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
                 e.load_door  = ReadIsLoadDoor(r);
                 e.open_state = ReadDoorOpenState(r);
             }
+            if (kind == WorldEntity::Kind::Door || kind == WorldEntity::Kind::Container) {
+                int flags = -1;
+                int lvl = ReadLockLevel(r, &flags);
+                if (lvl >= 0) { e.lock_level = lvl; e.locked = (flags & 0x01) != 0; }
+            }
             out.push_back(std::move(e));
             isSeat.push_back(use->kind == questobjs::kSeat);
         }
@@ -1133,6 +1139,48 @@ std::vector<std::string> LoadedPlugins()
         out.emplace_back(name, len);
     }
     return out;
+}
+
+// A form by id, read from the game's own form table as plain data (any
+// thread): NiTPointerMap<TESForm> {vtable, numBuckets +4, buckets +8},
+// entries {next, key, data}, bucket = id % numBuckets. The table's address is
+// taken from LookupFormByID itself (0x00455190: push ecx; mov ecx, [table]),
+// checked byte for byte first.
+TESForm* FormById(uint32_t id)
+{
+    const auto* fn = reinterpret_cast<const UInt8*>(0x00455190);
+    if (!id || !Readable(fn, 7) || fn[0] != 0x51 || fn[1] != 0x8B || fn[2] != 0x0D) return nullptr;
+    auto** tableRef = *reinterpret_cast<UInt8** const*>(fn + 3);
+    if (!Readable(tableRef, 4)) return nullptr;
+    UInt8* map = *tableRef;
+    if (!Readable(map, 0x10)) return nullptr;
+    UInt32 nb = *reinterpret_cast<UInt32*>(map + 4);
+    auto** buckets = *reinterpret_cast<UInt8***>(map + 8);
+    if (!(nb > 0 && nb < 0x1000000) || !Readable(buckets + (id % nb), 4)) return nullptr;
+    UInt8* e = buckets[id % nb];
+    for (int guard = 0; e && guard < 4096; ++guard) {
+        if (!Readable(e, 0x0C)) return nullptr;
+        if (*reinterpret_cast<UInt32*>(e + 4) == id) {
+            auto* f = *reinterpret_cast<TESForm**>(e + 8);
+            return Readable(f, 0x18) && f->refID == id ? f : nullptr;
+        }
+        e = *reinterpret_cast<UInt8**>(e);
+    }
+    return nullptr;
+}
+
+std::string SpaceDisplayName(uint32_t formId)
+{
+    TESForm* f = FormById(formId);
+    // kFormType_Cell 0x39, kFormType_WorldSpace 0x41; both carry TESFullName
+    // at +0x18, its String at +0x1C (char* data, UInt16 length +0x20).
+    if (!f || (f->typeID != 0x39 && f->typeID != 0x41)) return {};
+    auto* b = reinterpret_cast<UInt8*>(f);
+    if (!Readable(b, 0x24)) return {};
+    const char* s = *reinterpret_cast<const char**>(b + 0x1C);
+    UInt16 len = *reinterpret_cast<UInt16*>(b + 0x20);
+    if (!s || len == 0 || len > 200 || !Readable(s, len)) return {};
+    return GameStrToUtf8(std::string(s, len).c_str());
 }
 
 bool ReadQuestState(uint32_t questId, int* stage, bool* running)
@@ -1989,9 +2037,12 @@ std::atomic<void(*)()>   g_mainThreadCb{ nullptr };
 typedef LRESULT (WINAPI* DispatchMessageA_t)(const MSG*);
 DispatchMessageA_t g_realDispatchMessageA = nullptr;
 
+std::atomic<uint32_t> g_pumps{ 0 };      // messages the game has dispatched
+
 LRESULT WINAPI DispatchMessageA_Hook(const MSG* msg)
 {
     // Runs on the main (message-pump) thread — safe to call game code here.
+    g_pumps.fetch_add(1);
     const void* refr = g_pending_refr.exchange(nullptr);
     if (refr) ActivateRefNative(refr, g_pending_id.load());
     if (auto cb = g_mainThreadCb.load()) cb();
@@ -2118,6 +2169,8 @@ void InstallMainThreadHook()
     F3A_INFO("Main-thread hook (DispatchMessageA IAT) %s.",
              prev ? "installed" : "FAILED");
 }
+
+uint32_t MainThreadPumps() { return g_pumps.load(); }
 
 void QueueActivate(const void* refr, uint32_t expectedRefID)
 {

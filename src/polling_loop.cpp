@@ -469,6 +469,43 @@ std::vector<HudSaid> g_hud_said;
 // second.
 std::atomic<DWORD> g_voice_quiet_at{ 0 };
 
+// A save was loaded or a game started (FOSE's LoadGame/NewGame), consumed when
+// the Loading menu closes - a door's loading screen has none.
+std::atomic<bool> g_game_load_pending{ false };
+
+// The game's thread runs our work (MainThreadWork) only when it dispatches a
+// window message, and with the player's hands off nothing is sent: the SPECIAL
+// book's numbers, the loot list, who is dead or hostile all stood still. A
+// harmless WM_NULL posted to the game window keeps it coming, one at a time.
+void PumpGameThread()
+{
+    static HWND s_hwnd = nullptr;
+    static DWORD s_found_at = 0, s_posted_at = 0;
+    static uint32_t s_seen = 0;
+    DWORD now = GetTickCount();
+    if ((!s_hwnd || !IsWindow(s_hwnd)) && now - s_found_at > 2000) {
+        s_found_at = now;
+        struct Ctx { DWORD pid; HWND best; } ctx{ GetCurrentProcessId(), nullptr };
+        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+            auto* c = reinterpret_cast<Ctx*>(lp);
+            DWORD pid = 0;
+            GetWindowThreadProcessId(h, &pid);
+            if (pid == c->pid && IsWindowVisible(h) && !GetWindow(h, GW_OWNER)) { c->best = h; return FALSE; }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&ctx));
+        s_hwnd = ctx.best;
+    }
+    if (!s_hwnd) return;
+    // One in flight at most: post again once the last one was dispatched (or
+    // after a second, should one have been lost).
+    uint32_t pumps = game::MainThreadPumps();
+    if (now - s_posted_at < 40) return;
+    if (pumps == s_seen && now - s_posted_at < 1000) return;
+    s_seen = pumps;
+    s_posted_at = now;
+    PostMessageA(s_hwnd, WM_NULL, 0, 0);
+}
+
 // The quests the audio description watches.
 std::mutex g_qs_mx;
 std::vector<uint32_t> g_qs;              // under g_qs_mx
@@ -1888,7 +1925,11 @@ void Tick(float dt)
             if (t == kMenuType_Loading) {
                 g_postload_cooldown = kPostLoadCooldownTicks;
                 modules::worldscan::ResetSession();
-                modules::audiodesc::ResetSession();   // quest stages read afresh, silently
+                // A game loaded (not just a door): the audio description and
+                // exploration start afresh.
+                bool gameLoad = g_game_load_pending.exchange(false);
+                modules::audiodesc::OnLoadingClosed(gameLoad);
+                if (gameLoad) modules::explore::ResetSession();
                 g_pov_announced.store(-1);
                 // A held or calibration aim must not carry into the loaded
                 // save (F9 is the game's quickload), nor the old save's map
@@ -1945,6 +1986,7 @@ void Tick(float dt)
     // hotkeys::Poll) — before, F12 could switch the mod off but never on.
     hotkeys::Poll();
 
+    PumpGameThread();
     if (config::IsEnabled()) {
         modules::autowalk::Tick(dt);
         modules::guide::Tick(dt);
@@ -2945,6 +2987,8 @@ void NoteVoiceLine(size_t chars)
 }
 
 DWORD VoiceQuietAt() { return g_voice_quiet_at.load(); }
+
+void NoteGameLoad() { g_game_load_pending.store(true); }
 
 void WatchQuestStages(const std::vector<uint32_t>& ids)
 {

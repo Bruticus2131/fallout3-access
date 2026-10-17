@@ -99,7 +99,9 @@ void ResolveLocked()
         size_t j = i;
         const RawDoor* use = nullptr;
         for (; j < rd.size() && rd[j].id == rd[i].id; ++j)
-            if (rd[j].module < byte.size() && byte[rd[j].module] >= 0) use = &rd[j];
+            if (rd[j].module < byte.size() && byte[rd[j].module] >= 0 &&
+                (!use || byte[rd[j].module] > byte[use->module]))
+                use = &rd[j];                       // the last plugin in the game's load order
         i = j;
         if (!use || use->kind == kKindDeleted) continue;
         uint32_t id = map(use->id);
@@ -211,12 +213,20 @@ uint32_t RefSpace(uint32_t refid)
     return g_spaces[it->space].id;
 }
 
+// A place's name in the game's own language when the running game can say it
+// (the table's names come from the data it was built from, Polish).
+static std::string LiveName(uint32_t space, const std::string& fallback)
+{
+    std::string n = game::SpaceDisplayName(space);
+    return n.empty() ? fallback : n;
+}
+
 std::string SpaceName(uint32_t space)
 {
     std::lock_guard<std::mutex> lk(g_mutex);
     ResolveLocked();
     auto it = g_space_of.find(space);
-    return it == g_space_of.end() ? std::string() : g_spaces[it->second].name;
+    return LiveName(space, it == g_space_of.end() ? std::string() : g_spaces[it->second].name);
 }
 
 bool NextDoor(uint32_t fromSpace, const game::Vec3& from,
@@ -264,8 +274,13 @@ bool NextDoor(uint32_t fromSpace, const game::Vec3& from,
     }
     float best = (std::numeric_limits<float>::max)();
     uint32_t bestDoor = 0xFFFFFFFFu;               // last door before the target
-    // Same space and same part of it: walking there needs no door.
-    if (S == T && same(fromArea, toArea)) best = Dist(from.x, from.y, from.z, to.x, to.y, to.z);
+    // Same space and same part of it: walking there needs no door. Another
+    // part of the same space: a chain of doors only when it is not absurd - a
+    // patch of the walk graph cut off by mistake (or a target the graph
+    // cannot place) must not send the walk 40 000 units the wrong way.
+    const float direct = Dist(from.x, from.y, from.z, to.x, to.y, to.z);
+    if (S == T && same(fromArea, toArea)) best = direct;
+    else if (S == T) best = 2.0f * direct + 3000.0f;
     while (!pq.empty()) {
         auto [c, i] = pq.top();
         pq.pop();
@@ -297,7 +312,8 @@ bool NextDoor(uint32_t fromSpace, const game::Vec3& from,
     out->door  = fd.id;
     out->pos   = { fd.x, fd.y, fd.z };
     out->to_space = fd.dest != 0xFFFFFFFFu ? g_spaces[g_doors[fd.dest].space].id : 0;
-    out->to_name  = fd.dest != 0xFFFFFFFFu ? g_spaces[g_doors[fd.dest].space].name : "";
+    out->to_name  = fd.dest != 0xFFFFFFFFu ? LiveName(out->to_space, g_spaces[g_doors[fd.dest].space].name)
+                                           : "";
     out->doors = count;
     out->walk  = best;
     out->travel = fd.kind == kKindLanding ? 0 : fd.kind;

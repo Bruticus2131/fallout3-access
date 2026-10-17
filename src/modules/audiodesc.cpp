@@ -63,6 +63,8 @@ struct Entry {
     std::vector<std::string> lines;
     bool        played = false;       // once per session
     std::string tag;                  // for logs and capture file names
+    std::string alias;                // npc: the name in the game's language, when the
+                                      // mod speaks another (from the twin file)
 };
 
 std::vector<Entry> g_entries;
@@ -162,6 +164,41 @@ bool Load(const std::wstring& path)
     F3A_INFO("AudioDesc: %u description(s), %u quest(s) watched", (unsigned)g_entries.size(),
              (unsigned)g_quests.size());
     return true;
+}
+
+// The [npc] names of the twin file, in order, as aliases of ours.
+void LoadAliases(const std::wstring& path)
+{
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return;
+    std::string all;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) all.append(buf, n);
+    std::fclose(f);
+    std::vector<std::string> names;
+    size_t pos = 0;
+    while (pos < all.size()) {
+        size_t eol = all.find('\n', pos);
+        std::string line = Trim(all.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos));
+        pos = eol == std::string::npos ? all.size() : eol + 1;
+        if (line.size() < 6 || line[0] != '[' || line.back() != ']') continue;
+        std::string h = Trim(line.substr(1, line.size() - 2));
+        if (h.rfind("npc ", 0) != 0) continue;
+        std::string rest = Trim(h.substr(4));
+        size_t at = rest.rfind(" @");
+        if (at != std::string::npos) rest = Trim(rest.substr(0, at));
+        names.push_back(rest);
+    }
+    size_t i = 0, count = 0;
+    for (auto& e : g_entries) if (e.kind == Entry::Kind::Npc) ++count;
+    if (count != names.size()) {
+        F3A_INFO("AudioDesc: the twin file lists %u people, ours %u - no aliases",
+                 (unsigned)names.size(), (unsigned)count);
+        return;
+    }
+    for (auto& e : g_entries) if (e.kind == Entry::Kind::Npc) e.alias = names[i++];
+    F3A_INFO("AudioDesc: %u people also known by the game's names", (unsigned)count);
 }
 
 // ---- capture ---------------------------------------------------------------------
@@ -297,12 +334,18 @@ uint32_t RunningPrologueQuest()
     return 0;
 }
 
+// The first seconds after a game was loaded: quest readings not trusted yet.
+bool Settling()
+{
+    return g_settle_until && (LONG)(GetTickCount() - g_settle_until) < 0;
+}
+
 void CheckStages()
 {
     // Right after a load the game is still putting the save's quests in
     // place (and "Continue" shows the HUD a moment before the save is read,
     // with every quest at stage 0): nothing read then is trusted.
-    if (g_settle_until && (LONG)(GetTickCount() - g_settle_until) < 0) return;
+    if (Settling()) return;
     std::vector<Entry*> due;
     for (auto& q : g_qstate) {
         int st = 0;
@@ -357,7 +400,8 @@ void DescribeActor(uint32_t refid)
         uint32_t ctx = RunningPrologueQuest();
         Entry* best = nullptr;
         for (auto& e : g_entries) {
-            if (e.kind != Entry::Kind::Npc || e.played || e.npc != a.name) continue;
+            if (e.kind != Entry::Kind::Npc || e.played) continue;
+            if (e.npc != a.name && e.alias != a.name) continue;
             if (e.quest && e.quest != ctx) continue;
             if (!best || (e.quest && !best->quest)) best = &e;   // the age-specific one wins
         }
@@ -368,6 +412,11 @@ void DescribeActor(uint32_t refid)
 
 void CheckActors()
 {
+    // Not until the quests' state is known: a person looked at in the first
+    // seconds after a load would be marked seen with no quest to tell which
+    // age's description is theirs, and never described.
+    if (Settling()) return;
+    for (const auto& q : g_qstate) if (!q.known) return;
     uint32_t cross = game::GetCrosshairActorID();
     if (cross && cross != g_last_cross) DescribeActor(cross);
     g_last_cross = cross;
@@ -419,6 +468,9 @@ void RepeatKey()
     if (hotkeys::ShiftHeldNow()) {
         g_enabled = !g_enabled;
         if (!g_enabled) g_queue.clear();
+        // Back on: where the quests stand now is read afresh, silently - the
+        // stages passed while it was off are not said all at once.
+        if (g_enabled) for (auto& q : g_qstate) q.known = false;
         tolk::Speak(g_enabled
                         ? strings::T("Audiodeskrypcja włączona.", "Audio description on.")
                         : strings::T("Audiodeskrypcja wyłączona.", "Audio description off."),
@@ -437,13 +489,20 @@ void RepeatKey()
 
 } // namespace
 
-void ResetSession()
+void OnLoadingClosed(bool gameLoad)
 {
+    // Through a door: nothing changes - a scene that starts with the door (the
+    // vault exit) is said once the new place is up (Tick waits out the load).
+    if (!gameLoad) return;
     // A game was loaded (or started): where the quests stand is read afresh,
-    // silently, once the load has settled; nothing from before it is said.
+    // silently, once the load has settled; nothing from before it is said,
+    // and everything may be described again (an earlier save replayed).
     for (auto& q : g_qstate) { q.known = false; q.running = false; }
+    for (auto& e : g_entries) if (e.kind != Entry::Kind::Movie) e.played = false;
+    g_seen_actors.clear();
     g_queue.clear();
     g_shots.clear();
+    g_last.clear();
     g_last_cross = 0;
     g_dialog_was = false;
     g_settle_until = (GetTickCount() + kLoadSettleMs) | 1;   // 0 = no load seen yet
@@ -463,6 +522,9 @@ void Tick(float)
     if (!g_enabled || !config::Get().audio_desc || g_entries.empty()) return;
     CheckMovies();                         // films play outside gameplay too
     if (!poll::IsGameplayActive() && !menu::IsOpen(menu::Id::Race)) return;
+    // Nothing over a loading screen or a film (the "years later" cards): a
+    // scene's description waits until the scene is on screen.
+    if (menu::IsOpen(menu::Id::Loading) || game::CurrentMovie(nullptr, nullptr, nullptr)) return;
     CheckStages();
     CheckActors();
     SpeakQueued();
@@ -482,7 +544,16 @@ void Init()
     g_enabled = config::Get().audio_desc;
     g_movies  = config::Get().intro_audio_desc;
     std::wstring dir = config::DataDir();
-    if (!dir.empty()) Load(dir + (strings::Polish() ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
+    if (!dir.empty()) {
+        Load(dir + (strings::Polish() ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
+        // People are matched by the name the GAME shows. When the mod speaks
+        // another language than the game, take the game's names from the twin
+        // file (the two files list the people in the same order).
+        const std::string& game = config::Get().game_language;
+        bool gamePl = game == "pl";
+        if ((game == "pl" || game == "en") && gamePl != strings::Polish())
+            LoadAliases(dir + (gamePl ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
+    }
     hotkeys::Bind(config::Get().hotkeys.audio_desc_repeat, &RepeatKey);
     F3A_INFO("AudioDesc module ready (%s%s).", g_enabled ? "on" : "off",
              config::Get().audio_desc_capture ? ", capturing screenshots" : "");
