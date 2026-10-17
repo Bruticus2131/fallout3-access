@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 #     issues when the game loads us.
 
 project(Fallout3Access
-    VERSION 0.5.0
+    VERSION 0.5.1
     DESCRIPTION "Fallout 3 accessibility mod (screen reader integration)"
     LANGUAGES CXX
 )
@@ -78,6 +78,7 @@ set(F3A_SOURCES
     src/game_access.cpp
     src/navmesh.cpp
     src/roadnet.cpp
+    src/questobjs.cpp
     src/worlddoors.cpp
     src/modules/pipboy.cpp
     src/modules/dialog.cpp

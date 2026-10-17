@@ -112,7 +112,7 @@ void ScanHostiles() { DoScan(true);  }
 // Scanner categories (cycled with Shift+PgUp / Shift+PgDn). g_scan_full holds the
 // full unfiltered scan; g_scan_list is the current category's view.
 enum Category { Cat_All, Cat_Npc, Cat_Corpse, Cat_Item, Cat_Door, Cat_Container,
-                Cat_Location, Cat_Quest, Cat_COUNT };
+                Cat_Location, Cat_QuestObj, Cat_Quest, Cat_COUNT };
 
 const char* CatName(int c)
 {
@@ -124,6 +124,7 @@ const char* CatName(int c)
     case Cat_Door:      return strings::T("drzwi", "doors");
     case Cat_Container: return strings::T("pojemniki", "containers");
     case Cat_Location:  return strings::T("miejsca", "places");
+    case Cat_QuestObj:  return strings::T("przedmioty zadań", "quest objects");
     case Cat_Quest:     return strings::T("zadania", "quests");
     default:            return "?";
     }
@@ -284,6 +285,13 @@ std::vector<game::WorldEntity> CategoryView(int cat)
         v = game::GetNearbyLocations(20000.0f, kViewMax);
         return v;
     }
+    if (cat == Cat_QuestObj) {
+        // What a running quest waits for the player to use: the button, the
+        // terminal, the door, the item, the spot to walk into, the free seat
+        // (questobjs.dat, worked out from the quests' own scripts). A little
+        // further than the plain scan - a whole vault level.
+        return game::GetQuestObjects(config::Get().nearby_scan_radius * 3, kViewMax);
+    }
     for (const auto& e : g_scan_full) {
         if (!PassesCategory(e, cat)) continue;
         v.push_back(e);
@@ -393,7 +401,7 @@ void CategoryStep(int dir)
         int c = ((from + dir * i) % Cat_COUNT + Cat_COUNT) % Cat_COUNT;
         int n = 0;
         if (c == Cat_Quest)         n = (int)game::GetActiveQuests().size();
-        else if (c == Cat_Location) n = (int)CategoryView(c).size();
+        else if (c == Cat_Location || c == Cat_QuestObj) n = (int)CategoryView(c).size();
         else for (const auto& e : g_scan_full) if (PassesCategory(e, c)) ++n;   // all, not the view's cap
         if (n <= 0) continue;
         g_category = c;

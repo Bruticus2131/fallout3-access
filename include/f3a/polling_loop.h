@@ -243,8 +243,8 @@ bool TakeLineOfFireWarning(std::string* name);
 void  NoteVoiceLine(size_t chars);
 DWORD VoiceQuietAt();
 
-// Audio description: the quests whose stages to read on the game's thread,
-// and the last reading (false until there is one, or no such quest).
+// Audio description: the quests it watches, and a quest's stage and whether
+// it is running, read live (false when there is no such quest).
 void WatchQuestStages(const std::vector<uint32_t>& ids);
 bool QuestStage(uint32_t id, int* stage, bool* running);
 

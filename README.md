@@ -24,6 +24,9 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 - **DLCs** — Broken Steel, Point Lookout, The Pitt, Operation: Anchorage and
   Mothership Zeta: walk graphs and doors for their places, and auto-walk leads
   you to the Pitt handcart, the Duchess Gambit and the presidential metro.
+- **Quest objects** — a scanner category with what a running quest waits for:
+  the button, the terminal, the item, the spot to walk into, the free seat for
+  the G.O.A.T. — worked out from the quests' own scripts.
 - **Audio description** — the opening film in real time, and the scenes and
   people of the Vault 101 prologue, spoken in the gaps between voices.
 - **English and Polish** — the mod speaks the game's language by default
@@ -246,6 +249,7 @@ cmake --build build --config Release
   python tools/generate_walk_graph.py --esm "<FO3>/Data/ThePitt.esm" --master "<FO3>/Data/Fallout3.esm" --all-worldspaces --output-dir data/roadnet
   (likewise for Anchorage.esm, BrokenSteel.esm, PointLookout.esm)
   python tools/generate_world_doors.py --data "<FO3>/Data"
+  python tools/generate_quest_objects.py --data "<FO3>/Data"
   ```
   (`TestQAWorld.dat`, a developer test worldspace, is not shipped.)
 

@@ -16,6 +16,7 @@
 #include "f3a/player_mover.h"
 #include "f3a/roadnet.h"
 #include "f3a/worlddoors.h"
+#include "f3a/questobjs.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/hotkeys.h"
 #include "f3a/tolk_bridge.h"
@@ -2878,6 +2879,7 @@ void Init()
     if (!dir.empty()) {
         roadnet::LoadDir(dir);
         worlddoors::Load(dir + L"\\doors.dat");
+        questobjs::Load(dir + L"\\questobjs.dat");     // for the scanner's quest objects
     }
     F3A_INFO("AutoWalk module ready.");
 }

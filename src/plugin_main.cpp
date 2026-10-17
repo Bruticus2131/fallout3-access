@@ -30,6 +30,7 @@
 #include "f3a/fose_runtime.h"
 #include "f3a/roadnet.h"
 #include "f3a/worlddoors.h"
+#include "f3a/questobjs.h"
 
 namespace tolk = f3a::tolk;
 namespace cfg  = f3a::config;
@@ -231,6 +232,7 @@ void OnGameLoaded()
     // game has loaded - once, the first time a game is up.
     f3a::roadnet::Resolve();
     f3a::worlddoors::Resolve();
+    f3a::questobjs::Resolve();
 }
 
 void OnNewGame()

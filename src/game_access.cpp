@@ -12,6 +12,7 @@
 #include "f3a/strings.h"
 #include "fose/GameOSDepend.h"
 #include "f3a/polling_loop.h"
+#include "f3a/questobjs.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
+#include <unordered_map>
 
 namespace f3a::game {
 
@@ -777,6 +779,46 @@ bool IsHostileToPlayer(const void* refr)
     return tgt == (void*)rt::Player();
 }
 
+// The player's cell and, outdoors, the loaded cells around it (two squares
+// each way): exteriors are split into a grid of cells and the player's
+// parentCell holds only its own square, so a metro door one square over is
+// invisible from it. Walks the worldspace cell map (objectList non-empty =
+// loaded). Uses only FOSE-defined layouts; heavily guarded.
+namespace {
+std::vector<TESObjectCELL*> NearbyCells(TESObjectCELL* pcell)
+{
+    std::vector<TESObjectCELL*> cells{ pcell };
+    auto* ws = reinterpret_cast<UInt8*>(pcell->worldSpace);
+    auto* pcoords = reinterpret_cast<UInt8*>(pcell->coords);   // cell+0x44
+    if (!Readable(ws, 0x34) || !Readable(pcoords, 8)) return cells;
+    int px = *reinterpret_cast<int*>(pcoords + 0);
+    int py = *reinterpret_cast<int*>(pcoords + 4);
+    // TESWorldSpace::cellMap @ +0x30 (NiTPointerMap<TESObjectCELL>).
+    UInt8* map = *reinterpret_cast<UInt8**>(ws + 0x30);
+    if (!Readable(map, 0x10)) return cells;
+    UInt32 nb = *reinterpret_cast<UInt32*>(map + 0x04);     // m_numBuckets
+    UInt8** buckets = *reinterpret_cast<UInt8***>(map + 0x08);
+    if (!(nb > 0 && nb < 1000000) || !Readable(buckets, nb * sizeof(void*))) return cells;
+    for (UInt32 b = 0; b < nb && cells.size() <= 64; ++b) {
+        UInt8* entry = buckets[b];
+        for (int guard = 0; entry && guard < 8192; ++guard) {
+            if (!Readable(entry, 0x0C)) break;
+            // Entry { next@0, key@4, data@8 }
+            auto* cell = *reinterpret_cast<TESObjectCELL**>(entry + 8);
+            entry = *reinterpret_cast<UInt8**>(entry + 0);
+            if (cell == pcell || !Readable(cell, 0xB4)) continue;
+            auto* cc = reinterpret_cast<UInt8*>(cell->coords);
+            if (!Readable(cc, 8)) continue;
+            int cx = *reinterpret_cast<int*>(cc + 0);
+            int cy = *reinterpret_cast<int*>(cc + 4);
+            if (std::abs(cx - px) > 2 || std::abs(cy - py) > 2) continue;
+            cells.push_back(cell);
+        }
+    }
+    return cells;
+}
+} // namespace
+
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                                     bool actors_only, bool hostiles_only)
 {
@@ -786,14 +828,10 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     Vec3 pp = GetPlayerPosition();
     const float r2 = (float)radius * (float)radius;
 
-    TESObjectCELL* pcell = p->parentCell;
-    ScanCellRefs(pcell, pp, r2, p, actors_only, out);
+    // The player's cell and the loaded ones around it (NearbyCells).
+    for (TESObjectCELL* cell : NearbyCells(p->parentCell))
+        ScanCellRefs(cell, pp, r2, p, actors_only, out);
 
-    // Exteriors are split into a grid of cells; the player's parentCell holds
-    // only its own square, so a metro door one square over is invisible from
-    // it. Walk the worldspace cell map and also scan the loaded cells around
-    // the player (objectList non-empty = loaded). Uses only FOSE-defined
-    // layouts; heavily guarded.
     // Mark the hostiles, and drop everything else when only those were asked
     // for. Done here rather than inside the cell walk so the virtual call is
     // made once per candidate, on a list that is already distance-filtered.
@@ -819,40 +857,6 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                   out.end());
     };
 
-    auto* ws = reinterpret_cast<UInt8*>(pcell->worldSpace);
-    auto* pcoords = reinterpret_cast<UInt8*>(pcell->coords);   // cell+0x44
-    if (Readable(ws, 0x34) && Readable(pcoords, 8)) {
-        int px = *reinterpret_cast<int*>(pcoords + 0);
-        int py = *reinterpret_cast<int*>(pcoords + 4);
-        // TESWorldSpace::cellMap @ +0x30 (NiTPointerMap<TESObjectCELL>).
-        UInt8* map = *reinterpret_cast<UInt8**>(ws + 0x30);
-        if (Readable(map, 0x10)) {
-            UInt32 nb = *reinterpret_cast<UInt32*>(map + 0x04);     // m_numBuckets
-            UInt8** buckets = *reinterpret_cast<UInt8***>(map + 0x08);
-            int scannedCells = 0;
-            if (nb > 0 && nb < 1000000 && Readable(buckets, nb * sizeof(void*))) {
-                for (UInt32 b = 0; b < nb && scannedCells < 64; ++b) {
-                    UInt8* entry = buckets[b];
-                    for (int guard = 0; entry && guard < 8192; ++guard) {
-                        if (!Readable(entry, 0x0C)) break;
-                        // Entry { next@0, key@4, data@8 }
-                        auto* cell = *reinterpret_cast<TESObjectCELL**>(entry + 8);
-                        entry = *reinterpret_cast<UInt8**>(entry + 0);
-                        if (cell == pcell || !Readable(cell, 0xB4)) continue;
-                        auto* cc = reinterpret_cast<UInt8*>(cell->coords);
-                        if (!Readable(cc, 8)) continue;
-                        int cx = *reinterpret_cast<int*>(cc + 0);
-                        int cy = *reinterpret_cast<int*>(cc + 4);
-                        if (std::abs(cx - px) > 2 || std::abs(cy - py) > 2)
-                            continue;
-                        ScanCellRefs(cell, pp, r2, p, actors_only, out);
-                        ++scannedCells;
-                    }
-                }
-            }
-        }
-    }
-
     MarkHostiles();
 
     std::sort(out.begin(), out.end(),
@@ -865,6 +869,147 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
               });
     if ((int)out.size() > max_results) out.resize(max_results);
     return out;
+}
+
+std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
+{
+    std::vector<WorldEntity> out;
+    auto* p = rt::Player();
+    if (!p || !p->parentCell || !rt::g_addrs) return out;
+
+    // Where the quests stand: DataHandler::questList (+0xD4), plain reads -
+    // running (+0x3C), stage (+0x60), name (+0x34), objectives (+0x4C:
+    // objectiveId +0x04, flags +0x20: 1 displayed, 2 completed).
+    struct QState {
+        bool running = false;
+        int stage = 0;
+        std::string name;
+        std::vector<std::pair<UInt32, UInt32>> objectives;   // id, flags
+    };
+    std::unordered_map<uint32_t, QState> quests;
+    UInt8* dh = rt::DataHandlerBase();
+    if (!Readable(dh, 0xDC)) return out;
+    struct Node { UInt8* item; Node* next; };
+    Node* node = reinterpret_cast<Node*>(dh + 0xD4);
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        if (!Readable(node, 8)) break;
+        UInt8* q = node->item;
+        node = node->next;
+        if (!q || !Readable(q, 0x64)) continue;
+        QState s;
+        s.running = q[0x3C] != 0;
+        if (!s.running) continue;                   // only running quests matter
+        s.stage = q[0x60];
+        const char* nm = *reinterpret_cast<char**>(q + 0x34);
+        if (Readable(nm, 1) && *nm) s.name = GameStrToUtf8(nm);
+        Node* on = reinterpret_cast<Node*>(q + 0x4C);
+        for (int s2 = 0; on && s2 < 64; ++s2) {
+            if (!Readable(on, 8)) break;
+            UInt8* obj = on->item;
+            on = on->next;
+            if (!obj || !Readable(obj, 0x24)) continue;
+            s.objectives.push_back({ *reinterpret_cast<UInt32*>(obj + 0x04),
+                                     *reinterpret_cast<UInt32*>(obj + 0x20) });
+        }
+        quests[reinterpret_cast<TESForm*>(q)->refID] = std::move(s);
+    }
+    if (quests.empty()) return out;
+
+    auto relevant = [&](const questobjs::Entry& e, const QState** qs) {
+        auto it = quests.find(e.quest);
+        if (it == quests.end()) return false;       // not running
+        *qs = &it->second;
+        if (e.objective >= 0) {
+            for (const auto& o : it->second.objectives)
+                if (o.first == (UInt32)e.objective) return (o.second & 1) && !(o.second & 2);
+            return false;
+        }
+        return e.stage == 0 || it->second.stage < e.stage;
+    };
+
+    Vec3 pp = GetPlayerPosition();
+    const float r2 = (float)radius * (float)radius;
+    std::vector<Vec3> sitters;                      // living actors, for seats
+    std::vector<questobjs::Entry> ents;
+    std::vector<bool> isSeat;
+    for (TESObjectCELL* cell : NearbyCells(p->parentCell)) {
+        if (!Readable(cell, 0xB4)) continue;
+        struct RNode { TESObjectREFR* item; RNode* next; };
+        auto* rn = reinterpret_cast<RNode*>(&cell->objectList);
+        for (int safety = 0; rn && safety < 8192; ++safety) {
+            if (!Readable(rn, 8)) break;
+            TESObjectREFR* r = rn->item;
+            rn = rn->next;
+            if (!r || r == (void*)p || !Readable(r, 0x40)) continue;
+            if (r->flags & 0x820) continue;         // disabled / deleted
+            TESForm* base = r->baseForm;
+            if (!Readable(base, 0x08)) continue;
+            float dx = r->posX - pp.x, dy = r->posY - pp.y;
+            WorldEntity::Kind kind = KindOf(base->typeID);
+            if (kind == WorldEntity::Kind::Actor) {
+                if (!IsKnownDead(r->refID) && dx * dx + dy * dy <= r2 * 4.0f)
+                    sitters.push_back({ r->posX, r->posY, r->posZ });
+                continue;
+            }
+            if (!(dx * dx + dy * dy <= r2)) continue;   // NaN fails too
+            if (!questobjs::Lookup(r->refID, &ents)) continue;
+            const questobjs::Entry* use = nullptr;
+            const QState* qs = nullptr;
+            for (const auto& e : ents)
+                if (relevant(e, &qs)) { use = &e; break; }
+            if (!use || !qs) continue;
+            std::string label;
+            if (const char* nm = BaseFormName(base)) label = GameStrToUtf8(nm);
+            if (label.empty()) {
+                label = (use->kind == questobjs::kTrigger || use->kind == questobjs::kMarker)
+                            ? strings::T("Miejsce zadania", "Quest spot")
+                            : use->kind == questobjs::kSeat ? strings::T("Miejsce do siedzenia", "Seat")
+                                                            : strings::T("Obiekt zadania", "Quest object");
+            }
+            if (use->kind == questobjs::kSeat) label += strings::T(", wolne miejsce", ", free seat");
+            if (!qs->name.empty()) label += ", " + qs->name;
+            WorldEntity e;
+            e.kind = kind;
+            e.name = std::move(label);
+            e.position = { r->posX, r->posY, r->posZ };
+            e.form_id = r->refID;
+            e.refr = r;
+            e.form_type = (uint8_t)base->typeID;
+            if (kind == WorldEntity::Kind::Door) {
+                e.load_door  = ReadIsLoadDoor(r);
+                e.open_state = ReadDoorOpenState(r);
+            }
+            out.push_back(std::move(e));
+            isSeat.push_back(use->kind == questobjs::kSeat);
+        }
+    }
+    // A seat someone is sitting at is not free: each actor takes the seat
+    // nearest to them, if one is within reach of sitting at it.
+    std::vector<bool> taken(out.size(), false);
+    for (const auto& a : sitters) {
+        int best = -1;
+        float bd = 90.0f * 90.0f;
+        for (size_t i = 0; i < out.size(); ++i) {
+            if (!isSeat[i]) continue;
+            float dx = out[i].position.x - a.x, dy = out[i].position.y - a.y;
+            float dz = out[i].position.z - a.z;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < bd && std::fabs(dz) < 120.0f) { bd = d2; best = (int)i; }
+        }
+        if (best >= 0) taken[best] = true;
+    }
+    std::vector<WorldEntity> kept;
+    for (size_t i = 0; i < out.size(); ++i)
+        if (!taken[i]) kept.push_back(std::move(out[i]));
+    std::sort(kept.begin(), kept.end(), [&pp](const WorldEntity& a, const WorldEntity& b) {
+        float da = (a.position.x - pp.x) * (a.position.x - pp.x) +
+                   (a.position.y - pp.y) * (a.position.y - pp.y);
+        float db = (b.position.x - pp.x) * (b.position.x - pp.x) +
+                   (b.position.y - pp.y) * (b.position.y - pp.y);
+        return da < db;
+    });
+    if ((int)kept.size() > max_results) kept.resize(max_results);
+    return kept;
 }
 
 namespace {
@@ -988,6 +1133,42 @@ std::vector<std::string> LoadedPlugins()
         out.emplace_back(name, len);
     }
     return out;
+}
+
+bool ReadQuestState(uint32_t questId, int* stage, bool* running)
+{
+    if (!questId || !rt::g_addrs) return false;
+    static std::mutex s_mx;
+    static std::unordered_map<uint32_t, UInt8*> s_found;
+    auto valid = [questId](UInt8* q) {
+        auto* f = reinterpret_cast<TESForm*>(q);
+        return Readable(q, 0x64) && f->typeID == 0x47 && f->refID == questId;   // kFormType_Quest
+    };
+    UInt8* q = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(s_mx);
+        auto it = s_found.find(questId);
+        if (it != s_found.end()) q = it->second;
+    }
+    if (!q || !valid(q)) {
+        q = nullptr;
+        UInt8* dh = rt::DataHandlerBase();
+        if (!Readable(dh, 0xDC)) return false;
+        struct Node { UInt8* item; Node* next; };
+        Node* node = reinterpret_cast<Node*>(dh + 0xD4);           // questList
+        for (int safety = 0; node && safety < 8192; ++safety) {
+            if (!Readable(node, 8)) break;
+            UInt8* item = node->item;
+            node = node->next;
+            if (item && valid(item)) { q = item; break; }
+        }
+        if (!q) return false;
+        std::lock_guard<std::mutex> lk(s_mx);
+        s_found[questId] = q;
+    }
+    if (stage) *stage = q[0x60];
+    if (running) *running = q[0x3C] != 0;
+    return true;
 }
 
 bool RefIsActor(const void* refr)

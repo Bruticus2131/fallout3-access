@@ -469,10 +469,9 @@ std::vector<HudSaid> g_hud_said;
 // second.
 std::atomic<DWORD> g_voice_quiet_at{ 0 };
 
-// Quest stages for audio description, read on the game's thread.
+// The quests the audio description watches.
 std::mutex g_qs_mx;
-struct QuestSample { uint32_t id; int stage; bool running; bool have; };
-std::vector<QuestSample> g_qs;           // under g_qs_mx
+std::vector<uint32_t> g_qs;              // under g_qs_mx
 constexpr DWORD kHudRepeatAfterMs = 5 * 60 * 1000;   // five minutes
 
 bool HudAlreadySaid(const std::string& line)
@@ -1402,21 +1401,6 @@ void PollXpChange()
 void MainThreadWork()
 {
     game::NoteMainThread();
-    // Quest stages the audio description watches, four times a second.
-    {
-        static DWORD s_qs_at = 0;
-        DWORD now = GetTickCount();
-        if (now - s_qs_at >= 250) {
-            s_qs_at = now;
-            std::lock_guard<std::mutex> lk(g_qs_mx);
-            for (auto& q : g_qs) {
-                bool run = false;
-                int st = game::GetQuestStage(q.id, &run);
-                q.have = st >= 0;
-                if (q.have) { q.stage = st; q.running = run; }
-            }
-        }
-    }
     // Who is fighting the player: a virtual call per actor, so it is worked
     // out here and ScanNearby (poll thread) reads the result.
     {
@@ -2965,20 +2949,16 @@ DWORD VoiceQuietAt() { return g_voice_quiet_at.load(); }
 void WatchQuestStages(const std::vector<uint32_t>& ids)
 {
     std::lock_guard<std::mutex> lk(g_qs_mx);
-    g_qs.clear();
-    for (uint32_t id : ids) g_qs.push_back({ id, 0, false, false });
+    g_qs = ids;
 }
 
 bool QuestStage(uint32_t id, int* stage, bool* running)
 {
-    std::lock_guard<std::mutex> lk(g_qs_mx);
-    for (const auto& q : g_qs) {
-        if (q.id != id || !q.have) continue;
-        if (stage) *stage = q.stage;
-        if (running) *running = q.running;
-        return true;
-    }
-    return false;
+    // Read live, as plain data (game::ReadQuestState): sampling on the game's
+    // thread went quiet in the birth scene - nothing sends the game a window
+    // message while the controls are taken away - and the descriptions came
+    // half a minute late, over the father's first words.
+    return game::ReadQuestState(id, stage, running);
 }
 
 bool TakeLineOfFireWarning(std::string* name)

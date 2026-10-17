@@ -125,6 +125,12 @@ bool IsKnownDead(uint32_t refid);
 // 0x0055C780) and whether it is running (+0x3C). -1 when there is no such
 // quest. MAIN THREAD (looks the form up through the engine).
 int GetQuestStage(uint32_t questId, bool* running = nullptr);
+// The same, as plain data reads, from ANY thread: the quest is found once in
+// DataHandler's quest list (form id at +0x0C) and its fields are read
+// directly. For watching stages from the polling thread - the game's own
+// thread runs our work only when Windows sends it a message, and in a scene
+// with the controls taken away (the birth) nothing does for half a minute.
+bool ReadQuestState(uint32_t questId, int* stage, bool* running);
 // Is this reference an actor (NPC or creature)? A plain data read.
 bool RefIsActor(const void* refr);
 // A placed creature (radroach, mole rat...) rather than a person.
@@ -205,6 +211,13 @@ bool AdvanceTrackedQuestStage();
 // active quests and pick which to navigate to — instead of the game's
 // auto-selected "latest" objective (which DLCs hijack).
 std::vector<WorldEntity> GetActiveQuests();
+
+// Quest objects near the player (questobjs.dat): buttons, terminals, doors,
+// items, trigger spots and free seats that still move a RUNNING quest on - the
+// stage their script sets not reached yet, or the objective they are the
+// target of on the list and not done. Named after the thing and the quest.
+// Seats an actor is sitting at are left out. Nearest first. Plain data reads.
+std::vector<WorldEntity> GetQuestObjects(int radius, int max_results);
 
 // ---- Bearings ----
 
