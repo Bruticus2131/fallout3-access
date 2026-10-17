@@ -64,9 +64,10 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 1. **Install Fallout 3.**
 2. **Downgrade the game to 1.7.0.3 (Steam only).** The current Steam build (1.7.0.4, "Anniversary" update) is not supported by FOSE. Download the **[Fallout Anniversary Patcher](https://www.nexusmods.com/fallout3/mods/24913)** from Nexus Mods (free account required), extract its contents into your Fallout 3 folder (where `Fallout3.exe` is) and run `Patcher.exe`. Wait until it reports success, then press Enter.
 3. **Install FOSE.** Download *FOSE v1.3 beta 2* from <https://fose.silverlock.org>, open the archive and copy `fose_loader.exe` and all `fose_*.dll` files into the Fallout 3 folder, next to `Fallout3.exe`.
-4. **Install this mod.** Download `fallout3-access.zip` from the [Releases page](../../releases) and extract it **into the Fallout 3 folder**. The archive already has the right layout:
+4. **Install this mod.** The easiest way is the installer, `fallout3-access-setup-<version>.exe` from the [Releases page](../../releases). To install by hand instead, download `fallout3-access-v<version>.zip` from the same page and extract it **into the Fallout 3 folder**. The archive already has the right layout:
    - `Tolk.dll`, `nvdaControllerClient32.dll`, `dolapi32.dll`, `SAAPI32.dll` → land next to `Fallout3.exe`,
-   - `Data\FOSE\Plugins\fallout3_access.dll` and `Fallout3Access.ini` → the plugin itself.
+   - `Data\FOSE\Plugins\fallout3_access.dll` and `Fallout3Access.ini` → the plugin itself,
+   - `Data\FOSE\Plugins\Fallout3Access\` → the walk graphs and the door table (`*.dat`, ready made for Fallout 3 and all five DLCs) and the audio descriptions. **Copy all of it**: without this folder, long walks and walks to other places stay off. Nothing has to be generated and no Python is needed.
 5. **Start the game with `fose_loader.exe`** (not `Fallout3.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
 
 ## Keyboard reference
@@ -232,8 +233,9 @@ cmake --build build --config Release
 - The FOSE source tree is **not** bundled (licensing); download it from <https://fose.silverlock.org> and point `FOSE_SDK_PATH` at it (the folder containing `common/` and `fose/`).
 - Tolk headers/binaries are bundled under `third_party/tolk/`.
 - The walk graphs and the door table (`data/roadnet/*.dat`) are generated from
-  the game's own data files and are not kept in git; they ship in the release
-  archive. To build them yourself (Python 3 with numpy and scipy):
+  the game's own data files and are not kept in git (35 MB); they ship ready
+  made in the release archive and the installer, so **players never need
+  this**. Only to rebuild them from source (Python 3 with numpy and scipy):
 
   ```
   python tools/generate_walk_graph.py --esm "<FO3>/Data/Fallout3.esm" --all-worldspaces --output-dir data/roadnet
