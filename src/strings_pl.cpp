@@ -35,8 +35,6 @@ constexpr std::array<Entry, 64> kTable = { {
                                 "List empty." },
     { Key::Loading,             "Wczytywanie.",
                                 "Loading." },
-    { Key::LoadingDone,         "Wczytane.",
-                                "Loaded." },
     { Key::LowHealth,           "Uwaga, niskie zdrowie.",
                                 "Warning, low health." },
     { Key::Crippled,            "Okaleczona część: %s.",
@@ -52,7 +50,7 @@ constexpr std::array<Entry, 64> kTable = { {
     { Key::CompassFmt,          "Zwrócony na %s.",
                                 "Facing %s." },
     { Key::PlayerStatusFmt,     "Zdrowie %s, akcje %s, promieniowanie %s, capsy %s.",
-                                "Health %s, action %s, radiation %s, caps %s." },
+                                "Health %s, Action Points %s, radiation %s, caps %s." },
     { Key::NoNearbyEntities,    "Nikogo i niczego w pobliżu.",
                                 "Nothing nearby." },
     { Key::NearbyHostileFmt,    "Wróg: %s, %s, %s.",
@@ -70,7 +68,7 @@ constexpr std::array<Entry, 64> kTable = { {
     { Key::BarterLossWarn,      "Uwaga, tracisz %s capsli.",
                                 "Warning, losing %s caps." },
     { Key::SpecialBookIntroFmt, "Książka SPECIAL. %s. Enter czyta wszystko.",
-                                "SPECIAL book. %s. Enter reads everything." },
+                                "You're SPECIAL! book. %s. Enter reads everything." },
     { Key::SpecialStrength,     "Siła", "Strength" },
     { Key::SpecialPerception,   "Percepcja", "Perception" },
     { Key::SpecialEndurance,    "Wytrzymałość", "Endurance" },
@@ -103,9 +101,9 @@ constexpr std::array<Entry, 64> kTable = { {
     { Key::LockpickSweetSpot,   "Trafiony punkt.",
                                 "Sweet spot found." },
     { Key::LockpickBrokenSoon,  "Wytrych zaraz pęknie.",
-                                "Pick is about to break." },
+                                "Bobby pin is about to break." },
     { Key::LockpickBroken,      "Wytrych pękł.",
-                                "Pick broken." },
+                                "Bobby pin broke." },
     { Key::LockpickUnlocked,    "Otwarte.",
                                 "Unlocked." },
     { Key::VatsTargetFmt,       "%s, %s procent, koszt %s.",
@@ -142,6 +140,8 @@ constexpr std::array<Entry, 64> kTable = { {
                                 "%s of %s" },
     { Key::LootClosed,          "Zamknięto listę.",
                                 "List closed." },
+    { Key::LootTakenFmt,        "Zabrano: %s.",
+                                "Taken: %s." },
 }};
 
 const Entry* Find(Key k)
@@ -150,12 +150,14 @@ const Entry* Find(Key k)
     return nullptr;
 }
 
-bool IsPolish()
+bool IsPolish() { return Polish(); }
+
+} // namespace
+
+bool Polish()
 {
     return config::Get().language == "pl";
 }
-
-} // namespace
 
 const char* Fmt(Key k)
 {

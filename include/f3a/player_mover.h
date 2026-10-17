@@ -51,6 +51,11 @@ void SetGoal(float x, float y, bool run);
 // speed just because the look-ahead had already rounded it (the FNV mod's rule).
 void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY);
 
+// A point to stop ON, not walk through: at walking pace, easing in over the
+// last stretch, holding still once within `stopRadius`. For a spot the game
+// checks with a small trigger box (where to stand for a quest photo).
+void SetGoalPrecise(float x, float y, float stopRadius);
+
 // Stop driving: the engine goes back to processing the player's own input.
 // Safe from any thread — the stop itself is performed by the hook on the game's
 // own thread, on the next frame.
@@ -71,6 +76,10 @@ float CurrentHeadingDeg();
 // the game's thread; the call returns at once. `refid` guards against a
 // stale pointer. Safe from any thread.
 void RequestEnginePath(const void* refr, uint32_t refid, float radius);
+// The same, to a bare POINT in the player's own cell/worldspace (the engine's
+// position variant of SetPathfindingGoal) — for places with no reference: a
+// road on the way somewhere far, a spot to stand on. Safe from any thread.
+void RequestEnginePathToPoint(float x, float y, float z, float radius);
 // Drop a request (the walk was stopped). Safe from any thread.
 void CancelEnginePath();
 // 0 = nothing asked, 1 = working, 2 = route ready, 3 = the game found none.

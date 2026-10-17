@@ -57,6 +57,10 @@ std::atomic<int>   g_current_prio{ -1 };
 // while that utterance is still playing; we use this (with IsSpeaking) to clear
 // a stale priority once the reader goes idle. Touched only under g_mutex.
 std::chrono::steady_clock::time_point g_last_speak_at{};
+// When the last utterance is likely to have finished: NVDA's controller cannot
+// say whether it is still talking (Tolk_IsSpeaking is false throughout), so
+// the length of what was sent gives an estimate. Touched only under g_mutex.
+std::chrono::steady_clock::time_point g_speech_ends_at{};
 std::wstring       g_reader_name;   // cached detected reader
 std::string        g_reader_name_a;
 std::string        g_last_text;     // most recent utterance (for RepeatLast)
@@ -261,6 +265,12 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
 
     g_current_prio.store(static_cast<int>(prio));
     g_last_speak_at = now;
+    {
+        // ~45 ms a character at a screen reader's usual brisk rate; queued
+        // lines follow the one before them.
+        auto start = (!interrupt && g_speech_ends_at > now) ? g_speech_ends_at : now;
+        g_speech_ends_at = start + std::chrono::milliseconds(300 + 45 * (long long)text.size());
+    }
 
     std::wstring w = Utf8ToWide(text);
 
@@ -278,10 +288,18 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
     }
 }
 
+bool IsSpeaking()
+{
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (g_tolk.IsSpeaking && g_tolk.IsSpeaking()) return true;
+    return std::chrono::steady_clock::now() < g_speech_ends_at;
+}
+
 void Silence()
 {
     std::lock_guard<std::mutex> lk(g_mutex);
     g_current_prio.store(-1);
+    g_speech_ends_at = {};
     if (g_tolk.Silence) { g_tolk.Silence(); return; }
     if (g_sapi)         { g_sapi->Speak(nullptr, SPF_PURGEBEFORESPEAK, nullptr); }
 }

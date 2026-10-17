@@ -26,6 +26,8 @@ void InitAll()
     lootmenu::Init();
     levelup::Init();
     if (c.enable_worldscan) sonar::Init();
+    if (c.enable_worldscan) explore::Init();
+    audiodesc::Init();
     F3A_INFO("Modules initialized.");
 }
 
@@ -50,6 +52,8 @@ void ShutdownAll()
     lootmenu::Shutdown();
     levelup::Shutdown();
     sonar::Shutdown();
+    explore::Shutdown();
+    audiodesc::Shutdown();
 }
 
 } // namespace f3a::modules

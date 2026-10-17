@@ -1,0 +1,299 @@
+# Fallout 3 Access audio description - descriptions of scenes and characters (English).
+#
+# [stage <quest id> <stage>]   - when the quest reaches that stage
+# [npc <name>]                 - on the first look at that character
+# [npc <name> @<quest id>]     - ...but only while that quest is running
+# [movie <file> <second>]      - at that second of a game film (intro, title cards)
+# Each line is spoken on its own, in a pause between spoken lines.
+#
+# Prologue (Vault 101). Sources: data from Fallout3.esm (stages and scripts of
+# quests CG00-CG04, room furnishings, character looks: race, hairstyle, hair
+# color, clothing) and the known course of the prologue. DRAFT - to be checked
+# against in-game screenshots (AudioDescCapture = 1).
+#
+# Quests: CG00 = 0001F388 (birth), CG01 = 00014E83 (Baby Steps),
+# CG02 = 00014E84 (Growing Up Fast), CG03 = 00014E85 (Future
+# Imperfect), CG04 = 00014E86 (Escape!).
+
+# ---------------------------------------------------------------- movies
+# [movie <file> <second>] - at that second of the film, live. Times taken
+# from frames of Data\Video\Fallout INTRO Vsk.bik (243.5 s): song until
+# 1:39, titles until 1:54, then narration; descriptions in its pauses (from
+# the soundtrack's loudness) or at the very start of a new shot.
+
+[movie fallout intro vsk.bik 1]
+Intro audio description.
+
+[movie fallout intro vsk.bik 4]
+Darkness. The vacuum tubes of an old radio slowly glow yellow - a pre-war song plays from the speaker.
+
+[movie fallout intro vsk.bik 15]
+The camera pulls back through the metal speaker grille.
+
+[movie fallout intro vsk.bik 20]
+It is a Radiation King radio: a station dial and a row of white keys.
+
+[movie fallout intro vsk.bik 28]
+The camera rises. On the radio stands a hula dancer figurine in a green grass skirt.
+
+[movie fallout intro vsk.bik 38]
+Beside it, a steering wheel and the driver's seat - the radio is built into the dashboard of an old bus.
+
+[movie fallout intro vsk.bik 45]
+On a green quilted seat lie a small metal box and a bottle, further on a teddy bear and a small red toy truck.
+
+[movie fallout intro vsk.bik 54]
+The windows are shattered. Old posters hang above them: a military one reading "Enlist Today!", and a vault ad with Vault Boy.
+
+[movie fallout intro vsk.bik 63]
+The camera glides through the whole bus: rusted handrails, dangling straps, trash on the floor and a Vault-Tec ad promising a better future underground.
+
+[movie fallout intro vsk.bik 72]
+The camera slides out through the smashed rear window. The bus is a wreck wedged into rubble.
+
+[movie fallout intro vsk.bik 77]
+All around, a ruined city: burnt-out, roofless buildings, heaps of rubble, bent streetlights. In the distance, under a heavy greenish-gray sky, rises the obelisk of the Washington Monument.
+
+[movie fallout intro vsk.bik 89]
+From the left, a soldier in heavy power armor steps into frame with a huge weapon in his hands, and stops right in front of the camera.
+
+[movie fallout intro vsk.bik 100]
+The screen goes dark. Text on black: Bethesda Game Studios presents.
+
+[movie fallout intro vsk.bik 107]
+Title: Fallout 3.
+
+[movie fallout intro vsk.bik 127.3]
+A rocky landscape; a skull and scattered bones on the stones.
+
+[movie fallout intro vsk.bik 132]
+A cemetery: rows of white headstones under trees.
+
+[movie fallout intro vsk.bik 151.5]
+A suburb: a white picket fence, a bicycle, a milk bottle. An atomic blast flares above the houses.
+
+[movie fallout intro vsk.bik 161.5]
+City ruins. A huge stone head of a statue lies in the rubble.
+
+[movie fallout intro vsk.bik 168.5]
+A crushed wreck among twisted metal.
+
+[movie fallout intro vsk.bik 174.6]
+From under a collapsed overpass, a ruined street; far off, a lone figure walks.
+
+[movie fallout intro vsk.bik 186.3]
+A wrecked playground with swings in front of a ruined building.
+
+[movie fallout intro vsk.bik 190.6]
+A burnt house, and beside it a big, faded billboard of smiling people.
+
+[movie fallout intro vsk.bik 207]
+Empty hills, dead trees, rain.
+
+[movie fallout intro vsk.bik 213]
+In the darkness, a round steel door shaped like a cog, with the number 101.
+
+[movie fallout intro vsk.bik 229.2]
+The camera pulls away: the door sits deep inside a rocky cave.
+
+[movie fallout intro vsk.bik 242]
+The picture fades. End of the intro.
+
+[movie 1 year later.bik 0.5]
+Text on white: One year later.
+
+[movie 9 years later.bik 0.5]
+Text on white: Nine years later.
+
+[movie 6 years later.bik 0.5]
+Text on white: Six years later.
+
+[movie 3 years later.bik 0.5]
+Text on white: Three years later.
+
+[movie 2 weeks later.bik 0.5]
+Text on black: Two weeks later.
+
+# ---------------------------------------------------------------- birth
+[stage 0001F388 8]
+An image emerges from a white blur. You see through a newborn's eyes: a harsh surgical lamp shines above you.
+Around you, a hospital room: anesthesia machines, an IV stand, an instrument cart, rows of consoles and computer cabinets.
+
+[stage 0001F388 10]
+A man in doctor's clothes and a surgical mask leans over you - your father, James. Beside him stands a woman doctor, Dr. Li.
+Your mom, Catherine, lies in the bed, exhausted from giving birth.
+
+[stage 0001F388 42]
+By the bed stands a gene projector - a machine with a screen that will show what you will look like as an adult.
+
+[stage 0001F388 85]
+Chaos breaks out in the room. The machines sound alarms, and Dad rushes to save Mom.
+
+[stage 0001F388 90]
+A blinding white floods everything.
+
+# ---------------------------------------------------------------- Baby Steps
+[stage 00014E83 5]
+You are one year old. You stand in a big wooden playpen in a nursery in Vault 101 - the walls are metal, like everywhere in the vault.
+Around you: toys, a small rug, a crib with a mobile, a couch and a small table. Dad crouches in the playpen and holds out his arms to you.
+
+[npc Dad @00014E83]
+Dad: a middle-aged man with short, wavy, dark hair, in a white lab coat, with a Pip-Boy on his forearm. The game has made his face resemble yours.
+
+[stage 00014E83 18]
+Dad leaves the room and closes the door behind him.
+
+[stage 00014E83 72]
+The door opens. Dad comes back and looks around, smiling.
+
+[stage 00014E83 73]
+Dad walks over to the small table with a framed quote on it.
+
+[stage 00014E83 90]
+The picture dissolves into white again. Years go by.
+
+# ---------------------------------------------------------------- Growing Up Fast
+[stage 00014E84 5]
+You are ten years old. You stand in the vault's diner, decorated for your birthday: colorful balloons, a birthday banner, booths at the tables and a jukebox.
+Your neighbors from the vault stand around you, smiling at you.
+
+[stage 00014E84 7]
+The Overseer - the leader of the vault - pushes his way to the front.
+
+[stage 00014E84 8]
+The Overseer hands you a Pip-Boy 3000 - a computer worn on the forearm, with a small screen.
+
+[stage 00014E84 15]
+Andy, the vault's robot, hovers over to the cake and raises its blade.
+
+[stage 00014E84 16]
+All that is left of the cake is pieces scattered across the counter.
+
+[stage 00014E84 35]
+An intercom on the diner wall starts beeping. Dad walks over and answers it.
+
+[stage 00014E84 44]
+Dad hands you a BB gun - your surprise present.
+
+[stage 00014E84 50]
+You are at the shooting range on the reactor level. In front of you, behind a railing, stand three round targets on metal posts.
+
+[stage 00014E84 55]
+A Radroach crawls out of a corner - a huge, reddish-brown cockroach almost as long as your forearm, its antennae twitching.
+
+[stage 00014E84 90]
+You stand next to Dad. Jonas raises a camera.
+
+[stage 00014E84 98]
+A camera flash. The picture turns white, and more years go by.
+
+[npc Overseer @00014E84]
+Overseer: an older man with Hispanic features, close-cropped gray hair and a stern face, in a blue vault jumpsuit.
+
+[npc Amata @00014E84]
+Amata, your best friend and the Overseer's daughter: a ten-year-old girl with Hispanic features, dark hair and hazel eyes, in a child's vault jumpsuit and a party hat.
+
+[npc Butch @00014E84]
+Butch: a boy your age and the school bully - fair-skinned, with curly dark blond hair, in a child's vault jumpsuit.
+
+[npc Paul Hannon @00014E84]
+Paul Hannon: a Black boy with short black hair, in a party hat.
+
+[npc Wally Mack @00014E84]
+Wally Mack: a boy with short dark hair, a friend of Butch's.
+
+[npc Old Lady Palmer @00014E84]
+Old Lady Palmer: a very old, slight woman with thin gray hair, in a birthday hat.
+
+[npc Stanley @00014E84]
+Stanley: the vault's elderly mechanic, gray hair combed back, work overalls and a party hat.
+
+[npc Beatrice @00014E84]
+Beatrice: an older woman with Asian features, neatly styled dark hair, in a vault jumpsuit.
+
+[npc Andy @00014E84]
+Andy: a Mister Handy helper robot - a round metal body hovering above the floor on a small thruster flame, three eyes on stalks and three arms ending in tools.
+
+[npc Jonas @00014E84]
+Jonas, Dad's assistant: a young Black man in glasses, with short black hair, in a white lab coat.
+
+[npc Dad @00014E84]
+Dad: the first gray streaks show in his hair; he wears a white lab coat and a Pip-Boy.
+
+[npc Officer Gomez @00014E84]
+Officer Gomez: a vault guard with Hispanic features, in a security jumpsuit with a vest, a baton at his belt.
+
+[npc Officer Kendall @00014E84]
+Officer Kendall: a vault guard with a shaved head, in a security jumpsuit with a vest.
+
+# ---------------------------------------------------------------- Future Imperfect
+[stage 00014E85 5]
+You are sixteen. You are in Dad's office in the vault clinic: a desk with a terminal, a lit X-ray viewer, a test-tube rack and a chemistry set.
+
+[npc Dad @00014E85]
+Dad: grayer now, his face more tired; still in a white coat.
+
+[stage 00014E85 20]
+In the corridor, Butch and his two buddies surround Amata and taunt her.
+
+[npc Butch @00014E85]
+Butch: sixteen, leader of the Tunnel Snakes gang - the gang's leather jacket with a snake, hair swept up high like a 1950s rock and roller.
+
+[npc Wally Mack @00014E85]
+Wally Mack: a teenager with close-cropped dark hair, in a Tunnel Snakes jacket.
+
+[npc Paul Hannon @00014E85]
+Paul Hannon: a Black teenager with his hair swept up into a high pompadour, in a Tunnel Snakes jacket.
+
+[npc Amata @00014E85]
+Amata: sixteen, dark hair pinned back, hazel eyes, a vault jumpsuit.
+
+[npc Mr. Brotch @00014E85]
+Mr. Brotch, the teacher: a middle-aged Black man with close-cropped hair, in a vault jumpsuit.
+
+[stage 00014E85 50]
+You sit down at a school desk. Mr. Brotch stands in front of the class, next to a flag and a projector.
+
+[stage 00014E85 60]
+The projector shows the exam slides on the wall.
+
+[stage 00014E85 90]
+The picture turns white again.
+
+# ---------------------------------------------------------------- Escape!
+[stage 00014E86 2]
+You are nineteen. You lie in bed in your room in the vault, and someone is shaking you - it's Amata. An alarm sounds in the distance.
+
+[npc Amata @00014E86]
+Amata: nineteen, dark hair pinned back, in a vault jumpsuit; she is frightened and out of breath.
+
+[stage 00014E86 12]
+In the corridor outside the door, a vault guard is fighting Radroaches.
+
+[stage 00014E86 18]
+In the DeLorias' quarters, Butch's mother cowers against the wall as Radroaches scurry around her.
+
+[npc Ellen DeLoria @00014E86]
+Ellen DeLoria, Butch's mother: a middle-aged woman with brown hair pinned up in a bun, in a vault jumpsuit.
+
+[npc Butch @00014E86]
+Butch: in his Tunnel Snakes jacket, terrified and close to tears.
+
+[stage 00014E86 36]
+In the security office, Amata stands before the Overseer, and a guard is about to strike her.
+
+[npc Overseer @00014E86]
+Overseer: gone almost completely gray, in a vault jumpsuit, his face tight with anger.
+
+[npc Jonas @00014E86]
+Jonas lies lifeless on the floor.
+
+[stage 00014E86 120]
+You are in a rocky cave at the vault entrance. In front of you is a huge, round, cog-shaped door with the number 101 painted on it.
+
+[stage 00014E86 144]
+A mechanical arm pulls the enormous door out of its opening and rolls it aside with a deafening screech of metal. Behind it, a dark rock tunnel leads outside.
+
+[stage 00014E86 150]
+You step out of the cave. Harsh sunlight blinds you - for the first time in your life you see the sky.
+As your eyes adjust, you see the wasteland: dry brown hills, twisted dead trees, the ruins of a small town below, and far on the horizon, ruined Washington with the spire of the Washington Monument.

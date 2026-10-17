@@ -1,0 +1,299 @@
+# Audiodeskrypcja Fallout 3 Access - opisy scen i postaci (polski).
+#
+# [stage <id zadania> <etap>]  - gdy zadanie dojdzie do tego etapu
+# [npc <imię>]                 - przy pierwszym spojrzeniu na tę postać
+# [npc <imię> @<id zadania>]   - ...ale tylko w trakcie tego zadania
+# [movie <plik> <sekunda>]     - w tej sekundzie filmu gry (intro, plansze)
+# Każda linia jest mówiona osobno, w przerwie między kwestiami.
+#
+# Prolog (Krypta 101). Źródła: dane z Fallout3.esm (etapy i skrypty zadań
+# CG00-CG04, wyposażenie pomieszczeń, wygląd postaci: rasa, fryzura, kolor
+# włosów, ubranie) i znany przebieg prologu. WERSJA ROBOCZA - do sprawdzenia
+# na zrzutach ekranu z gry (AudioDescCapture = 1).
+#
+# Zadania: CG00 = 0001F388 (narodziny), CG01 = 00014E83 (Kroki dziecka),
+# CG02 = 00014E84 (Szybkie dorastanie), CG03 = 00014E85 (Niedoskonała
+# przyszłość), CG04 = 00014E86 (Ucieczka!).
+
+# ---------------------------------------------------------------- filmy
+# [movie <plik> <sekunda>] - w tej sekundzie filmu, na żywo. Czasy wzięte
+# z klatek pliku Data\Video\Fallout INTRO Vsk.bik (243,5 s): piosenka do
+# 1:39, napisy do 1:54, potem narracja; opisy w jej przerwach (analiza
+# głośności ścieżki dźwiękowej) albo na samym początku nowego obrazu.
+
+[movie fallout intro vsk.bik 1]
+Audiodeskrypcja intra.
+
+[movie fallout intro vsk.bik 4]
+Ciemność. Powoli rozżarzają się na żółto lampy elektronowe starego radia - z głośnika płynie przedwojenna piosenka.
+
+[movie fallout intro vsk.bik 15]
+Kamera cofa się przez metalową siatkę głośnika.
+
+[movie fallout intro vsk.bik 20]
+To radio marki Radiation King: skala ze stacjami i rząd białych klawiszy.
+
+[movie fallout intro vsk.bik 28]
+Kamera unosi się. Na radiu stoi figurka tancerki hula w zielonej spódniczce z trawy.
+
+[movie fallout intro vsk.bik 38]
+Obok kierownica i fotel kierowcy - radio jest wmontowane w deskę rozdzielczą starego autobusu.
+
+[movie fallout intro vsk.bik 45]
+Na zielonym, pikowanym siedzeniu leży metalowa skrzyneczka i butelka, dalej pluszowy miś i mała czerwona ciężarówka-zabawka.
+
+[movie fallout intro vsk.bik 54]
+Szyby są potłuczone. Nad oknami wiszą stare plakaty: wojskowy, z napisem "Zaciągnij się dziś!", i reklama krypt z Vault Boyem.
+
+[movie fallout intro vsk.bik 63]
+Kamera sunie przez cały autobus: przerdzewiałe poręcze, zwisające uchwyty, śmieci na podłodze i reklama Vault-Tec obiecująca lepszą przyszłość pod ziemią.
+
+[movie fallout intro vsk.bik 72]
+Kamera wysuwa się przez wybitą tylną szybę. Autobus to wrak wbity w gruzowisko.
+
+[movie fallout intro vsk.bik 77]
+Wokół zrujnowane miasto: wypalone kamienice bez dachów, sterty gruzu, powyginane latarnie. W oddali, pod ciężkim, zielonkawoszarym niebem, sterczy obelisk Pomnika Waszyngtona.
+
+[movie fallout intro vsk.bik 89]
+Z lewej strony w kadr wchodzi żołnierz w ciężkim pancerzu wspomaganym, z wielką bronią w rękach, i zatrzymuje się tuż przed kamerą.
+
+[movie fallout intro vsk.bik 100]
+Ekran gaśnie. Na czarnym tle napis: Bethesda Game Studios przedstawia.
+
+[movie fallout intro vsk.bik 107]
+Tytuł: Fallout 3.
+
+[movie fallout intro vsk.bik 127.3]
+Skalisty krajobraz, na kamieniach czaszka i rozrzucone kości.
+
+[movie fallout intro vsk.bik 132]
+Cmentarz: rzędy białych nagrobków pod drzewami.
+
+[movie fallout intro vsk.bik 151.5]
+Przedmieście: biały płotek, rower, butelka mleka. Nad domami rozbłysł wybuch atomowy.
+
+[movie fallout intro vsk.bik 161.5]
+Ruiny miasta. W gruzach leży ogromna kamienna głowa posągu.
+
+[movie fallout intro vsk.bik 168.5]
+Zmiażdżony wrak wśród poskręcanego żelastwa.
+
+[movie fallout intro vsk.bik 174.6]
+Spod zwalonego wiaduktu widać zrujnowaną ulicę; daleko idzie samotna postać.
+
+[movie fallout intro vsk.bik 186.3]
+Zniszczony plac zabaw z huśtawkami przed zrujnowanym budynkiem.
+
+[movie fallout intro vsk.bik 190.6]
+Spalony dom, a obok wielki, wyblakły billboard z uśmiechniętymi ludźmi.
+
+[movie fallout intro vsk.bik 207]
+Puste wzgórza, martwe drzewa, deszcz.
+
+[movie fallout intro vsk.bik 213]
+W ciemności okrągłe stalowe wrota w kształcie koła zębatego, z numerem 101.
+
+[movie fallout intro vsk.bik 229.2]
+Kamera oddala się: wrota kryją się w głębi skalnej jaskini.
+
+[movie fallout intro vsk.bik 242]
+Obraz gaśnie. Koniec intra.
+
+[movie 1 year later.bik 0.5]
+Na białym tle napis: Rok później.
+
+[movie 9 years later.bik 0.5]
+Na białym tle napis: Dziewięć lat później.
+
+[movie 6 years later.bik 0.5]
+Na białym tle napis: Sześć lat później.
+
+[movie 3 years later.bik 0.5]
+Na białym tle napis: Trzy lata później.
+
+[movie 2 weeks later.bik 0.5]
+Na czarnym tle napis: Dwa tygodnie później.
+
+# ---------------------------------------------------------------- narodziny
+[stage 0001F388 8]
+Z rozmytej bieli wyłania się obraz. Patrzysz oczami noworodka: nad tobą świeci ostra lampa operacyjna.
+Wokół sala szpitalna: aparaty do znieczulenia, stojak z kroplówką, wózek z narzędziami, rzędy konsol i szafy z komputerami.
+
+[stage 0001F388 10]
+Pochyla się nad tobą mężczyzna w stroju lekarza i masce chirurgicznej - to twój ojciec, James. Obok stoi lekarka, doktor Li.
+Na łóżku leży twoja mama, Catherine, wyczerpana po porodzie.
+
+[stage 0001F388 42]
+Przy łóżku stoi projektor genów - urządzenie z ekranem, które pokaże, jak będziesz wyglądać jako dorosły.
+
+[stage 0001F388 85]
+Na sali wybucha zamieszanie. Aparatura alarmuje, a tata rzuca się ratować mamę.
+
+[stage 0001F388 90]
+Wszystko zalewa oślepiająca biel.
+
+# ---------------------------------------------------------------- Kroki dziecka
+[stage 00014E83 5]
+Masz rok. Stoisz w dużym drewnianym kojcu w pokoju dziecinnym w Krypcie 101 - ściany są z metalu, jak w całej krypcie.
+Wokół zabawki, mały dywanik, łóżeczko z karuzelą, kanapa i stolik. W kojcu kuca tata i wyciąga do ciebie ręce.
+
+[npc Tata @00014E83]
+Tata: mężczyzna w średnim wieku z krótkimi, falującymi, ciemnymi włosami, w białym lekarskim kitlu, z Pip-Boyem na przedramieniu. Gra upodobniła jego twarz do twojej.
+
+[stage 00014E83 18]
+Tata wychodzi z pokoju i zamyka za sobą drzwi.
+
+[stage 00014E83 72]
+Drzwi się otwierają. Tata wraca i rozgląda się z uśmiechem.
+
+[stage 00014E83 73]
+Tata podchodzi do stolika, na którym stoi oprawiony w ramkę cytat.
+
+[stage 00014E83 90]
+Obraz znów rozpływa się w bieli. Mijają lata.
+
+# ---------------------------------------------------------------- Szybkie dorastanie
+[stage 00014E84 5]
+Masz dziesięć lat. Stoisz w barze krypty przystrojonym na twoje urodziny: kolorowe balony, transparent z życzeniami, kanapy przy stolikach i szafa grająca.
+Wokół stoją sąsiedzi z krypty i patrzą na ciebie z uśmiechem.
+
+[stage 00014E84 7]
+Do przodu przeciska się Nadzorca - przywódca krypty.
+
+[stage 00014E84 8]
+Nadzorca wręcza ci Pip-Boya 3000 - komputer zakładany na przedramię, z małym ekranem.
+
+[stage 00014E84 15]
+Andy, robot krypty, podlatuje do tortu i unosi swoje ostrze.
+
+[stage 00014E84 16]
+Z tortu zostały kawałki rozrzucone po ladzie.
+
+[stage 00014E84 35]
+Na ścianie baru zaczyna pikać interkom. Tata podchodzi i odbiera.
+
+[stage 00014E84 44]
+Tata wręcza ci wiatrówkę - twój prezent-niespodziankę.
+
+[stage 00014E84 50]
+Jesteś na strzelnicy przy reaktorze. Przed tobą, za barierką, stoją trzy okrągłe tarcze na metalowych słupkach.
+
+[stage 00014E84 55]
+Z kąta wypełza radrakan - wielki, rudobrązowy karaluch, długi prawie jak twoje przedramię, z drgającymi czułkami.
+
+[stage 00014E84 90]
+Stoisz obok taty. Jonas unosi aparat fotograficzny.
+
+[stage 00014E84 98]
+Błysk flesza. Obraz bieleje i mijają kolejne lata.
+
+[npc Nadzorca @00014E84]
+Nadzorca: starszy mężczyzna o latynoskich rysach, z krótko przyciętymi siwymi włosami i surową twarzą, w niebieskim kombinezonie krypty.
+
+[npc Amata @00014E84]
+Amata, twoja najlepsza przyjaciółka i córka Nadzorcy: dziesięcioletnia dziewczynka o latynoskich rysach, z ciemnymi włosami i piwnymi oczami, w dziecięcym kombinezonie krypty i w urodzinowej czapeczce.
+
+[npc Butch @00014E84]
+Butch: twój rówieśnik i szkolny łobuz - jasnoskóry chłopiec o kręconych, ciemnoblond włosach, w dziecięcym kombinezonie krypty.
+
+[npc Paul Hannon @00014E84]
+Paul Hannon: czarnoskóry chłopiec z krótkimi czarnymi włosami, w urodzinowej czapeczce.
+
+[npc Wally Mack @00014E84]
+Wally Mack: chłopiec z krótkimi ciemnymi włosami, kolega Butcha.
+
+[npc Staruszka Palmer @00014E84]
+Staruszka Palmer: bardzo stara, drobna kobieta o rzadkich siwych włosach, w urodzinowym kapeluszu.
+
+[npc Stanley @00014E84]
+Stanley: starszy mechanik krypty, siwe włosy zaczesane do tyłu, roboczy kombinezon i urodzinowa czapeczka.
+
+[npc Beatrice @00014E84]
+Beatrice: starsza kobieta o azjatyckich rysach, z ciemnymi, starannie ułożonymi włosami, w kombinezonie krypty.
+
+[npc Andy @00014E84]
+Andy: robot pomocnik typu Pan Złota Rączka - metalowy kulisty korpus unoszący się nad podłogą na płomieniu silniczka, trzy oczy na wysięgnikach i trzy ramiona zakończone narzędziami.
+
+[npc Jonas @00014E84]
+Jonas, asystent taty: młody czarnoskóry mężczyzna w okularach, z krótkimi czarnymi włosami, w białym lekarskim kitlu.
+
+[npc Tata @00014E84]
+Tata: we włosach ma już pierwsze siwe pasma; nosi biały lekarski kitel i Pip-Boya.
+
+[npc Funkcjonariusz Gomez @00014E84]
+Funkcjonariusz Gomez: strażnik krypty o latynoskich rysach, w kombinezonie ochrony z kamizelką, z pałką u pasa.
+
+[npc Funkcjonariusz Kendall @00014E84]
+Funkcjonariusz Kendall: strażnik krypty z ogoloną głową, w kombinezonie ochrony z kamizelką.
+
+# ---------------------------------------------------------------- Niedoskonała przyszłość
+[stage 00014E85 5]
+Masz szesnaście lat. Jesteś w gabinecie taty w klinice krypty: biurko z terminalem, podświetlana tablica na zdjęcia rentgenowskie, statyw z probówkami i zestaw do doświadczeń chemicznych.
+
+[npc Tata @00014E85]
+Tata: siwizny przybyło, twarz ma bardziej zmęczoną; wciąż w białym kitlu.
+
+[stage 00014E85 20]
+Na korytarzu Butch i jego dwaj kumple otaczają Amatę i z niej drwią.
+
+[npc Butch @00014E85]
+Butch: szesnastolatek, przywódca gangu Węży Tunelowych - skórzana kurtka gangu z wężem, włosy zaczesane wysoko do góry jak u rockmana z lat pięćdziesiątych.
+
+[npc Wally Mack @00014E85]
+Wally Mack: chłopak z krótko ostrzyżonymi ciemnymi włosami, w kurtce Węży Tunelowych.
+
+[npc Paul Hannon @00014E85]
+Paul Hannon: czarnoskóry chłopak z włosami zaczesanymi w wysoki czub, w kurtce Węży Tunelowych.
+
+[npc Amata @00014E85]
+Amata: szesnastoletnia, ciemne włosy spięte z tyłu, piwne oczy, kombinezon krypty.
+
+[npc Pan Brotch @00014E85]
+Pan Brotch, nauczyciel: czarnoskóry mężczyzna w średnim wieku z krótko przyciętymi włosami, w kombinezonie krypty.
+
+[stage 00014E85 50]
+Siadasz w szkolnej ławce. Pan Brotch staje przed klasą, obok flaga i rzutnik.
+
+[stage 00014E85 60]
+Rzutnik wyświetla na ścianie slajdy egzaminu.
+
+[stage 00014E85 90]
+Obraz znów bieleje.
+
+# ---------------------------------------------------------------- Ucieczka!
+[stage 00014E86 2]
+Masz dziewiętnaście lat. Leżysz w łóżku w swoim pokoju w krypcie, ktoś tobą potrząsa - to Amata. Z oddali słychać alarm.
+
+[npc Amata @00014E86]
+Amata: dziewiętnastoletnia, ciemne włosy spięte z tyłu, w kombinezonie krypty; jest wystraszona i zdyszana.
+
+[stage 00014E86 12]
+Na korytarzu przed drzwiami strażnik krypty walczy z radrakanami.
+
+[stage 00014E86 18]
+W mieszkaniu DeLoriów matka Butcha kuli się pod ścianą, a wokół niej uwijają się radrakany.
+
+[npc Ellen DeLoria @00014E86]
+Ellen DeLoria, matka Butcha: kobieta w średnim wieku z brązowymi włosami upiętymi w kok, w kombinezonie krypty.
+
+[npc Butch @00014E86]
+Butch: w kurtce Węży Tunelowych, przerażony i bliski płaczu.
+
+[stage 00014E86 36]
+W gabinecie ochrony Amata stoi przed Nadzorcą, a strażnik zamierza się na nią.
+
+[npc Nadzorca @00014E86]
+Nadzorca: posiwiały prawie zupełnie, w kombinezonie krypty, z twarzą ściągniętą gniewem.
+
+[npc Jonas @00014E86]
+Jonas leży bez życia na podłodze.
+
+[stage 00014E86 120]
+Jesteś w skalnej jaskini u wejścia do krypty. Przed tobą wielki, okrągły właz w kształcie koła zębatego, z wymalowanym numerem 101.
+
+[stage 00014E86 144]
+Mechaniczne ramię wyciąga ogromny właz z otworu i odtacza go na bok z ogłuszającym zgrzytem metalu. Za nim ciemny skalny korytarz prowadzący na zewnątrz.
+
+[stage 00014E86 150]
+Wychodzisz z jaskini. Oślepia cię ostre słońce - pierwszy raz w życiu widzisz niebo.
+Gdy wzrok się przyzwyczaja, widzisz pustkowie: suche, brunatne wzgórza, powykręcane martwe drzewa, w dole ruiny miasteczka, a daleko na horyzoncie zniszczony Waszyngton z iglicą Pomnika Waszyngtona.

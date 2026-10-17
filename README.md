@@ -18,7 +18,16 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   out with the game's own confirm/cancel keys.
 - **World navigation** — object scanner, turn-to-object, audio beacon guidance
   and auto-walk that routes around walls using the game's navmesh, including
-  through load doors into other cells.
+  through load doors into other cells. Long walks follow an offline map of the
+  whole navigation mesh (roads preferred), and a target in another place is
+  reached through the right chain of doors, however far away.
+- **DLCs** — Broken Steel, Point Lookout, The Pitt, Operation: Anchorage and
+  Mothership Zeta: walk graphs and doors for their places, and auto-walk leads
+  you to the Pitt handcart, the Duchess Gambit and the presidential metro.
+- **Audio description** — the opening film in real time, and the scenes and
+  people of the Vault 101 prologue, spoken in the gaps between voices.
+- **English and Polish** — the mod speaks the game's language by default
+  (Polish for the Polish release, English for any other), or the one you set.
 - **World map** — browse every known location with distance and bearing, and
   fast-travel there through the game's own travel path.
 - **Combat** — VATS is fully keyboard-driven (switch target, cycle body part,
@@ -28,15 +37,15 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   candidate passwords are listed and spelled.
 - **Lockpicking** — an audio cue guides the pick to the sweet spot.
 - **Player status** on **H**, location on **L**, compass on **J**.
-- Localized game text handled code-page-aware (Polish cp1250 out of the box).
+- Localized game text handled code-page-aware (Polish cp1250 detected from the game).
 - Works with both retail editions of patch 1.7.0.3 (standard and no-gore),
   detected automatically.
 
 **Rough edges / in progress**
 
 - Character creation (the RaceSex menu) is not yet guided.
-- Long-distance travel on foot is best combined with map fast travel; walking
-  across the wasteland in one go is not reliable yet.
+- DLC support is built from the game data and tested offline; in-game reports
+  are welcome.
 - Auto-walk can still get wedged on difficult terrain; it tells you when it
   gives up rather than walking into a wall silently.
 
@@ -179,10 +188,12 @@ your way, the walk retargets instead of finishing at a stale marker.
 
 Edit `Data\FOSE\Plugins\Fallout3Access.ini`:
 
-- `[General] Language` — `pl` or `en` (language of the mod's own messages),
+- `[General] Language` — `auto` (default: the game's language, read from
+  `Fallout3.esm` — Polish for the Polish release, English for any other), or
+  `pl` / `en` to choose the language of the mod's own messages,
 - `[General] GameTextCodepage` — code page of the *game's* text; `0` = auto
-  (`pl` → 1250, otherwise system ANSI). Set `1250` / `1252` explicitly if item
-  names sound garbled,
+  (Polish game → 1250, otherwise system ANSI). Set `1250` / `1252` explicitly
+  if item names sound garbled,
 - `[Modules]` — enable/disable feature modules,
 - `[Hotkeys]` — every key listed above, as DirectInput scancodes,
 - `[Debug] StartGameCommand` — console command bound to F10.
@@ -220,11 +231,28 @@ cmake --build build --config Release
 - Requires VS 2022 Build Tools + Windows SDK. FOSE plugins are 32-bit (`-A Win32` is mandatory).
 - The FOSE source tree is **not** bundled (licensing); download it from <https://fose.silverlock.org> and point `FOSE_SDK_PATH` at it (the folder containing `common/` and `fose/`).
 - Tolk headers/binaries are bundled under `third_party/tolk/`.
+- The walk graphs and the door table (`data/roadnet/*.dat`) are generated from
+  the game's own data files and are not kept in git; they ship in the release
+  archive. To build them yourself (Python 3 with numpy and scipy):
+
+  ```
+  python tools/generate_walk_graph.py --esm "<FO3>/Data/Fallout3.esm" --all-worldspaces --output-dir data/roadnet
+  python tools/generate_walk_graph.py --esm "<FO3>/Data/Fallout3.esm" --worldspace Wasteland --worldspace CitadelWorld ^
+         --worldspace DCworld01 --worldspace DCworld08 --worldspace DCworld09 --worldspace DCworld12 ^
+         --overlay "<FO3>/Data/Anchorage.esm" --overlay "<FO3>/Data/ThePitt.esm" --overlay "<FO3>/Data/BrokenSteel.esm" ^
+         --overlay "<FO3>/Data/PointLookout.esm" --overlay "<FO3>/Data/Zeta.esm" --suffix +DLC --output-dir data/roadnet
+  python tools/generate_walk_graph.py --esm "<FO3>/Data/ThePitt.esm" --master "<FO3>/Data/Fallout3.esm" --all-worldspaces --output-dir data/roadnet
+  (likewise for Anchorage.esm, BrokenSteel.esm, PointLookout.esm)
+  python tools/generate_world_doors.py --data "<FO3>/Data"
+  ```
+  (`TestQAWorld.dat`, a developer test worldspace, is not shipped.)
 
 ## Credits & licenses
 
 - Mod code — MIT (see `LICENSE`).
 - [Tolk](https://github.com/dkager/tolk) by Davy Kager — LGPL; bundled binaries unmodified.
 - `nvdaControllerClient32.dll` — NV Access, LGPL.
+- The road-graph loader, nearest-node grid and road rules are ported from
+  [FalloutNVAccess](https://git.alex19ep.me/alex19EP/FalloutNVAccess) by Alexander Epaneshnikov — MIT.
 - [FOSE](https://fose.silverlock.org) by Ian Patterson, Stephen Abel and Paul Connelly — not bundled.
 - Fallout 3 © Bethesda Softworks.

@@ -47,7 +47,11 @@ struct Hotkeys {
     uint32_t attack_key       = 0x2F; // V (DIK) — weapon attack, used by the aim burst
     uint32_t drop_item        = 0xD3; // Delete — drop the selected item (inventory)
     uint32_t sonar            = 0x31; // N — Pip-Boy sonar sweep of the surroundings
-    uint32_t press_row        = 0xD2; // Insert — press the highlighted row (rebinding keys)
+    uint32_t explore_go       = 0x18; // O — to the find said on the way / back to the trip
+    uint32_t sweep_summary    = 0x16; // U — what is left to search around here
+    uint32_t sweep_next       = 0x17; // I — walk to the nearest thing left
+    uint32_t audio_desc_repeat = 0x41; // F7 — repeat the last description (Shift: on/off)
+    uint32_t press_row        = 0x3C; // F2 — press the highlighted row (rebinding keys); Insert is the NVDA key
     uint32_t aim_hold         = 0x1B; // ] — hold/release the game's aim (right mouse)
     // Trim the held aim up/down. The mod cannot see where the shot lands, but
     // the player can hear it — so these put the last word with them.
@@ -146,6 +150,10 @@ struct Settings {
     int    nearby_scan_max_items = 8;
     // Leave containers with nothing in them out of the object scanner.
     bool   hide_empty_containers = true;
+    bool   explore_mode   = true;   // finds announced on the way during auto-walk
+    int    explore_radius = 900;    // ...this near the player
+    bool   audio_desc     = true;   // describe scenes and people
+    bool   audio_desc_capture = false; // save a screenshot whenever a description is due
     // Let the game's own pathfinder route the auto-walk (as it routes NPCs).
     bool   engine_path = true;
     // The game's control hints ("Aby oddać strzał, ..."): 0 = never read,
@@ -172,10 +180,16 @@ struct Settings {
     std::string debug_start_command = "coc MegatonWorld";
 
     // Localization
-    std::string language = "pl";        // "pl" or "en"
+    // The mod's language, "pl" or "en": the INI's Language (pl / en), or for
+    // "auto" (the default) the game's own - Polish for the Polish release,
+    // English for every other.
+    std::string language = "en";
+    // The game's language as read from Fallout3.esm ("pl", "en", "de"...),
+    // empty when it could not be told.
+    std::string game_language;
     // Code page of the GAME's own text (tile labels, item names). Polish FO3
-    // stores text in Windows-1250; English/Western in 1252. 0 = auto: derive
-    // from `language` (pl → 1250, otherwise the system ANSI code page).
+    // stores text in Windows-1250; English/Western in 1252. 0 = auto: from
+    // the game's language (pl -> 1250, otherwise the system ANSI code page).
     int game_text_codepage = 0;
 
     // Tolk
@@ -185,6 +199,10 @@ struct Settings {
 };
 
 bool Load(const wchar_t* ini_path);
+
+// The mod's data folder beside the INI: Data\FOSE\Plugins\Fallout3Access
+// (road graphs, the world-door table). Empty before Load().
+std::wstring DataDir();
 
 // Aim corrections learned from a sighted player, kept in the INI under
 // [AimOffsets] as "0xBASEFORMID = x,y,z".

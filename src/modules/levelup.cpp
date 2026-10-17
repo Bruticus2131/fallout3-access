@@ -3,6 +3,7 @@
 #include "f3a/game_access.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/logger.h"
+#include "f3a/strings.h"
 
 #include <string>
 
@@ -59,8 +60,8 @@ void OnTick(float)
         g_desc.clear();
         std::string say = st.label;
         if (!st.value.empty()) say += ", " + st.value;
-        if (st.chosen) say += ", wybrane";
-        if (st.dimmed) say += ", niedostępne";
+        if (st.chosen) say += strings::T(", wybrane", ", chosen");
+        if (st.dimmed) say += strings::T(", niedostępne", ", unavailable");
         if (!say.empty()) tolk::Speak(say, tolk::Priority::Ui, !queue);
         F3A_DEBUG("LevelUp: focus '%s'", say.c_str());
         return;                          // the description follows when it updates

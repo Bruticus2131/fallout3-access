@@ -37,6 +37,9 @@ param(
     [string] $AppVersion = "0.0.0",
     # A patcher archive the user downloaded themselves; skips the Nexus call.
     [string] $PatcherArchive = "",
+    # The mod's own archive, when it came with the installer (a test build
+    # handed round before it is released); skips the download from GitHub.
+    [string] $ModArchive = "",
     [switch] $SkipPatcher,
     [switch] $SkipFose,
     [string] $LogPath = "",
@@ -441,18 +444,44 @@ function Install-Mod([string] $Zip) {
     Copy-Tree $root.FullName $GamePath
 
     $plugins = Join-Path $GamePath "Data\FOSE\Plugins"
+    # The archive's Fallout3Access.ini has English comments (and Language =
+    # auto: the game's own language); its Polish twin, with Polish comments,
+    # is Fallout3Access\Fallout3Access.pl.ini. Polish is put in its place.
+    $plIni = Join-Path $plugins "Fallout3Access\Fallout3Access.pl.ini"
+    if ($script:Pl -and (Test-Path -LiteralPath $plIni)) {
+        Copy-Item -LiteralPath $plIni -Destination $iniPath -Force
+    }
     if ($keepIni) {
         $newIni = T "Fallout3Access.ini.nowy" "Fallout3Access.ini.new"
         Copy-Item -LiteralPath $iniPath -Destination (Join-Path $plugins $newIni) -Force
         Copy-Item -LiteralPath $keepIni -Destination $iniPath -Force
         Write-Step (T "Wzorcowy plik nowej wersji leży obok jako $newIni" "The new version's default file is next to it as $newIni")
-    } elseif (-not $script:Pl) {
+        # The first versions shipped CrosshairDistance = 1, and an update keeps
+        # the old file: "Rozmawiaj Moira Brown, tuż obok" on every glance. The
+        # distance is off by default now; bring kept files in line.
+        $text = [IO.File]::ReadAllText($iniPath)
+        $fixed = $text -replace '(?m)^(\s*CrosshairDistance\s*=\s*)1\b', '${1}0'
+        if ($fixed -ne $text) {
+            [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
+            Write-Step (T "Wyłączam odległość po podpowiedziach typu Rozmawiaj (CrosshairDistance = 0)" "Turning off the distance after prompts like Talk (CrosshairDistance = 0)")
+        }
+        # PressRow was Insert, which NVDA takes for itself (its modifier key),
+        # so the game never saw it. It is F2 now; move a kept file along.
+        $text = [IO.File]::ReadAllText($iniPath)
+        $fixed = $text -replace '(?m)^(\s*PressRow\s*=\s*)0xD2\b', '${1}0x3C'
+        $fixed = $fixed -replace '(?m)^(\s*PressRow\s*=\s*0x3C\s*;\s*)Insert   ', '${1}F2       '
+        if ($fixed -ne $text) {
+            [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
+            Write-Step (T "Klawisz klikania w menu (PressRow) zmieniony z Insert na F2 - Insert zabiera NVDA" "Menu click key (PressRow) moved from Insert to F2 - NVDA takes Insert")
+        }
+    } else {
         # A fresh install speaks the language the installer was run in. An
         # update keeps the player's own choice, with the rest of their settings.
+        $lang = if ($script:Pl) { "pl" } else { "en" }
         $text = [IO.File]::ReadAllText($iniPath)
-        $text = $text -replace '(?m)^(Language\s*=\s*)pl\b', '${1}en'
+        $text = $text -replace '(?m)^(Language\s*=\s*)[A-Za-z]+', ('${1}' + $lang)
         [IO.File]::WriteAllText($iniPath, $text, (New-Object Text.UTF8Encoding($false)))
-        Write-Step "Mod language set to English (Language = en in Fallout3Access.ini)"
+        Write-Step (T "Język moda: polski (Language = pl w Fallout3Access.ini)" "Mod language set to English (Language = en in Fallout3Access.ini)")
     }
 
     # Both files, where the game looks for them — checked, not assumed.
@@ -517,7 +546,14 @@ Write-Step (T "Wersja gry: $(Get-GameBuild)" "Game version: $(Get-GameBuild)")
 # The mod FIRST. It is the one piece this installer exists for, and the other
 # steps can fail for reasons outside anyone's control (a site down, a Nexus
 # account without Premium, an archive tool missing).
-Invoke-Step "mod" { Install-Mod (Get-LatestModRelease) }
+Invoke-Step "mod" {
+    if ($ModArchive -and (Test-Path -LiteralPath $ModArchive)) {
+        Write-Step (T "Instaluję moda z paczki obok instalatora: $ModArchive" "Installing the mod from the archive next to the installer: $ModArchive")
+        Install-Mod $ModArchive
+    } else {
+        Install-Mod (Get-LatestModRelease)
+    }
+}
 
 $premium = Test-NexusKey
 

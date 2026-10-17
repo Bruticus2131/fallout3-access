@@ -9,6 +9,7 @@
 #include "f3a/fose_runtime.h"
 #include "f3a/config.h"
 #include "f3a/logger.h"
+#include "f3a/strings.h"
 #include "fose/GameOSDepend.h"
 #include "f3a/polling_loop.h"
 
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
 
 namespace f3a::game {
@@ -34,8 +36,11 @@ static UINT ResolveGameCodepage()
 {
     int cp = config::Get().game_text_codepage;
     if (cp > 0) return (UINT)cp;
-    // auto: Polish localization -> 1250; otherwise the system ANSI page.
-    if (config::Get().language == "pl") return 1250;
+    // auto: the GAME's language decides (the mod may speak another one):
+    // Polish localization -> 1250; otherwise the system ANSI page.
+    const auto& c = config::Get();
+    const std::string& game = c.game_language.empty() ? c.language : c.game_language;
+    if (game == "pl") return 1250;
     return CP_ACP;
 }
 
@@ -414,8 +419,15 @@ int ReadLockLevel(const TESObjectREFR* r, int* out_flags)
         if (node[0x04] == 0x2A) {                       // kExtraData_Lock
             const UInt8* data = *reinterpret_cast<const UInt8* const*>(node + 0x0C);
             if (Readable(data, 0x0C)) {
-                if (out_flags) *out_flags = data[0x08];  // ExtraLock::Data::flags
-                return (int)*reinterpret_cast<const UInt32*>(data);   // lockLevel
+                // flags bit 0 = locked: what the game's own GetLocked tests
+                // (0x50F380 -> [lock+8] & 1).
+                if (out_flags) *out_flags = data[0x08];
+                // The level is ONE byte. The three after it are copied
+                // unchanged from the plugin's record, where they are padding
+                // full of leftovers — read as a whole word they turned a
+                // "very hard" lock (100) into 4639076 and the walk announced
+                // "needs a key".
+                return (int)data[0x00];
             }
             return -1;
         }
@@ -505,6 +517,7 @@ struct ContainerTally {
     int  forms    = 0;      // distinct item forms with a positive count
     bool levelled = false;  // base list holds a leveled list (rolled at runtime)
     bool changes  = false;  // the ref has ExtraContainerChanges
+    int  entries  = 0;      // ...and how many entries it lists
 };
 
 // Is a container currently empty? Counted the way FOSE's own GetNumItems does
@@ -521,12 +534,15 @@ struct ContainerTally {
 // next@+0x04), then TESFullName @0x3C, as in New Vegas. The TESContainer
 // vtable must point into the game image or the layout guess is wrong. All
 // memory reads (no native call), so it's safe from the poll thread.
-int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* out)
+// `contOff` is where the base form keeps its TESContainer: +0x30 in a
+// container (TESObjectCONT), +0x64 in an actor base (TESActorBase, FOSE).
+int ContainerItemStateAt(TESForm* base, UInt32 contOff, const TESObjectREFR* r,
+                         ContainerTally* out)
 {
     ContainerTally t;
-    if (!Readable(base, 0x48)) return -1;
+    if (!Readable(base, contOff + 0x18)) return -1;
     const UInt8* b = reinterpret_cast<const UInt8*>(base);
-    UInt32 vt = *reinterpret_cast<const UInt32*>(b + 0x30);
+    UInt32 vt = *reinterpret_cast<const UInt32*>(b + contOff);
     if (!(vt >= 0x00400000 && vt < 0x01200000)) return -1;
 
     struct Count { const void* form; long n; };
@@ -536,7 +552,7 @@ int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* ou
         counts.push_back({ form, n });
     };
 
-    const UInt8* node = b + 0x34;                                       // list head
+    const UInt8* node = b + contOff + 0x04;                             // list head
     for (int i = 0; node; ++i) {
         if (i >= 256 || !Readable(node, 0x08)) return -1;
         const UInt8* fc = *reinterpret_cast<const UInt8* const*>(node); // FormCount*
@@ -568,6 +584,7 @@ int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* ou
                 const UInt8* ed = *reinterpret_cast<const UInt8* const*>(list);
                 if (ed) {
                     if (!Readable(ed, 0x0C)) return -1;
+                    ++t.entries;
                     add(*reinterpret_cast<const void* const*>(ed + 0x08),
                         *reinterpret_cast<const SInt32*>(ed + 0x04));
                 }
@@ -581,9 +598,18 @@ int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* ou
     for (const auto& c : counts) if (c.n > 0) ++t.forms;
     if (out) *out = t;
     if (t.forms > 0) return 1;
-    // A leveled list with no changes yet may simply not have been rolled.
-    if (t.levelled && !t.changes) return -1;
+    // A leveled list with no changes yet may simply not have been rolled —
+    // nor with a changes record that lists nothing: "empty" is said only when
+    // the game's own record of the contents says so. (The scanner hides
+    // empty containers, and a hidden container that held something is the
+    // one mistake it must never make.)
+    if (t.levelled && (!t.changes || t.entries == 0)) return -1;
     return 0;
+}
+
+int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* out)
+{
+    return ContainerItemStateAt(base, 0x30, r, out);
 }
 
 // Scan one cell's reference list into `out`.
@@ -615,9 +641,9 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         if (nm) {
             label = GameStrToUtf8(nm);
         } else if (kind == WorldEntity::Kind::Door) {
-            label = "Drzwi";       // unnamed load doors = metro entrances
+            label = strings::T("Drzwi", "Door");       // unnamed load doors = metro entrances
         } else if (kind == WorldEntity::Kind::Container) {
-            label = "Pojemnik";
+            label = strings::T("Pojemnik", "Container");
         } else {
             continue;              // unnamed item/actor/etc. — skip noise
         }
@@ -628,8 +654,8 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         if (kind == WorldEntity::Kind::Door) {
             std::string dest = DoorDestinationName(r);
             if (!dest.empty()) {
-                label = (nm && label != dest) ? label + ", do: " + dest
-                                              : "Drzwi do: " + dest;
+                label = (nm && label != dest) ? label + strings::T(", do: ", ", to ") + dest
+                                              : strings::T("Drzwi do: ", "Door to ") + dest;
             }
         }
 
@@ -637,15 +663,29 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         // scanner leaves empty ones out (or tags them "pusty" if the INI turns
         // hiding off). Only a sure 0 counts — a -1 (unknown) stays listed under
         // its plain name so real loot is never hidden.
+        int cont_state = -1;
         if (kind == WorldEntity::Kind::Container) {
             ContainerTally tally;
             int st = ContainerItemState(base, r, &tally);
-            F3A_INFO("Cont: '%s' state=%d (1=full 0=empty -1=?) forms=%d lvl=%d changes=%d",
-                     label.c_str(), st, tally.forms, (int)tally.levelled,
-                     (int)tally.changes);
+            cont_state = st;
+            {
+                // Logged once per container and state: the scanner now
+                // rescans on every category step.
+                static std::mutex s_mx;
+                static std::vector<std::pair<uint32_t, int>> s_seen;
+                std::lock_guard<std::mutex> lk(s_mx);
+                bool seen = false;
+                for (const auto& q : s_seen) if (q.first == r->refID && q.second == st) seen = true;
+                if (!seen && s_seen.size() < 8192) {
+                    s_seen.push_back({ r->refID, st });
+                    F3A_INFO("Cont: '%s' state=%d (1=full 0=empty -1=?) forms=%d lvl=%d "
+                             "changes=%d entries=%d", label.c_str(), st, tally.forms,
+                             (int)tally.levelled, (int)tally.changes, tally.entries);
+                }
+            }
             if (st == 0) {
                 if (config::Get().hide_empty_containers) continue;
-                label += ", pusty";
+                label += strings::T(", pusty", ", empty");
             }
         }
 
@@ -655,6 +695,8 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         e.position = { r->posX, r->posY, r->posZ };
         e.form_id  = r->refID;
         e.refr     = r;            // for crosshair-forced activation
+        e.form_type = (uint8_t)base->typeID;
+        if (kind == WorldEntity::Kind::Container) e.items = cont_state;
         if (kind == WorldEntity::Kind::Door) {
             e.load_door  = ReadIsLoadDoor(r);
             e.open_state = ReadDoorOpenState(r);
@@ -665,11 +707,19 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
             int lvl = ReadLockLevel(r, &flags);
             if (lvl >= 0) {
                 e.lock_level = lvl;
-                e.locked = (flags & 0x01) != 0;   // guess: bit 0 = currently locked
-                // TEMP diagnostic to nail the "locked" bit: compare a known-locked
-                // vs a known-unlocked door in the log.
-                F3A_INFO("Lock: '%s' level=%d flags=0x%02X -> locked=%d",
-                         e.name.c_str(), lvl, flags, (int)e.locked);
+                // Bit 0 = locked, as the game's GetLocked reads it (0x50F380).
+                e.locked = (flags & 0x01) != 0;
+                // Logged once per reference: auto-walk now checks every route
+                // for locked doors, and the scan behind that runs often.
+                static std::mutex s_logged_mutex;
+                static std::vector<uint32_t> s_logged;
+                std::lock_guard<std::mutex> lk(s_logged_mutex);
+                if (s_logged.size() < 4096 &&
+                    std::find(s_logged.begin(), s_logged.end(), r->refID) == s_logged.end()) {
+                    s_logged.push_back(r->refID);
+                    F3A_INFO("Lock: '%s' level=%d flags=0x%02X -> locked=%d",
+                             e.name.c_str(), lvl, flags, (int)e.locked);
+                }
             }
         }
         out.push_back(std::move(e));
@@ -753,8 +803,16 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     // false and "hostiles only" returned every actor, friends included.
     auto MarkHostiles = [&]() {
         for (auto& e : out)
-            if (e.kind == WorldEntity::Kind::Actor)
+            if (e.kind == WorldEntity::Kind::Actor) {
                 e.hostile = IsKnownHostile(e.form_id);
+                e.dead    = IsKnownDead(e.form_id);
+                // A body: anything left on it? (Its worn clothes count too.)
+                if (e.dead && e.refr) {
+                    auto* r = reinterpret_cast<const TESObjectREFR*>(e.refr);
+                    if (Readable(r, 0x40))
+                        e.items = ContainerItemStateAt(r->baseForm, 0x64, r, nullptr);
+                }
+            }
         if (!hostiles_only) return;
         out.erase(std::remove_if(out.begin(), out.end(),
                                  [](const WorldEntity& e) { return !e.hostile; }),
@@ -809,14 +867,69 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     return out;
 }
 
+namespace {
+std::vector<uint32_t> g_dead_ids;      // under g_hostile_mx
+
+// Is this actor dead? The game's GetDead (0x0050F840) asks two virtuals:
+// vtable+0x100 "is an actor" and vtable+0x22C IsDead(1). 1 dead, 0 alive,
+// -1 unknown. Main thread only (virtual calls).
+int ActorDeadState(const void* refr)
+{
+    auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
+    if (!Readable(r, 0x40)) return -1;
+    void** vt = *reinterpret_cast<void***>(r);
+    if (!Readable(vt, 0x230)) return -1;
+    void* isActor = vt[0x100 / 4];
+    void* isDead  = vt[0x22C / 4];
+    if (!Readable(isActor, 1) || !Readable(isDead, 1)) return -1;
+    using IsActorFn = bool (__thiscall*)(void*);
+    using IsDeadFn  = bool (__thiscall*)(void*, bool);
+    if (!reinterpret_cast<IsActorFn>(isActor)(r)) return -1;
+    return reinterpret_cast<IsDeadFn>(isDead)(r, true) ? 1 : 0;
+}
+
+// The actors the game marks as enemies on the compass (the red marks).
+// PlayerCharacter+0x900 is a list of nodes {entry*, next*}, entry = {Actor*,
+// bool hostile}: read exactly so by the game's own lookup 0x007747A0, which
+// its bullet correction (0x007794B0) uses to tell an enemy. Plain data.
+void CompassHostiles(std::vector<const void*>* out)
+{
+    auto* pl = reinterpret_cast<UInt8*>(rt::Player());
+    if (!Readable(pl, 0x904)) return;
+    UInt8* node = *reinterpret_cast<UInt8**>(pl + 0x900);
+    for (int guard = 0; node && guard < 512; ++guard) {
+        if (!Readable(node, 8)) break;
+        UInt8* entry = *reinterpret_cast<UInt8**>(node);
+        if (!entry) break;                       // the game stops here too
+        if (Readable(entry, 5) && entry[4] != 0)
+            out->push_back(*reinterpret_cast<void**>(entry));
+        node = *reinterpret_cast<UInt8**>(node + 4);
+    }
+}
+} // namespace
+
 void RefreshHostiles()
 {
     if (!OnMainThread()) return;
-    std::vector<uint32_t> ids;
-    for (const auto& e : ScanNearby(6000, 64, /*actors_only*/true, false))
-        if (e.refr && IsHostileToPlayer(e.refr)) ids.push_back(e.form_id);
+    // An enemy is an actor fighting the player OR one the game itself counts
+    // as hostile (the compass). The first test alone missed the radroaches
+    // biting Butch's mother — they were fighting HER — so the aim key fell
+    // back to the scanner's pick, which was the mother, and the shots hit her.
+    std::vector<const void*> compass;
+    CompassHostiles(&compass);
+    std::vector<uint32_t> ids, dead;
+    // Wider than anything the scanner lists (2400 units by default), and with
+    // room for a crowd: a body left out here would be listed among the living.
+    for (const auto& e : ScanNearby(8000, 256, /*actors_only*/true, false)) {
+        if (!e.refr) continue;
+        int d = ActorDeadState(e.refr);
+        if (d == 1) { dead.push_back(e.form_id); continue; }
+        bool onCompass = std::find(compass.begin(), compass.end(), e.refr) != compass.end();
+        if (onCompass || IsHostileToPlayer(e.refr)) ids.push_back(e.form_id);
+    }
     std::lock_guard<std::mutex> lk(g_hostile_mx);
     g_hostile_ids.swap(ids);
+    g_dead_ids.swap(dead);
 }
 
 bool IsKnownHostile(uint32_t refid)
@@ -825,6 +938,92 @@ bool IsKnownHostile(uint32_t refid)
     std::lock_guard<std::mutex> lk(g_hostile_mx);
     for (uint32_t id : g_hostile_ids) if (id == refid) return true;
     return false;
+}
+
+bool IsKnownDead(uint32_t refid)
+{
+    if (!refid) return false;
+    std::lock_guard<std::mutex> lk(g_hostile_mx);
+    for (uint32_t id : g_dead_ids) if (id == refid) return true;
+    return false;
+}
+
+int GetQuestStage(uint32_t questId, bool* running)
+{
+    if (running) *running = false;
+    if (!questId || !OnMainThread()) return -1;
+    const UInt8 want[] = { 0x51, 0x8B, 0x0D, 0x14, 0xDD, 0x06, 0x01 };   // LookupFormByID
+    auto* p = reinterpret_cast<const UInt8*>(0x00455190);
+    if (!Readable(p, sizeof(want)) || std::memcmp(p, want, sizeof(want)) != 0) return -1;
+    using LookupFn = TESForm* (__cdecl*)(UInt32);
+    TESForm* f = reinterpret_cast<LookupFn>(0x00455190)(questId);
+    if (!Readable(f, 0x64) || f->typeID != 0x47) return -1;          // kFormType_Quest
+    auto* q = reinterpret_cast<const UInt8*>(f);
+    if (running) *running = q[0x3C] != 0;
+    return q[0x60];
+}
+
+std::vector<std::string> LoadedPlugins()
+{
+    // DataHandler::modList (+0x19C, FOSE GameData.h): tList (8 bytes), then
+    // loadedModCount (+0x1A4) and ModInfo* loadedMods[0xFF] (+0x1A8), slot =
+    // load-order byte; a ModInfo's file name is at +0x20 (char[0x104]).
+    std::vector<std::string> out;
+    if (!rt::g_addrs) return out;
+    UInt8* dh = rt::DataHandlerBase();
+    if (!Readable(dh, 0x1A8 + 0xFF * 4)) return out;
+    UInt32 count = *reinterpret_cast<UInt32*>(dh + 0x1A4);
+    if (!(count <= 0xFF)) return out;
+    auto** mods = reinterpret_cast<UInt8**>(dh + 0x1A8);
+    for (UInt32 i = 0; i < count; ++i) {
+        UInt8* m = mods[i];
+        if (!Readable(m, 0x124)) return {};
+        const char* name = reinterpret_cast<const char*>(m + 0x20);
+        size_t len = strnlen(name, 0x104);
+        // "Must be within": a plugin file name, ending inside its field.
+        if (len < 5 || len >= 0x104) return {};
+        std::string ext(name + len - 4, 4);
+        for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext != ".esm" && ext != ".esp") return {};
+        out.emplace_back(name, len);
+    }
+    return out;
+}
+
+bool RefIsActor(const void* refr)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x40)) return false;
+    const TESForm* b = r->baseForm;
+    return Readable(b, 0x08) && KindOf(b->typeID) == WorldEntity::Kind::Actor;
+}
+
+bool RefIsCreature(const void* refr)
+{
+    auto* f = reinterpret_cast<const TESForm*>(refr);
+    return Readable(f, 0x10) && f->typeID == 0x3C;     // ACRE, a placed creature
+}
+
+std::string RefActorName(uint32_t refid, bool* isActor)
+{
+    if (isActor) *isActor = false;
+    if (!refid || !OnMainThread()) return {};
+    using LookupFn = TESForm* (__cdecl*)(UInt32);
+    static const bool ok = [] {
+        // LookupFormByID; prologue checked before the first call (see
+        // GetSpecialDescription, which verified the same bytes).
+        const UInt8 want[] = { 0x51, 0x8B, 0x0D, 0x14, 0xDD, 0x06, 0x01 };
+        auto* p = reinterpret_cast<const UInt8*>(0x00455190);
+        return Readable(p, sizeof(want)) && std::memcmp(p, want, sizeof(want)) == 0;
+    }();
+    if (!ok) return {};
+    TESForm* f = reinterpret_cast<LookupFn>(0x00455190)(refid);
+    // Only a placed actor (ACHR 0x3B / ACRE 0x3C) has the reference layout.
+    if (!Readable(f, 0x40) || (f->typeID != 0x3B && f->typeID != 0x3C) || !RefIsActor(f))
+        return {};
+    if (isActor) *isActor = true;
+    const char* nm = BaseFormName(reinterpret_cast<TESObjectREFR*>(f)->baseForm);
+    return nm ? GameStrToUtf8(nm) : std::string();
 }
 
 // ---- The engine's bullet correction (FO3 1.7.0.3) --------------------------
@@ -1004,7 +1203,7 @@ std::vector<WorldEntity> GetShootingTargets(int radius)
         if (!(dx * dx + dy * dy <= r2)) continue;   // NaN fails too
         WorldEntity e;
         e.kind       = WorldEntity::Kind::Item;
-        e.name       = "Cel";
+        e.name       = strings::T("Cel", "Target");
         e.position   = { r->posX, r->posY, r->posZ };
         e.has_marker = true;
         e.form_id    = r->refID;
@@ -1249,6 +1448,69 @@ void CollectWorldMapTiles(Tile* t, int depth, std::vector<MapTile>& out)
 }
 
 } // namespace
+
+std::vector<WorldEntity> GetNearbyLocations(float radius, int max_results)
+{
+    std::vector<WorldEntity> out;
+    auto* p = rt::Player();
+    if (!p || !p->parentCell) return out;
+    auto* ws = reinterpret_cast<UInt8*>(p->parentCell->worldSpace);
+    if (!Readable(ws, 0x38)) return out;                        // indoors
+    // TESWorldSpace+0x34: the persistent cell (FOSE), where map markers live.
+    auto* pcell = *reinterpret_cast<TESObjectCELL**>(ws + 0x34);
+    if (!Readable(pcell, 0xB4)) return out;
+    Vec3 pp = GetPlayerPosition();
+    const float r2 = radius * radius;
+    static int s_logged = 0;
+    struct Node { TESObjectREFR* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&pcell->objectList);
+    for (int safety = 0; node && safety < 65536; ++safety) {
+        if (!Readable(node, 8)) break;
+        TESObjectREFR* r = node->item;
+        node = node->next;
+        if (!r || !Readable(r, 0x54) || (r->flags & 0x820)) continue;
+        const UInt8* x = MapMarkerExtra(r);
+        if (!x) continue;
+        std::string name;
+        uint16_t type = 0, unused = 0;
+        if (!ReadMarkerData(x, &name, &type, &unused)) continue;
+        auto* md = *reinterpret_cast<const UInt8* const*>(x + 0x0C);
+        if (!Readable(md, 0x10)) continue;
+        // MarkerData = TESFullName (0x0C) then the flags: 1 on the map,
+        // 2 can travel there (= discovered), 4 hidden — the FNV layout and
+        // the bits of the XMRK FNAM record. Logged for the first few so a
+        // live log can confirm the reading.
+        UInt8 flags = md[0x0C];
+        if (s_logged < 12) {
+            ++s_logged;
+            F3A_INFO("Locations: '%s' marker bytes +08=%04X +0C=%02X +0D=%02X +0E=%04X",
+                     name.c_str(), *reinterpret_cast<const uint16_t*>(md + 0x08), md[0x0C],
+                     md[0x0D], *reinterpret_cast<const uint16_t*>(md + 0x0E));
+        }
+        if (flags & 0x04) continue;                              // hidden
+        float dx = r->posX - pp.x, dy = r->posY - pp.y;
+        if (!(dx * dx + dy * dy <= r2)) continue;
+        WorldEntity e;
+        e.kind     = WorldEntity::Kind::Location;
+        e.position = { r->posX, r->posY, r->posZ };
+        e.form_id  = r->refID;
+        e.refr     = r;
+        e.discovered = (flags & 0x02) != 0;
+        if (flags & 0x02)      e.name = name;                     // been there
+        else if (flags & 0x01) e.name = name + strings::T(", nieodkryte", ", undiscovered");    // heard of it
+        else                   e.name = strings::T("Nieodkryte miejsce", "Undiscovered place");
+        out.push_back(std::move(e));
+    }
+    std::sort(out.begin(), out.end(), [&pp](const WorldEntity& a, const WorldEntity& b) {
+        float da = (a.position.x - pp.x) * (a.position.x - pp.x) +
+                   (a.position.y - pp.y) * (a.position.y - pp.y);
+        float db = (b.position.x - pp.x) * (b.position.x - pp.x) +
+                   (b.position.y - pp.y) * (b.position.y - pp.y);
+        return da < db;
+    });
+    if ((int)out.size() > max_results) out.resize(max_results);
+    return out;
+}
 
 std::vector<MapMarker> GetMapMarkers()
 {
@@ -1592,6 +1854,81 @@ void* HookIAT(const char* dll, const char* func, void* newFn)
 }
 } // namespace
 
+namespace {
+// The game plays its films (the opening, the "years later" cards, the ending
+// slides) through Bink. Its two imports BinkOpen/BinkClose say which film and
+// when; the open BINK structure says how far it has got (frame number and
+// frame rate at +0x0C / +0x14 / +0x18, Bink 1.x), so descriptions follow the
+// picture even when playback stalls.
+using BinkOpen_t  = void* (__stdcall*)(const char*, UInt32);
+using BinkClose_t = void  (__stdcall*)(void*);
+BinkOpen_t  g_realBinkOpen  = nullptr;
+BinkClose_t g_realBinkClose = nullptr;
+std::mutex  g_bink_mx;
+void*       g_bink = nullptr;           // the film playing, under g_bink_mx
+std::string g_bink_name;
+DWORD       g_bink_open_at = 0;
+uint32_t    g_bink_seq = 0;
+
+void* __stdcall BinkOpen_Hook(const char* name, UInt32 flags)
+{
+    void* h = g_realBinkOpen ? g_realBinkOpen(name, flags) : nullptr;
+    std::string base = name ? name : "";
+    size_t slash = base.find_last_of("\\/");
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+    for (auto& c : base) c = (char)std::tolower((unsigned char)c);
+    if (h) {
+        std::lock_guard<std::mutex> lk(g_bink_mx);
+        g_bink = h;
+        g_bink_name = base;
+        g_bink_open_at = GetTickCount();
+        ++g_bink_seq;
+    }
+    F3A_INFO("Movie: '%s' opened (%p)", name ? name : "?", h);
+    return h;
+}
+
+void __stdcall BinkClose_Hook(void* h)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_bink_mx);
+        if (h && h == g_bink) {
+            F3A_INFO("Movie: '%s' closed after %.1f s", g_bink_name.c_str(),
+                     (GetTickCount() - g_bink_open_at) / 1000.0);
+            g_bink = nullptr;
+        }
+        if (g_realBinkClose) g_realBinkClose(h);
+    }
+}
+} // namespace
+
+void InstallMovieHooks()
+{
+    void* o = HookIAT("binkw32.dll", "_BinkOpen@8", reinterpret_cast<void*>(&BinkOpen_Hook));
+    if (o) g_realBinkOpen = reinterpret_cast<BinkOpen_t>(o);
+    void* c = HookIAT("binkw32.dll", "_BinkClose@4", reinterpret_cast<void*>(&BinkClose_Hook));
+    if (c) g_realBinkClose = reinterpret_cast<BinkClose_t>(c);
+    F3A_INFO("Movie hooks (BinkOpen/BinkClose IAT) %s.", (o && c) ? "installed" : "FAILED");
+}
+
+bool CurrentMovie(std::string* name, double* seconds, uint32_t* seq)
+{
+    std::lock_guard<std::mutex> lk(g_bink_mx);
+    if (!g_bink) return false;
+    if (name) *name = g_bink_name;
+    if (seq) *seq = g_bink_seq;
+    double t = (GetTickCount() - g_bink_open_at) / 1000.0;
+    auto* b = reinterpret_cast<const UInt32*>(g_bink);
+    if (Readable(b, 0x1C)) {
+        UInt32 w = b[0], h = b[1], frames = b[2], fn = b[3], rate = b[5], div = b[6];
+        if (w > 0 && w <= 8192 && h > 0 && h <= 8192 && rate > 0 && div > 0 &&
+            fn >= 1 && fn <= frames)
+            t = (fn - 1) * (double)div / (double)rate;
+    }
+    if (seconds) *seconds = t;
+    return true;
+}
+
 void InstallMainThreadHook()
 {
     void* prev = HookIAT("user32.dll", "DispatchMessageA",
@@ -1647,18 +1984,18 @@ std::string GetCrosshairRefName(uint32_t* out_form_id, uint32_t* out_type_id,
     if (out_form_id) *out_form_id = refr->refID;
 
     TESForm* bf = refr->baseForm;
-    if (!Readable(bf, 0x08)) return std::string("obiekt");
+    if (!Readable(bf, 0x08)) return std::string(strings::T("obiekt", "object"));
     if (out_type_id) *out_type_id = bf->typeID;
     const char* nm = BaseFormName(bf);
     if (out_known) *out_known = true;
     if (nm) return GameStrToUtf8(nm);
     switch (KindOf(bf->typeID)) {
-        case WorldEntity::Kind::Door:      return "drzwi";
-        case WorldEntity::Kind::Container: return "pojemnik";
-        case WorldEntity::Kind::Actor:     return "postać";
+        case WorldEntity::Kind::Door:      return strings::T("drzwi", "door");
+        case WorldEntity::Kind::Container: return strings::T("pojemnik", "container");
+        case WorldEntity::Kind::Actor:     return strings::T("postać", "character");
         default:
             if (out_known) *out_known = false;
-            return "obiekt";
+            return strings::T("obiekt", "object");
     }
 }
 
@@ -3450,9 +3787,11 @@ std::string ExpandControlTokens(const std::string& text)
                 replacement = KeyNameForScancode(globs->keyBinds[cn.index]);
                 if (replacement.empty()) {
                     UInt8 mb = globs->mouseBinds[cn.index];
-                    static const char* kMouse[] = { "lewy przycisk myszy",
-                        "prawy przycisk myszy", "środkowy przycisk myszy" };
-                    if (mb < 3) replacement = kMouse[mb];
+                    static const char* kMouse[][2] = {
+                        { "lewy przycisk myszy",     "left mouse button" },
+                        { "prawy przycisk myszy",    "right mouse button" },
+                        { "środkowy przycisk myszy", "middle mouse button" } };
+                    if (mb < 3) replacement = strings::T(kMouse[mb][0], kMouse[mb][1]);
                 }
             }
             break;
@@ -3679,6 +4018,27 @@ bool RefIsInInterior(const void* refr)
     TESObjectCELL* c = RefCellGuarded(refr);
     if (!c || IsBadReadPtr(c, 0xC4)) return false;
     return c->worldSpace == nullptr;
+}
+
+namespace {
+uint32_t CellSpaceId(TESObjectCELL* c)
+{
+    if (!c || IsBadReadPtr(c, 0xC4)) return 0;
+    TESWorldSpace* ws = c->worldSpace;
+    if (!ws) return c->refID;                        // an interior: the cell itself
+    if (IsBadReadPtr(ws, 0x10)) return 0;
+    return ws->refID;
+}
+} // namespace
+
+uint32_t PlayerSpaceId()
+{
+    return CellSpaceId(reinterpret_cast<TESObjectCELL*>(const_cast<void*>(GetPlayerCell())));
+}
+
+uint32_t RefSpaceId(const void* refr)
+{
+    return CellSpaceId(RefCellGuarded(refr));
 }
 
 bool DoorLeadsToTargetSpace(const void* doorRefr, const void* targetRefr)
@@ -4172,7 +4532,7 @@ void DescribeRowParts(Tile* t, std::string& label, std::string& value)
     value.clear();
     if (!t) return;
     CollectRowText(t, 0, label);
-    if (!label.empty() && RowIsEquipped(t)) label += ", założone";
+    if (!label.empty() && RowIsEquipped(t)) label += strings::T(", założone", ", equipped");
 
     // Walk the row tile and a couple of ancestors looking for a known
     // template, so we catch the value whether the focused tile is the row
@@ -4976,12 +5336,12 @@ Tile* FindDefaultsButton(Tile* t, int depth, UInt32& out_id)
 }
 } // namespace
 
-bool ClickRestoreDefaults()
+namespace {
+// The visible Start menu (main menu or pause menu) and its "Restore Defaults"
+// button — which only the SETTINGS pages have (gameplay, display, audio,
+// controls); the pause list itself does not.
+bool FindStartDefaults(Menu** outMenu, Tile** outBtn, UInt32* outId)
 {
-    // Click the "Restore Defaults" button in the settings/controls page
-    // (StartMenu). Like ClickMenuBack, we press it through the owning menu's
-    // HandleClick (a game call → main thread only). The game then pops its own
-    // Yes/No confirm, which our message-box reader already handles.
     auto* ifm = rt::IFM();
     if (!ifm || !ifm->menuRoot) return false;
     struct Node { Tile::ChildNode* item; Node* next; };
@@ -4994,9 +5354,9 @@ bool ClickRestoreDefaults()
             if (m && m->typeID == kMenuType_Start) {
                 UInt32 id = 0;
                 if (Tile* btn = FindDefaultsButton(cn->child, 0, id)) {
-                    F3A_INFO("ClickRestoreDefaults: '%s' (id=%u)",
-                             btn->name.m_data ? btn->name.m_data : "?", id);
-                    m->HandleClick(id, btn);
+                    if (outMenu) *outMenu = m;
+                    if (outBtn) *outBtn = btn;
+                    if (outId) *outId = id;
                     return true;
                 }
             }
@@ -5004,6 +5364,27 @@ bool ClickRestoreDefaults()
         node = node->next;
     }
     return false;
+}
+} // namespace
+
+bool SettingsPageOpen()
+{
+    return FindStartDefaults(nullptr, nullptr, nullptr);
+}
+
+bool ClickRestoreDefaults()
+{
+    // Click the "Restore Defaults" button in the settings/controls page
+    // (StartMenu). Like ClickMenuBack, we press it through the owning menu's
+    // HandleClick (a game call → main thread only). The game then pops its own
+    // Yes/No confirm, which our message-box reader already handles.
+    Menu* m = nullptr;
+    Tile* btn = nullptr;
+    UInt32 id = 0;
+    if (!FindStartDefaults(&m, &btn, &id)) return false;
+    F3A_INFO("ClickRestoreDefaults: '%s' (id=%u)", btn->name.m_data ? btn->name.m_data : "?", id);
+    m->HandleClick(id, btn);
+    return true;
 }
 
 // ---- Pip-Boy --------------------------------------------------------------
@@ -5124,9 +5505,9 @@ PipBoyTab GetActivePipBoyTab()
 std::string GetActivePipBoyTabName()
 {
     switch (GetActivePipBoyTab()) {
-    case PipBoyTab::Stats: return "Statystyki";
-    case PipBoyTab::Items: return "Przedmioty";
-    case PipBoyTab::Data:  return "Dane";
+    case PipBoyTab::Stats: return strings::T("Statystyki", "Stats");
+    case PipBoyTab::Items: return strings::T("Przedmioty", "Items");
+    case PipBoyTab::Data:  return strings::T("Dane", "Data");
     }
     return {};
 }

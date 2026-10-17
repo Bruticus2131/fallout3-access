@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 #     issues when the game loads us.
 
 project(Fallout3Access
-    VERSION 0.4.4
+    VERSION 0.5.0
     DESCRIPTION "Fallout 3 accessibility mod (screen reader integration)"
     LANGUAGES CXX
 )
@@ -77,6 +77,8 @@ set(F3A_SOURCES
     src/engine_hooks.cpp
     src/game_access.cpp
     src/navmesh.cpp
+    src/roadnet.cpp
+    src/worlddoors.cpp
     src/modules/pipboy.cpp
     src/modules/dialog.cpp
     src/modules/barter.cpp
@@ -91,6 +93,8 @@ set(F3A_SOURCES
     src/modules/quantity.cpp
     src/modules/lootmenu.cpp
     src/modules/sonar.cpp
+    src/modules/explore.cpp
+    src/modules/audiodesc.cpp
     src/modules/levelup.cpp
     src/modules/nav_assist.cpp
     src/modules/world_scan.cpp
@@ -144,7 +148,7 @@ target_compile_options(Fallout3Access PRIVATE
 )
 
 target_link_libraries(Fallout3Access PRIVATE
-    user32 kernel32 shell32 advapi32 shlwapi version winmm
+    user32 kernel32 shell32 advapi32 shlwapi version winmm gdi32 gdiplus ole32
 )
 
 set_target_properties(Fallout3Access PROPERTIES
@@ -165,6 +169,16 @@ if(GAME_PATH AND EXISTS "${GAME_PATH}/Fallout3.exe")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_SOURCE_DIR}/data/Fallout3Access.ini"
                 "${PLUGIN_DIR}/Fallout3Access.ini"
+        # Walk graphs and the world-door table (tools/generate_*.py): long
+        # walks and walks to other places need them, and nothing says so
+        # when they are missing beyond a line in the log.
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PLUGIN_DIR}/Fallout3Access"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/data/roadnet"
+                "${PLUGIN_DIR}/Fallout3Access"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_SOURCE_DIR}/data/audiodesc"
+                "${PLUGIN_DIR}/Fallout3Access"
         DEPENDS Fallout3Access
         COMMENT "Deploying fallout3_access.dll to ${PLUGIN_DIR}"
     )

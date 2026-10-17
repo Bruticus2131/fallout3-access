@@ -229,6 +229,35 @@ constexpr float kGoalFallbackDist  = 800.0f;
 
 constexpr float kAvoidRadius = 120.0f;   // a doorway's worth of triangles
 
+bool GroundZ(float x, float y, float nearZ, float* outZ)
+{
+    if (!outZ) return false;
+    std::vector<Tri> tris;
+    if (!GatherCellTriangles(tris)) return false;
+    Vec3 p{ x, y, nearZ };
+    bool found = false;
+    float bestDz = 1e30f, bestZ = 0.0f;
+    for (const Tri& t : tris) {
+        if (!PointInTri2D(p, t.pos[0], t.pos[1], t.pos[2])) continue;
+        // The height of the triangle's plane at (x, y).
+        const Vec3& a = t.pos[0]; const Vec3& b = t.pos[1]; const Vec3& c = t.pos[2];
+        float det = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+        float z;
+        if (std::fabs(det) > 1e-3f) {
+            float wa = ((b.y - c.y) * (x - c.x) + (c.x - b.x) * (y - c.y)) / det;
+            float wb = ((c.y - a.y) * (x - c.x) + (a.x - c.x) * (y - c.y)) / det;
+            z = wa * a.z + wb * b.z + (1.0f - wa - wb) * c.z;
+        } else {
+            z = t.centroid.z;
+        }
+        if (!std::isfinite(z)) continue;
+        float dz = std::fabs(z - nearZ);
+        if (dz < bestDz) { bestDz = dz; bestZ = z; found = true; }
+    }
+    if (found) *outZ = bestZ;
+    return found;
+}
+
 bool BuildPath(const Vec3& from, const Vec3& to,
                std::vector<Vec3>& out_waypoints,
                const std::vector<Vec3>* avoid)

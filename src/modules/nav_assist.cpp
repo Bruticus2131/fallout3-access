@@ -28,7 +28,7 @@ void SpeakWhereAmI()
 {
     if (SkipIfNotInGame()) return;
     std::string loc = game::GetCurrentLocationName();
-    if (loc.empty()) loc = "Pustkowia";
+    if (loc.empty()) loc = strings::T("Pustkowia", "Capital Wasteland");
     float yaw = game::GetPlayerYaw();
     std::string compass = strings::CompassDirection(yaw);
 
@@ -72,7 +72,7 @@ void SpeakQuestTarget()
     bool has_pos = qt.position.x != 0.0f || qt.position.y != 0.0f ||
                    qt.position.z != 0.0f;
     if (!has_pos) {
-        tolk::Speak("Zadanie: " + label, tolk::Priority::System, true);
+        tolk::Speak(strings::T("Zadanie: ", "Quest: ") + label, tolk::Priority::System, true);
         return;
     }
     auto pos = game::GetPlayerPosition();
@@ -98,7 +98,8 @@ void GuideToQuest()
     bool has_pos = qt.position.x != 0.0f || qt.position.y != 0.0f ||
                    qt.position.z != 0.0f;
     if (!has_pos) {
-        tolk::Speak("Cel zadania bez markera na mapie: " + qt.name,
+        tolk::Speak(strings::T("Cel zadania bez markera na mapie: ",
+                              "Quest objective with no map marker: ") + qt.name,
                     tolk::Priority::System, true);
         return;
     }
@@ -108,9 +109,12 @@ void GuideToQuest()
     // the Alt+Home teleport is not advised — its native MoveTo has crashed
     // the game.
     if (qt.refr && !game::TargetSharesPlayerSpace(qt.refr)) {
-        tolk::Speak("Cel zadania jest w innej lokacji — sygnał tam nie "
-                    "poprowadzi. Użyj automatycznego chodzenia: prowadzi "
-                    "przez przejścia.",
+        tolk::Speak(strings::T("Cel zadania jest w innej lokacji — sygnał tam nie "
+                               "poprowadzi. Użyj automatycznego chodzenia: prowadzi "
+                               "przez przejścia.",
+                               "The quest objective is in another location — the beacon "
+                               "can't lead you there. Use auto-walk: it goes through "
+                               "the doors on the way."),
                     tolk::Priority::System, true);
         return;
     }

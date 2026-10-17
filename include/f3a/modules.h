@@ -36,6 +36,12 @@ namespace lootmenu { void Init(); void Shutdown(); void Tick(float dt); bool IsO
 // Pip-Boy sonar: one key plays a sweep round the player in which every nearby
 // enemy, person, crate, door and item answers from its own direction.
 namespace sonar { void Init(); void Shutdown(); void Tick(float dt); }
+// Not missing things: finds announced on the way during auto-walk (O walks to
+// one and back), and the area sweep (U what is left, I walk to the next).
+namespace explore { void Init(); void Shutdown(); void Tick(float dt); }
+// Audio description: scenes (quest stages) and people (first look), from
+// Fallout3Access\audiodesc_pl.txt, said in the gaps between voices.
+namespace audiodesc { void Init(); void Shutdown(); void Tick(float dt); void ToggleMovies(); void ResetSession(); }
 // The level-up screen: headline, points left, entries with values and their
 // descriptions, in the game's own words.
 namespace levelup { void Init(); void Shutdown(); }
@@ -59,6 +65,8 @@ bool IsWalking();
 const void*        TargetRefr();
 uint32_t           TargetFormId();
 const std::string& TargetName();
+game::Vec3         TargetPos();          // where the walk is finally going
+bool               IsFollowingQuest();   // a walk to the live quest marker
 // One-line diagnostic (F11 dump): current target, player/target positions,
 // Z-delta, whether a navmesh path exists, and a live path-rebuild result — so a
 // "why is autowalk stuck" report needs no screenshot.

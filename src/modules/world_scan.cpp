@@ -24,11 +24,26 @@ namespace {
 std::string LockDesc(const game::WorldEntity& e)
 {
     if (!e.locked) return "";
-    if (e.lock_level >= 250) return ", zamknięte na klucz";
+    if (e.lock_level >= 250)
+        return strings::T(", zamknięte na klucz", ", locked, requires a key");
     int L = e.lock_level;
-    const char* d = (L < 25) ? "bardzo łatwy" : (L < 50) ? "łatwy" :
-                    (L < 75) ? "średni"       : (L < 100) ? "trudny" : "bardzo trudny";
-    return std::string(", zamknięte, zamek ") + d;
+    const char* d = (L < 25)  ? strings::T("bardzo łatwy", "very easy lock") :
+                    (L < 50)  ? strings::T("łatwy", "easy lock") :
+                    (L < 75)  ? strings::T("średni", "average lock") :
+                    (L < 100) ? strings::T("trudny", "hard lock") :
+                                strings::T("bardzo trudny", "very hard lock");
+    return std::string(strings::T(", zamknięte, zamek ", ", locked, ")) + d;
+}
+
+// A body is something to search, not someone to talk to: Dad's last
+// holotape is on Jonas's body in the vault, and nothing said he was one.
+// Whether anything is left on it, when that can be told.
+std::string BodyDesc(const game::WorldEntity& e)
+{
+    if (e.kind != game::WorldEntity::Kind::Actor || !e.dead) return "";
+    if (e.items == 1) return strings::T(", nie żyje, do przeszukania", ", dead, can be searched");
+    if (e.items == 0) return strings::T(", nie żyje, pusty", ", dead, empty");
+    return strings::T(", nie żyje", ", dead");
 }
 
 void Announce(const game::WorldEntity& e, const game::Bearing& b)
@@ -50,7 +65,7 @@ void Announce(const game::WorldEntity& e, const game::Bearing& b)
         key = strings::Key::NearbyItemFmt; break;
     }
 
-    std::string name = e.name + LockDesc(e);   // append lock state for doors/containers
+    std::string name = e.name + LockDesc(e) + BodyDesc(e);   // lock state / body
     tolk::Speak(
         strings::RenderArgs(key, name.c_str(), dist.c_str(), dir.c_str()),
         tolk::Priority::Background, false);
@@ -62,7 +77,8 @@ void DoScan(bool hostiles_only)
     // ambiguous: if the scanner is gated off you HEAR why, rather than wonder
     // whether the key even fired.
     if (!game::IsPlayerValid()) {
-        tolk::Speak("Skaner niedostępny tutaj.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Skaner niedostępny tutaj.", "Scanner not available here."),
+                    tolk::Priority::System, true);
         return;
     }
     const auto& cfg = config::Get();
@@ -95,27 +111,33 @@ void ScanHostiles() { DoScan(true);  }
 
 // Scanner categories (cycled with Shift+PgUp / Shift+PgDn). g_scan_full holds the
 // full unfiltered scan; g_scan_list is the current category's view.
-enum Category { Cat_All, Cat_Npc, Cat_Item, Cat_Door, Cat_Container,
-                Cat_Quest, Cat_COUNT };
+enum Category { Cat_All, Cat_Npc, Cat_Corpse, Cat_Item, Cat_Door, Cat_Container,
+                Cat_Location, Cat_Quest, Cat_COUNT };
 
 const char* CatName(int c)
 {
     switch (c) {
-    case Cat_All:       return "wszystko";
-    case Cat_Npc:       return "postacie";
-    case Cat_Item:      return "przedmioty";
-    case Cat_Door:      return "drzwi";
-    case Cat_Container: return "pojemniki";
-    case Cat_Quest:     return "zadania";
+    case Cat_All:       return strings::T("wszystko", "all");
+    case Cat_Npc:       return strings::T("postacie", "people");
+    case Cat_Corpse:    return strings::T("ciała", "bodies");
+    case Cat_Item:      return strings::T("przedmioty", "items");
+    case Cat_Door:      return strings::T("drzwi", "doors");
+    case Cat_Container: return strings::T("pojemniki", "containers");
+    case Cat_Location:  return strings::T("miejsca", "places");
+    case Cat_Quest:     return strings::T("zadania", "quests");
     default:            return "?";
     }
 }
 
-bool PassesCategory(game::WorldEntity::Kind k, int cat)
+bool PassesCategory(const game::WorldEntity& e, int cat)
 {
+    const auto k = e.kind;
     switch (cat) {
     case Cat_All:       return true;
-    case Cat_Npc:       return k == game::WorldEntity::Kind::Actor;
+    // People are the living; bodies have their own category, as in the FNV
+    // mod — bodies are for searching, the living for talking to.
+    case Cat_Npc:       return k == game::WorldEntity::Kind::Actor && !e.dead;
+    case Cat_Corpse:    return k == game::WorldEntity::Kind::Actor && e.dead;
     case Cat_Item:      return k == game::WorldEntity::Kind::Item ||
                                k == game::WorldEntity::Kind::Note;
     case Cat_Door:      return k == game::WorldEntity::Kind::Door;
@@ -245,6 +267,31 @@ bool GameplayAndHud()
     return active == menu::Id::None || active == menu::Id::HUDMain;
 }
 
+// How many each category view keeps (nearest first). The categories are cut
+// from the WHOLE scan, never from a short list: with a cap on the scan itself,
+// a category whose things were all a little further off came out empty.
+constexpr int kViewMax  = 80;
+constexpr int kScanMax  = 3000;     // the scan itself: in practice everything in range
+
+// The list a category shows, from the current scan. Shared by the browse view
+// and by the question "is anything in it at all", so the two can never differ.
+std::vector<game::WorldEntity> CategoryView(int cat)
+{
+    std::vector<game::WorldEntity> v;
+    if (cat == Cat_Location) {
+        // Places come from the worldspace's map markers, as far as the compass
+        // shows them (the FNV mod's range).
+        v = game::GetNearbyLocations(20000.0f, kViewMax);
+        return v;
+    }
+    for (const auto& e : g_scan_full) {
+        if (!PassesCategory(e, cat)) continue;
+        v.push_back(e);
+        if ((int)v.size() >= kViewMax) break;      // g_scan_full is nearest first
+    }
+    return v;
+}
+
 void Refilter()
 {
     g_scan_list.clear();
@@ -266,8 +313,7 @@ void Refilter()
                       return da < db;
                   });
     } else {
-        for (const auto& e : g_scan_full)
-            if (PassesCategory(e.kind, g_category)) g_scan_list.push_back(e);
+        g_scan_list = CategoryView(g_category);
     }
     g_scan_index = g_scan_list.empty() ? -1 : 0;
 }
@@ -276,7 +322,7 @@ void Rescan()
 {
     const auto& cfg = config::Get();
     // A wider net than the X-key scan: cycling is how the player explores.
-    g_scan_full = game::ScanNearby(cfg.nearby_scan_radius * 2, 80,
+    g_scan_full = game::ScanNearby(cfg.nearby_scan_radius * 2, kScanMax,
                                    false, false);
     g_scan_cell = game::GetPlayerCell();
     F3A_INFO("Scanner rescan: %d objects found.", (int)g_scan_full.size());
@@ -293,26 +339,28 @@ bool ScanListStale()
 void AnnounceCurrent()
 {
     if (g_scan_index < 0 || g_scan_index >= (int)g_scan_list.size()) {
-        tolk::Speak(std::string("Brak w kategorii: ") + CatName(g_category),
+        tolk::Speak(std::string(strings::T("Brak w kategorii: ", "Nothing in category: ")) +
+                        CatName(g_category),
                     tolk::Priority::System, true);
         return;
     }
     const auto& e = g_scan_list[g_scan_index];
-    char idx[16];
-    std::snprintf(idx, sizeof(idx), "%d z %d",
+    char idx[24];
+    std::snprintf(idx, sizeof(idx), strings::T("%d z %d", "%d of %d"),
                   g_scan_index + 1, (int)g_scan_list.size());
 
     // Active quests with no compass marker ("go talk to X") have no bearing —
     // announce the name only so the distance/direction isn't bogus.
     if (!e.has_marker) {
-        tolk::Speak(e.name + ", bez markera, " + idx, tolk::Priority::Ui, true);
+        tolk::Speak(e.name + strings::T(", bez markera, ", ", no marker, ") + idx,
+                    tolk::Priority::Ui, true);
         return;
     }
 
     auto pos  = game::GetPlayerPosition();
     float yaw = game::GetPlayerYaw();
     auto b    = game::ComputeBearing(pos, yaw, e.position);
-    std::string line = e.name + LockDesc(e) + ", " +
+    std::string line = e.name + LockDesc(e) + BodyDesc(e) + ", " +
                        strings::FormatDistance(b.distance) + ", " +
                        strings::ClockDirection(b.relative_yaw) + ", " + idx;
     tolk::Speak(line, tolk::Priority::Ui, true);
@@ -331,11 +379,33 @@ bool CategoryModHeld()
 // category name — the player then uses plain PgUp/PgDn to browse objects in
 // it. (Announcing an object here made category-cycling sound like it was
 // still scrolling objects.)
+//
+// Only categories with something in them: the scan is made afresh on every
+// step (things move, the player walks — a cell outdoors is 4096 units wide,
+// so "same cell" is no proof of "same things"), and a category is skipped
+// only when its own view, built exactly as browsing builds it, is empty.
+// Said with the count: "pojemniki, 3".
 void CategoryStep(int dir)
 {
-    g_category = (g_category + dir + Cat_COUNT) % Cat_COUNT;
-    if (ScanListStale()) Rescan(); else Refilter();
-    tolk::Speak(CatName(g_category), tolk::Priority::Ui, true);
+    Rescan();
+    int from = g_category;
+    for (int i = 1; i <= Cat_COUNT; ++i) {
+        int c = ((from + dir * i) % Cat_COUNT + Cat_COUNT) % Cat_COUNT;
+        int n = 0;
+        if (c == Cat_Quest)         n = (int)game::GetActiveQuests().size();
+        else if (c == Cat_Location) n = (int)CategoryView(c).size();
+        else for (const auto& e : g_scan_full) if (PassesCategory(e, c)) ++n;   // all, not the view's cap
+        if (n <= 0) continue;
+        g_category = c;
+        Refilter();
+        F3A_INFO("Scanner category '%s': %d", CatName(c), n);
+        tolk::Speak(std::string(CatName(c)) + ", " + std::to_string(n),
+                    tolk::Priority::Ui, true);
+        return;
+    }
+    g_category = Cat_All;
+    Refilter();
+    tolk::Speak(strings::T("Nic w pobliżu.", "Nothing nearby."), tolk::Priority::Ui, true);
 }
 
 // Browse the quest category. The journal list is re-read LIVE on every press
@@ -415,7 +485,8 @@ void TurnToCurrent()
         if (!act.empty()) { tgt = act[0].position; name = act[0].name; have = true; }
     }
     if (!have) {
-        tolk::Speak("Brak celu w pobliżu.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Brak celu w pobliżu.", "No target nearby."),
+                    tolk::Priority::System, true);
         return;
     }
 
@@ -428,7 +499,7 @@ void TurnToCurrent()
     float dx = tgt.x - pp.x, dy = tgt.y - pp.y;
     float yawDeg = std::atan2(dx, dy) * 57.2957795f;   // 0 = north(+Y), clockwise
     poll::RequestAim(/*yaw*/true, yawDeg, /*pitch*/false, 0.0f);
-    tolk::Speak("Obracam do: " + name, tolk::Priority::Ui, true);
+    tolk::Speak(strings::T("Obracam do: ", "Turning to: ") + name, tolk::Priority::Ui, true);
     // Verify ~450 ms later: announce where the target now sits, so we can hear if
     // the native turn actually landed it ahead (≈ "godzina dwunasta").
     g_turn_verify_pos   = tgt;
@@ -441,7 +512,8 @@ void TurnToCurrent()
 bool HaveTarget()
 {
     if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size()) return true;
-    tolk::Speak("Najpierw wybierz cel skanerem.",
+    tolk::Speak(strings::T("Najpierw wybierz cel skanerem.",
+                           "Select a target with the scanner first."),
                 tolk::Priority::System, true);
     return false;
 }
@@ -453,7 +525,8 @@ void GuideToggle()
     if (!HaveTarget()) return;
     const auto& e = g_scan_list[g_scan_index];
     if (!e.has_marker) {
-        tolk::Speak("To zadanie nie ma markera na mapie.",
+        tolk::Speak(strings::T("To zadanie nie ma markera na mapie.",
+                               "This quest has no map marker."),
                     tolk::Priority::System, true);
         return;
     }
@@ -462,8 +535,10 @@ void GuideToggle()
     // walking/beaconing toward those raw coordinates heads off in a meaningless
     // direction — send the player to teleport instead of leading them astray.
     if (e.refr && !game::TargetSharesPlayerSpace(e.refr)) {
-        tolk::Speak("Cel jest w innej lokacji — sygnał tam nie poprowadzi. "
-                    "Użyj automatycznego chodzenia: prowadzi przez przejścia.",
+        tolk::Speak(strings::T("Cel jest w innej lokacji — sygnał tam nie poprowadzi. "
+                               "Użyj automatycznego chodzenia: prowadzi przez przejścia.",
+                               "The target is in another location — the beacon can't lead "
+                               "there. Use auto-walk: it goes through doors."),
                     tolk::Priority::System, true);
         return;
     }
@@ -478,13 +553,14 @@ void GuideToggle()
 void DropItem()
 {
     if (menu::ActiveMenu() != menu::Id::Inventory) {
-        tolk::Speak("Najpierw otwórz ekwipunek.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Najpierw otwórz ekwipunek.", "Open your inventory first."),
+                    tolk::Priority::System, true);
         return;
     }
     poll::RequestDropItem();
 }
 
-// Press the highlighted row in whatever menu is open (Insert).
+// Press the highlighted row in whatever menu is open (F2; was Insert, which NVDA takes).
 //
 // This exists for key rebinding: Fallout's controls page starts listening for a
 // new key only when the row is CLICKED, so with the keyboard alone a blind
@@ -492,13 +568,10 @@ void DropItem()
 // generic — any list that needs a click rather than Enter benefits.
 void PressRow()
 {
-    // The HUD counts as "a menu" to the dispatcher, but there is no row to
-    // press in the world.
-    auto m = menu::ActiveMenu();
-    if (m == menu::Id::None || m == menu::Id::HUDMain || !poll::MenuModeActive()) {
-        tolk::Speak("Ta funkcja działa w menu.", tolk::Priority::System, true);
-        return;
-    }
+    // Only in the main/pause menu, and there only on a settings page (checked
+    // on the game's thread). Elsewhere F2 belongs to the game - a Pip-Boy page -
+    // so it is left alone, silently.
+    if (menu::ActiveMenu() != menu::Id::Start || !poll::MenuModeActive()) return;
     poll::RequestPressRow();
 }
 
@@ -537,14 +610,16 @@ void AimTrim(float units)
 {
     if (!GameplayAndHud()) return;
     if (!poll::AimTrackActive()) {
-        tolk::Speak("Najpierw wybierz cel klawiszem celowania.",
+        tolk::Speak(strings::T("Najpierw wybierz cel klawiszem celowania.",
+                               "Select a target with the aim key first."),
                     tolk::Priority::System, true);
         return;
     }
     float total = poll::NudgeAim(units);
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "%s, poprawka %+.0f",
-                  units > 0 ? "Wyżej" : "Niżej", total);
+    std::snprintf(buf, sizeof(buf), strings::T("%s, poprawka %+.0f", "%s, correction %+.0f"),
+                  units > 0 ? strings::T("Wyżej", "Higher") : strings::T("Niżej", "Lower"),
+                  total);
     tolk::Speak(buf, tolk::Priority::Combat, true);
 }
 
@@ -631,7 +706,9 @@ void AimControlTick()
         std::string name;
         float dist = 0.0f;
         if (!LockAimOnCurrentTarget(&name, &dist)) {
-            F3A_INFO("AimControl: held, but there is nothing to lock onto");
+            F3A_INFO("AimControl: held, but there is nothing to lock onto (%s)", name.c_str());
+            // Said, so a shot is not fired at whatever happens to be ahead.
+            if (!name.empty()) tolk::Speak(name, tolk::Priority::Combat, true);
         } else {
             F3A_INFO("AimControl: held — locked on '%s'", name.c_str());
             // Say WHAT the aim took, the way Home does: "Radrakan, 300
@@ -666,7 +743,8 @@ void AutoWalkToggle()
     if (!HaveTarget()) return;
     const auto& e = g_scan_list[g_scan_index];
     if (!e.has_marker) {
-        tolk::Speak("To zadanie nie ma markera na mapie.",
+        tolk::Speak(strings::T("To zadanie nie ma markera na mapie.",
+                               "This quest has no map marker."),
                     tolk::Priority::System, true);
         return;
     }
@@ -711,7 +789,8 @@ void ActivateTarget()
     // target ref — the terminal / door / NPC the compass points to). Only a pure
     // map-marker with no ref can't be activated.
     if (e.kind == game::WorldEntity::Kind::Quest && !e.refr) {
-        tolk::Speak("Ten cel zadania to tylko marker — nie da się aktywować.",
+        tolk::Speak(strings::T("Ten cel zadania to tylko marker — nie da się aktywować.",
+                               "This objective is only a marker — it can't be activated."),
                     tolk::Priority::System, true);
         return;
     }
@@ -720,7 +799,7 @@ void ActivateTarget()
         char cmd[80];
         std::snprintf(cmd, sizeof(cmd), "%08X.activate player 1", e.form_id);
         console::Run(cmd);
-        tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
+        tolk::Speak(strings::T("Używam: ", "Using: ") + e.name, tolk::Priority::Ui, true);
         return;
     }
     // Best path: call the engine's native Activate(player) on our exact ref —
@@ -735,7 +814,7 @@ void ActivateTarget()
         SendUse(true);
         g_use_hold_ticks = 5;
     }
-    tolk::Speak("Używam: " + e.name, tolk::Priority::Ui, true);
+    tolk::Speak(strings::T("Używam: ", "Using: ") + e.name, tolk::Priority::Ui, true);
 }
 
 // View announce is no longer hooked to the F key. We poll the real camera flag
@@ -772,7 +851,7 @@ void ItemInfo()
     }
     auto sel = game::GetKeyboardSelectionText();
     if (sel && !sel->empty()) tolk::Speak(*sel, tolk::Priority::Ui, true);
-    else tolk::Speak("Brak opisu.", tolk::Priority::System, true);
+    else tolk::Speak(strings::T("Brak opisu.", "No description."), tolk::Priority::System, true);
 }
 
 // HP / AP / radiation readout (H). We only REQUEST it here (poll thread); the
@@ -790,17 +869,19 @@ void CrosshairInfo()
     uint32_t id = 0, type = 0;
     std::string nm = game::GetCrosshairRefName(&id, &type);
     if (nm.empty()) {
-        tolk::Speak("Nic pod celownikiem.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Nic pod celownikiem.", "Nothing under the crosshair."),
+                    tolk::Priority::System, true);
         return;
     }
-    std::string msg = "Pod celownikiem: " + nm;
+    std::string msg = strings::T("Pod celownikiem: ", "Under the crosshair: ") + nm;
     // Is it the object currently selected in the scanner?
     if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size()) {
         uint32_t sel = g_scan_list[g_scan_index].form_id;
-        msg += (sel && sel == id) ? ", to wybrany cel" : ", inny obiekt";
+        msg += (sel && sel == id) ? strings::T(", to wybrany cel", ", the selected target")
+                                  : strings::T(", inny obiekt", ", a different object");
     }
     char t[32];
-    std::snprintf(t, sizeof(t), ", typ %u", type);
+    std::snprintf(t, sizeof(t), strings::T(", typ %u", ", type %u"), type);
     msg += t;
     tolk::Speak(msg, tolk::Priority::Ui, true);
 }
@@ -830,6 +911,8 @@ struct AimTarget {
     float       up    = 0.0f;
     const void* refr  = nullptr;
     uint32_t    refid = 0;
+    bool        actor   = false;   // a person or a creature
+    bool        hostile = false;   // ...that the game counts as an enemy
 };
 // Where on a reference to aim. A scan entry carries the object's ORIGIN, and
 // for an actor that is between its feet — hence the flat "+100 for a torso",
@@ -883,6 +966,8 @@ void FillAimPoint(AimTarget* out, const game::WorldEntity& e)
     out->name  = e.name;
     out->refr  = e.refr;
     out->refid = e.form_id;
+    out->actor   = e.kind == game::WorldEntity::Kind::Actor || game::RefIsActor(e.refr);
+    out->hostile = game::IsKnownHostile(e.form_id);
     const char* how = nullptr;
     game::Vec3 p{};
     if (e.refr && game::GetAimPointFor(e.refr, &p, &how)) {
@@ -1061,7 +1146,8 @@ void LockNearestEnemy()
     if (!real_enemy)
         host = game::ScanNearby(reach, 1, /*actors_only=*/true, false);
     if (host.empty()) {
-        tolk::Speak("Nikogo w pobliżu.", tolk::Priority::Combat, true);
+        tolk::Speak(strings::T("Nikogo w pobliżu.", "No one nearby."),
+                    tolk::Priority::Combat, true);
         return;
     }
     AimTarget at{};
@@ -1076,7 +1162,8 @@ void LockNearestEnemy()
              real_enemy ? "(fighting us)" : "(nearest actor, nobody in combat)",
              dist);
     tolk::Speak(host[0].name + ", " + strings::FormatDistance(dist) +
-                (real_enemy ? ". Na celu." : ". Na celu, nie walczy."),
+                (real_enemy ? strings::T(". Na celu.", ". On target.")
+                            : strings::T(". Na celu, nie walczy.", ". On target, not fighting.")),
                 tolk::Priority::Combat, true);
 }
 
@@ -1089,7 +1176,13 @@ void LockNearestEnemy()
 // them. Same rule as the FNV mod's AutoAim: actors fighting the player, the
 // nearest first; a hostile the player picked in the scanner wins. With no
 // fight on, the old choice stands (practice targets, a picked object).
-bool PickCombatTarget(AimTarget* out)
+//
+// NEVER a person or creature who is not an enemy. With no fight on, the
+// scanner's pick stands only if it is a thing (a practice target, an object):
+// a log showed the aim key locking onto Butch's mother — the last thing walked
+// to — while radroaches bit her, and four shots hit her. `why` says what to
+// tell the player when nothing was taken.
+bool PickCombatTarget(AimTarget* out, std::string* why = nullptr)
 {
     auto host = game::ScanNearby(config::Get().nearby_scan_radius * 2, 8,
                                  /*actors_only=*/true, /*hostiles_only=*/true);
@@ -1102,7 +1195,33 @@ bool PickCombatTarget(AimTarget* out)
         FillAimPoint(out, host[0]);          // nearest enemy
         return true;
     }
-    return PickAimTarget(out);
+    if (!PickAimTarget(out)) {
+        if (why) *why = strings::T("Brak wroga w pobliżu.", "No enemy nearby.");
+        return false;
+    }
+    // One exception: a creature the objective itself points at ("Zabij
+    // radrakana za pomocą wiatrówki") before the game counts it as hostile.
+    bool objective = g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
+                     g_scan_list[g_scan_index].kind == game::WorldEntity::Kind::Quest;
+    if (out->actor && !out->hostile && objective && game::RefIsCreature(out->refr)) {
+        F3A_INFO("AimTarget: '%s' is a creature the objective points at - taken",
+                 out->name.c_str());
+        return true;
+    }
+    if (out->actor && !out->hostile) {
+        F3A_INFO("AimTarget: '%s' is not an enemy - the aim key leaves them alone",
+                 out->name.c_str());
+        // Named only when the player picked them; the nearest bystander is
+        // just "no enemy".
+        bool picked = g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
+                      g_scan_list[g_scan_index].has_marker;
+        if (why) *why = picked ? out->name + strings::T(" nie jest wrogiem. Nie celuję.",
+                                                        " is not an enemy. Not aiming.")
+                               : std::string(strings::T("Brak wroga w pobliżu.",
+                                                        "No enemy nearby."));
+        return false;
+    }
+    return true;
 }
 
 // Turn the view onto a target and hold it there for `frames` main-thread
@@ -1129,7 +1248,11 @@ void LockAimOn(AimTarget& at, int frames)
 bool LockAimOnCurrentTarget(std::string* outName, float* outDist)
 {
     AimTarget at;
-    if (!PickCombatTarget(&at)) return false;
+    std::string why;
+    if (!PickCombatTarget(&at, &why)) {
+        if (outName) *outName = why;
+        return false;
+    }
     if (outDist) {
         auto pp = game::GetPlayerPosition();
         auto b  = game::ComputeBearing(pp, game::GetPlayerYaw(), at.pos);
@@ -1167,7 +1290,7 @@ void CommaAim()
     auto host = game::ScanNearby(config::Get().nearby_scan_radius * 2, 8,
                                  /*actors_only=*/true, /*hostiles_only=*/true);
     if (!host.empty() && PickCombatTarget(&at)) {
-        label = "Cel: " + at.name;
+        label = strings::T("Cel: ", "Target: ") + at.name;
         g_aim_cycle = 0;
     } else {
         auto tg = game::GetShootingTargets(4000);
@@ -1175,14 +1298,24 @@ void CommaAim()
             if (g_aim_cycle >= (int)tg.size()) g_aim_cycle = 0;
             FillAimPoint(&at, tg[g_aim_cycle]);
             char idx[32];
-            std::snprintf(idx, sizeof(idx), "Cel %d z %d", g_aim_cycle + 1, (int)tg.size());
+            std::snprintf(idx, sizeof(idx), strings::T("Cel %d z %d", "Target %d of %d"),
+                          g_aim_cycle + 1, (int)tg.size());
             label = idx;
             g_aim_cycle = (g_aim_cycle + 1) % (int)tg.size();
         } else if (PickAimTarget(&at)) {
-            label = "Celuję w: " + at.name;
+            if (at.actor && !at.hostile) {
+                // `,` is for shooting ("Strzelaj."): never at a friend.
+                F3A_INFO("CommaAim: '%s' is not an enemy - not aiming", at.name.c_str());
+                tolk::Speak(at.name + strings::T(" nie jest wrogiem. Nie celuję.",
+                                                 " is not an enemy. Not aiming."),
+                            tolk::Priority::Combat, true);
+                return;
+            }
+            label = strings::T("Celuję w: ", "Aiming at: ") + at.name;
             g_aim_cycle = 0;
         } else {
-            tolk::Speak("Brak celu. Zaznacz cel skanerem (C lub X).",
+            tolk::Speak(strings::T("Brak celu. Zaznacz cel skanerem (C lub X).",
+                                   "No target. Select one with the scanner (C or X)."),
                         tolk::Priority::System, true);
             return;
         }
@@ -1192,7 +1325,8 @@ void CommaAim()
     float dist = game::ComputeBearing(pp, game::GetPlayerYaw(), at.pos).distance;
     F3A_INFO("CommaAim: %s (refid %08X) at (%.0f,%.0f,%.0f)", label.c_str(),
              (unsigned)at.refid, at.pos.x, at.pos.y, at.pos.z);
-    tolk::Speak(label + ", " + strings::FormatDistance(dist) + ". Strzelaj.",
+    tolk::Speak(label + ", " + strings::FormatDistance(dist) +
+                    strings::T(". Strzelaj.", ". Fire."),
                 tolk::Priority::Combat, true);
 }
 
@@ -1203,7 +1337,7 @@ void TrackTick()
     if (!GameplayAndHud()) { TrackStop(nullptr); return; }
     game::Vec3 p{};
     if (!game::GetRefPosition(g_track_refr, g_track_refid, &p)) {
-        TrackStop("Cel zniknął. Koniec śledzenia.");
+        TrackStop(strings::T("Cel zniknął. Koniec śledzenia.", "Target lost. Tracking stopped."));
         return;
     }
     AimAtPoint(p, 100.0f);   // torso
@@ -1248,25 +1382,32 @@ void CenterCamera()
             uint32_t    rid = autowalk::TargetFormId();
             autowalk::Stop(); guide::Stop();
             poll::RequestTeleport(r, rid);
-            tolk::Speak("Teleportuję do: " + nm, tolk::Priority::Ui, true);
+            tolk::Speak(strings::T("Teleportuję do: ", "Teleporting to: ") + nm,
+                        tolk::Priority::Ui, true);
         } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
                    g_scan_list[g_scan_index].refr) {
             const auto& e = g_scan_list[g_scan_index];
             autowalk::Stop(); guide::Stop();
             poll::RequestTeleport(e.refr, e.form_id);
-            tolk::Speak("Teleportuję do: " + e.name, tolk::Priority::Ui, true);
+            tolk::Speak(strings::T("Teleportuję do: ", "Teleporting to: ") + e.name,
+                        tolk::Priority::Ui, true);
         } else {
-            tolk::Speak("Najpierw wybierz obiekt skanerem, żeby się teleportować.",
+            tolk::Speak(strings::T("Najpierw wybierz obiekt skanerem, żeby się teleportować.",
+                                   "Select an object with the scanner first to teleport."),
                         tolk::Priority::System, true);
         }
         return;
     }
     // Shift+Home = keep the camera ON the target while it moves (see TrackTick).
     if (hotkeys::ShiftActive()) {
-        if (g_track_on) { TrackStop("Koniec śledzenia."); return; }
+        if (g_track_on) {
+            TrackStop(strings::T("Koniec śledzenia.", "Tracking stopped."));
+            return;
+        }
         AimTarget at;
         if (!PickAimTarget(&at) || !at.refr) {
-            tolk::Speak("Nie ma kogo śledzić. Wybierz cel skanerem.",
+            tolk::Speak(strings::T("Nie ma kogo śledzić. Wybierz cel skanerem.",
+                                   "Nothing to track. Select a target with the scanner."),
                         tolk::Priority::System, true);
             return;
         }
@@ -1275,8 +1416,10 @@ void CenterCamera()
         g_track_refid = at.refid;
         g_track_name  = at.name;
         float d = AimAtPoint(at.pos, at.up);
-        tolk::Speak("Śledzę: " + at.name + ", " + strings::FormatDistance(d) +
-                    ". Shift Home kończy.", tolk::Priority::Ui, true);
+        tolk::Speak(strings::T("Śledzę: ", "Tracking: ") + at.name + ", " +
+                        strings::FormatDistance(d) +
+                        strings::T(". Shift Home kończy.", ". Shift Home stops."),
+                    tolk::Priority::Ui, true);
         return;
     }
     TrackStop(nullptr);   // a plain Home means "aim once" — drop any tracking
@@ -1291,7 +1434,8 @@ void CenterCamera()
     AimTarget at;
     if (!PickAimTarget(&at)) {
         poll::RequestAim(/*yaw*/false, 0.0f, /*pitch*/true, 0.0f);   // just level
-        tolk::Speak("Poziomuję widok. Brak celu w pobliżu.",
+        tolk::Speak(strings::T("Poziomuję widok. Brak celu w pobliżu.",
+                               "Leveling the view. No target nearby."),
                     tolk::Priority::Ui, true);
         return;
     }
@@ -1369,6 +1513,14 @@ void Tick(float)
     TrackTick();     // Shift+Home target tracking: re-aim at a moving target
     AimControlTick();
     AimHoldPoll();   // let go of the aim key -> lower the weapon
+    {
+        // Someone who is not an enemy stepped between the aim and its target.
+        std::string who;
+        if (poll::TakeLineOfFireWarning(&who))
+            tolk::Speak(strings::T("Uwaga, na linii strzału: ", "Warning, in the line of fire: ") +
+                            who + ".",
+                        tolk::Priority::Combat, true);
+    }
 
     // Lockpick sweet-spot cue: beep faster + higher the closer the pin is to the
     // sweet spot; a steady high tone when ON it — then hold the force key (W) to
@@ -1410,7 +1562,7 @@ void Tick(float)
                 F3A_INFO("Turn verify: '%s' now %.1f deg off",
                          g_turn_verify_name.c_str(), b.relative_yaw);
                 if (!g_turn_verify_quiet)
-                    tolk::Speak(g_turn_verify_name + ", teraz " +
+                    tolk::Speak(g_turn_verify_name + strings::T(", teraz ", ", now ") +
                                 strings::ClockDirection(b.relative_yaw),
                                 tolk::Priority::Ui, true);
             }
@@ -1425,13 +1577,13 @@ void Tick(float)
             g_level_on = false;
         } else if (--g_level_budget <= 0) {
             g_level_on = false;
-            tolk::Speak("Widok wypoziomowany.", tolk::Priority::Ui, true);
+            tolk::Speak(strings::T("Widok wypoziomowany.", "View leveled."), tolk::Priority::Ui, true);
         } else {
             float cur = game::GetPlayerPitch();
             float err = -cur;                         // want pitch 0 (horizontal)
             if (std::fabs(err) <= 1.5f) {
                 g_level_on = false;
-                tolk::Speak("Widok wypoziomowany.", tolk::Priority::Ui, true);
+                tolk::Speak(strings::T("Widok wypoziomowany.", "View leveled."), tolk::Priority::Ui, true);
             } else {
                 if (g_level_started &&
                     std::fabs(err) > std::fabs(g_level_prev) + 0.3f)
@@ -1476,8 +1628,10 @@ void Tick(float)
         if (poll::ConsumeNoLineOfFire(&bd, &bh)) {
             char buf[192];
             std::snprintf(buf, sizeof(buf),
-                          "Brak linii strzału. Przeszkoda %.0f jednostek przed "
-                          "tobą, %.0f nad podłogą. Podejdź bliżej albo obejdź.",
+                          strings::T("Brak linii strzału. Przeszkoda %.0f jednostek przed "
+                                     "tobą, %.0f nad podłogą. Podejdź bliżej albo obejdź.",
+                                     "No line of fire. Obstacle %.0f units ahead of you, "
+                                     "%.0f above the floor. Move closer or go around."),
                           bd, bh);
             tolk::Speak(buf, tolk::Priority::Combat, true);
         }
@@ -1496,7 +1650,7 @@ void Tick(float)
         if (poll::ConsumeTargetDown()) {
             audio::Cue(config::Get().target_cue_hz - 300, 90);
             audio::Cue(config::Get().target_cue_hz - 600, 120);
-            tolk::Speak("Cel padł.", tolk::Priority::Combat, true);
+            tolk::Speak(strings::T("Cel padł.", "Target down."), tolk::Priority::Combat, true);
         }
 
         if (on) {
@@ -1583,7 +1737,8 @@ void Tick(float)
             F3A_INFO("Aim loop: '%s' ran out of budget", g_aim_label.c_str());
             if (!g_aim_face_only)
                 tolk::Speak(g_aim_label +
-                    ", nie mogę namierzyć. Stań przodem do tarcz, pierwsza osoba.",
+                    strings::T(", nie mogę namierzyć. Stań przodem do tarcz, pierwsza osoba.",
+                               ", can't lock on. Face the targets, in first person."),
                     tolk::Priority::System, true);
             return;
         }
@@ -1663,7 +1818,7 @@ void Tick(float)
                     g_fire_holding = false;
                     g_spray_px = 0; g_spray_py = 0;
                     g_aim_wait     = 0;
-                    tolk::Speak(g_aim_label + ", strzelam.",
+                    tolk::Speak(g_aim_label + strings::T(", strzelam.", ", firing."),
                                 tolk::Priority::Ui, true);
                 } else {
                     long mv = (long)(err * g_pitch_gain) * g_pitch_sign;
@@ -1683,7 +1838,9 @@ void Tick(float)
                 g_spray_px = 0; g_spray_py = 0;
                 g_aim_on = false;
                 tolk::Speak(g_aim_label +
-                    ", oddałem serię. Sprawdź zadanie.", tolk::Priority::Ui, true);
+                    strings::T(", oddałem serię. Sprawdź zadanie.",
+                               ", burst fired. Check the quest."),
+                    tolk::Priority::Ui, true);
             } else if (!g_fire_holding) {
                 // Move to this grid point (relative to where we are) and fire.
                 int i = kSprayCount - g_fire_left;

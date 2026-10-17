@@ -64,6 +64,9 @@ std::atomic<bool>  g_corner_on{ false };
 std::atomic<float> g_corner_x{ 0.0f };
 std::atomic<float> g_corner_y{ 0.0f };
 std::atomic<bool>  g_run{ false };
+// A goal to stop ON rather than walk through (see SetGoalPrecise): within this
+// many units the hook holds still. 0 = an ordinary goal.
+std::atomic<float> g_goal_stop{ 0.0f };
 float g_heading = 0.0f;          // radians, engine convention (0 = +Y/north)
 bool  g_heading_seeded = false;
 // A new walk was started from the poll thread: the hook re-seeds its own
@@ -311,6 +314,13 @@ constexpr uintptr_t kMoverFullReset     = 0x007DF400;
 constexpr int       kPathTimeoutFrames  = 240;     // ~4 s of frames
 
 using SetGoalFn   = bool (__thiscall*)(void* actor, void* ref, float radius, void* avoid);
+// The same goal set from a POSITION — what SetPathfindingGoal itself calls
+// after reading the reference's position, cell and worldspace (the engine
+// uses it directly from 20+ AI sites). With a worldspace given, the cell is
+// ignored and the grid cell comes from the position.
+constexpr uintptr_t kSetPathfindingGoalPos = 0x006F8A70;
+using SetGoalPosFn = bool (__thiscall*)(void* actor, const float* pos, void* cell,
+                                        void* ws, float radius, void* avoid);
 using MoverUpdFn  = void (__thiscall*)(void* mover, float dt);
 using FullResetFn = void (__thiscall*)(void* mover);
 
@@ -336,10 +346,29 @@ bool EnginePathCodeOk()
     return g_ep_verified == 1;
 }
 
+// The position variant, checked on its own: routes to a point need it, routes
+// to a reference do not.
+int g_ep_pos_verified = -1;
+bool EnginePathPosOk()
+{
+    if (g_ep_pos_verified < 0) {
+        static const unsigned char kPos[] = { 0x8B,0x44,0x24,0x14,0x85,0xC0,0x56,0x8B,
+                                              0xF1,0x75,0x0E,0x8B,0x4E,0x60,0x8B,0x01 };
+        bool ok = !IsBadReadPtr(reinterpret_cast<void*>(kSetPathfindingGoalPos), 16) &&
+                  std::memcmp(reinterpret_cast<void*>(kSetPathfindingGoalPos), kPos, 16) == 0;
+        g_ep_pos_verified = ok ? 1 : 0;
+        F3A_INFO("EnginePath: the point variant %s", ok ? "is verified"
+                 : "does not match this build - routes to points disabled");
+    }
+    return g_ep_pos_verified == 1;
+}
+
 std::mutex              g_ep_mutex;       // guards the request and the result
 const void*             g_ep_ref    = nullptr;
 uint32_t                g_ep_refid  = 0;
 float                   g_ep_radius = 100.0f;
+bool                    g_ep_to_point = false;   // a point, not a reference
+float                   g_ep_point[3] = { 0.0f, 0.0f, 0.0f };
 std::vector<game::Vec3> g_ep_points;
 std::atomic<int>        g_ep_request{ 0 };  // 1 = a new request is waiting
 std::atomic<int>        g_ep_cancel{ 0 };
@@ -423,9 +452,12 @@ void TickEnginePath(void* mover, float dt)
 
     if (g_ep_request.exchange(0)) {
         const void* ref; uint32_t refid; float radius;
+        bool toPoint; float pt[3];
         {
             std::lock_guard<std::mutex> lk(g_ep_mutex);
             ref = g_ep_ref; refid = g_ep_refid; radius = g_ep_radius;
+            toPoint = g_ep_to_point;
+            pt[0] = g_ep_point[0]; pt[1] = g_ep_point[1]; pt[2] = g_ep_point[2];
             g_ep_work_seq = g_ep_req_seq;
         }
         if (g_ep_ticking) {                       // a newer request replaces it
@@ -441,19 +473,43 @@ void TickEnginePath(void* mover, float dt)
         }
         void* proc = *reinterpret_cast<void**>(player + 0x60);
         if (!proc || IsBadReadPtr(proc, 4)) { EnginePathFail("player has no process"); return; }
-        auto* r = reinterpret_cast<const TESObjectREFR*>(ref);
-        if (!r || IsBadReadPtr(r, 0x40) || r->refID != refid || !r->parentCell) {
-            EnginePathFail("target reference is gone"); return;
+        const void* pcell = nullptr; const void* pws = nullptr;
+        if (toPoint) {
+            if (!EnginePathPosOk()) { EnginePathFail("routes to points unavailable"); return; }
+            // "Must be finite": NaN makes the engine's grid lookup invalid.
+            if (!(std::isfinite(pt[0]) && std::isfinite(pt[1]) && std::isfinite(pt[2]))) {
+                EnginePathFail("the point is not a real position"); return;
+            }
+            PlayerArea(&pcell, &pws);
+            if (!pcell) { EnginePathFail("the player has no cell"); return; }
+        } else {
+            auto* r = reinterpret_cast<const TESObjectREFR*>(ref);
+            if (!r || IsBadReadPtr(r, 0x40) || r->refID != refid || !r->parentCell) {
+                EnginePathFail("target reference is gone"); return;
+            }
         }
         auto* m = reinterpret_cast<UInt8*>(mover);
         if (IsBadReadPtr(m, 0x80)) { EnginePathFail("mover unreadable"); return; }
 
         reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
-        bool ok = reinterpret_cast<SetGoalFn>(kSetPathfindingGoal)(
-                      player, const_cast<void*>(ref), radius, nullptr);
+        bool ok;
+        if (toPoint) {
+            // The player's own area: the point is in it (the walk asks only for
+            // points in the space it is walking).
+            ok = reinterpret_cast<SetGoalPosFn>(kSetPathfindingGoalPos)(
+                     player, pt, const_cast<void*>(pcell), const_cast<void*>(pws),
+                     radius, nullptr);
+        } else {
+            ok = reinterpret_cast<SetGoalFn>(kSetPathfindingGoal)(
+                     player, const_cast<void*>(ref), radius, nullptr);
+        }
         UInt8 inflight = m[0x74];
-        F3A_INFO("EnginePath: SetPathfindingGoal(%08X, r=%.0f) -> %d, in flight %d",
-                 refid, radius, (int)ok, (int)inflight);
+        if (toPoint)
+            F3A_INFO("EnginePath: SetPathfindingGoal(point %.0f,%.0f,%.0f, r=%.0f) -> %d, "
+                     "in flight %d", pt[0], pt[1], pt[2], radius, (int)ok, (int)inflight);
+        else
+            F3A_INFO("EnginePath: SetPathfindingGoal(%08X, r=%.0f) -> %d, in flight %d",
+                     refid, radius, (int)ok, (int)inflight);
         if (!ok) {
             reinterpret_cast<FullResetFn>(kMoverFullReset)(mover);
             EnginePathFail("the game found no route");
@@ -684,6 +740,37 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     if (!running) speed *= 0.5f;
     speed *= TurnSpeedScale(brake);
 
+    // A spot to stand ON (a trigger box a few dozen units across): ease in
+    // over the last stretch and never step past it in one frame. The walk
+    // module only looks every 80 ms, which at full speed is a stride — so the
+    // stopping has to happen here, frame by frame.
+    float stopR = g_goal_stop.load();
+    if (stopR > 0.0f) {
+        float left = std::sqrt(dx * dx + dy * dy);
+        if (left <= stopR) {
+            // On the spot: hold still. Lowering the flags alone leaves the
+            // actor its last motion (see the brake above), so a zero move
+            // takes it away, and the walk animation gives way to idle once.
+            SetMoverFlags(mover, false, false);
+            ClearMoveDirection(mover);
+            float zero[3] = { 0.0f, 0.0f, 0.0f };
+            ActorMove(player, clamped, zero);
+            if (g_current_anim != kAnimIdle) {
+                game::StopActorMovementAnim(player);
+                game::PlayActorAnimGroup(player, kAnimIdle);
+                g_current_anim = kAnimIdle;
+            }
+            return;
+        }
+        constexpr float kEaseIn = 96.0f;
+        if (left < kEaseIn) {
+            float k = left / kEaseIn;
+            speed *= k < 0.25f ? 0.25f : k;
+        }
+        float maxStep = (left - stopR * 0.5f) / (clamped > 0.0f ? clamped : 0.016f);
+        if (speed > maxStep) speed = maxStep > 0.0f ? maxStep : 0.0f;
+    }
+
     // Publish "moving forward" on the mover so scripts and the HUD agree that the
     // player is walking, then move the player ourselves.
     //
@@ -847,6 +934,7 @@ bool Active()    { return g_active.load(); }
 
 void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY)
 {
+    g_goal_stop.store(0.0f);
     g_corner_x.store(cornerX);
     g_corner_y.store(cornerY);
     g_corner_on.store(std::isfinite(cornerX) && std::isfinite(cornerY));
@@ -860,10 +948,23 @@ void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY)
 
 void SetGoal(float x, float y, bool run)
 {
+    g_goal_stop.store(0.0f);
     g_corner_on.store(false);
     g_goal_x.store(x);
     g_goal_y.store(y);
     g_run.store(run);
+    g_goal_stamp.fetch_add(1);      // feeds the watchdog in the hook
+    if (!g_active.exchange(true))
+        g_reseed_pending.store(true);   // the hook resets its state (next frame)
+}
+
+void SetGoalPrecise(float x, float y, float stopRadius)
+{
+    g_corner_on.store(false);
+    g_goal_x.store(x);
+    g_goal_y.store(y);
+    g_run.store(false);
+    g_goal_stop.store(stopRadius > 1.0f ? stopRadius : 1.0f);
     g_goal_stamp.fetch_add(1);      // feeds the watchdog in the hook
     if (!g_active.exchange(true))
         g_reseed_pending.store(true);   // the hook resets its state (next frame)
@@ -892,6 +993,21 @@ void RequestEnginePath(const void* refr, uint32_t refid, float radius)
     g_ep_points.clear();
     if (!g_installed.load() || !config::Get().engine_path) { g_ep_state.store(3); return; }
     g_ep_ref = refr; g_ep_refid = refid; g_ep_radius = radius;
+    g_ep_to_point = false;
+    g_ep_req_seq = g_ep_seq;
+    g_ep_state.store(1);
+    g_ep_request.store(1);
+}
+
+void RequestEnginePathToPoint(float x, float y, float z, float radius)
+{
+    std::lock_guard<std::mutex> lk(g_ep_mutex);
+    ++g_ep_seq;                       // whatever was being worked is now stale
+    g_ep_points.clear();
+    if (!g_installed.load() || !config::Get().engine_path) { g_ep_state.store(3); return; }
+    g_ep_ref = nullptr; g_ep_refid = 0; g_ep_radius = radius;
+    g_ep_to_point = true;
+    g_ep_point[0] = x; g_ep_point[1] = y; g_ep_point[2] = z;
     g_ep_req_seq = g_ep_seq;
     g_ep_state.store(1);
     g_ep_request.store(1);

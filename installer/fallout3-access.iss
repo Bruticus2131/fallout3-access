@@ -9,7 +9,7 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.4.4"
+#define AppVersion   "0.5.0"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
 ; Nexus Mods SSO application id ("slug"), issued by Nexus staff. While it is
@@ -440,6 +440,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   Params, LogFile: String;
   ResultCode: Integer;
+  ModFind: TFindRec;
 begin
   if CurStep <> ssPostInstall then
     Exit;
@@ -466,6 +467,14 @@ begin
     Params := Params + ' -SkipPatcher';
 
   if not OptPage.Values[0] then Params := Params + ' -SkipFose';
+
+  // A mod archive next to setup.exe (a test build handed round with the
+  // installer) is installed instead of the latest release on GitHub.
+  if FindFirst(ExpandConstant('{src}\fallout3-access-*.zip'), ModFind) then
+  begin
+    Params := Params + ' -ModArchive "' + ExpandConstant('{src}\') + ModFind.Name + '"';
+    FindClose(ModFind);
+  end;
 
   WizardForm.StatusLabel.Caption := CustomMessage('Working');
 

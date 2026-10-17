@@ -4,6 +4,7 @@
 #include "f3a/menu_dispatch.h"
 #include "f3a/audio_beacon.h"
 #include "f3a/tolk_bridge.h"
+#include "f3a/strings.h"
 #include "f3a/hotkeys.h"
 #include "f3a/config.h"
 #include "f3a/logger.h"
@@ -81,12 +82,12 @@ void Sweep()
     audio::Sweep(blips, kSweepMs);
 
     std::string say = "Sonar.";
-    AddCount(say, "Wrogowie", host);
-    AddCount(say, "Pojemniki", cont);
-    AddCount(say, "Drzwi", door);
-    AddCount(say, "Postacie", pers);
-    AddCount(say, "Przedmioty", item);
-    if (blips.empty()) say = "Sonar: nic w pobliżu.";
+    AddCount(say, strings::T("Wrogowie", "Enemies"), host);
+    AddCount(say, strings::T("Pojemniki", "Containers"), cont);
+    AddCount(say, strings::T("Drzwi", "Doors"), door);
+    AddCount(say, strings::T("Postacie", "People"), pers);
+    AddCount(say, strings::T("Przedmioty", "Items"), item);
+    if (blips.empty()) say = strings::T("Sonar: nic w pobliżu.", "Sonar: nothing nearby.");
     F3A_INFO("Sonar: %u blips (hostile %d, containers %d, doors %d, people %d, items %d)",
              (unsigned)blips.size(), host, cont, door, pers, item);
     // Said once the sweep has gone round, not over it.

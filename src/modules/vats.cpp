@@ -89,7 +89,9 @@ void SpeakSummary()
     std::string out;
     if (poll::VatsState(&v) && v.has_ap) {
         char buf[96];
-        std::snprintf(buf, sizeof(buf), "%d z %d punktów akcji", v.ap, v.max_ap);
+        std::snprintf(buf, sizeof(buf),
+                      strings::T("%d z %d punktów akcji", "%d of %d Action Points"),
+                      v.ap, v.max_ap);
         out = buf;
     }
     std::string sel;
@@ -103,10 +105,11 @@ void SpeakSummary()
         out += pick.name;
         if (pick.chance[0]) out += std::string(", ") + pick.chance;
         char buf[48];
-        std::snprintf(buf, sizeof(buf), ", %d z %d", pick.index, pick.count);
+        std::snprintf(buf, sizeof(buf), strings::T(", %d z %d", ", %d of %d"),
+                      pick.index, pick.count);
         out += buf;
     }
-    if (out.empty()) out = "Brak danych VATS.";
+    if (out.empty()) out = strings::T("Brak danych VATS.", "No V.A.T.S. data.");
     tolk::Speak(out, tolk::Priority::Combat, true);
 }
 
@@ -144,7 +147,8 @@ void PollVatsKeys()
         game::VatsPick p;
         int count = poll::VatsPickState(&p) ? p.count : 0;
         if (count <= 0) {
-            tolk::Speak("Brak wyboru.", tolk::Priority::Combat, true);
+            tolk::Speak(strings::T("Brak wyboru.", "Nothing to select."),
+                        tolk::Priority::Combat, true);
         } else {
             // Step from the part the GAME has selected when it marks one, so the
             // order follows what is really selected; from our own counter
@@ -179,10 +183,13 @@ void PollVatsKeys()
 // since VATS is unusable blind without knowing the flow.
 void SpeakTutorial()
 {
-    tolk::Speak(
+    tolk::Speak(strings::T(
         "Tryb V A T S. Klawiszami A i D zmieniasz cel, klawiszami W i S część "
         "ciała — czytam wybór: część ciała i szansę trafienia. Spacją dodajesz "
         "strzał do kolejki, E wykonuje zakolejkowane strzały i wychodzi z VATS.",
+        "V.A.T.S. mode. A and D change the target, W and S change the body part. "
+        "I read the selection: body part and hit chance. Space queues a shot, "
+        "E fires the queued shots and leaves V.A.T.S."),
         tolk::Priority::Combat, true);
 }
 
@@ -201,7 +208,9 @@ void AnnounceResources(bool force)
 
     if (!v.has_ap) return;                 // offsets didn't check out on this build
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "%d z %d punktów akcji", v.ap, v.max_ap);
+    std::snprintf(buf, sizeof(buf),
+                  strings::T("%d z %d punktów akcji", "%d of %d Action Points"),
+                  v.ap, v.max_ap);
     tolk::Speak(buf, tolk::Priority::Combat, false);
 }
 
@@ -213,7 +222,9 @@ std::string ResourceSummary()
     std::string out;
     char buf[96];
     if (v.has_ap) {
-        std::snprintf(buf, sizeof(buf), "%d z %d punktów akcji", v.ap, v.max_ap);
+        std::snprintf(buf, sizeof(buf),
+                      strings::T("%d z %d punktów akcji", "%d of %d Action Points"),
+                      v.ap, v.max_ap);
         out = buf;
     }
     // Deliberately NOT the ammo count. VATS gets reopened after every shot, so
@@ -221,7 +232,8 @@ std::string ResourceSummary()
     // unlike action points, it does not change what you can do in this menu.
     // It is still available on demand from the item card.
     if (v.queued > 0) {
-        std::snprintf(buf, sizeof(buf), "%d w kolejce", v.queued);
+        std::snprintf(buf, sizeof(buf), strings::T("%d w kolejce", "%d queued"),
+                      v.queued);
         if (!out.empty()) out += ", ";
         out += buf;
     }

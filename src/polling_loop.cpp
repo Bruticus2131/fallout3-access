@@ -370,7 +370,7 @@ void PollRaceSex()
         std::string say = st.label;
         if (st.kind == 2 && !st.value.empty())
             say = say.empty() ? st.value : say + ": " + st.value;
-        if (st.kind == 1 && st.selected) say += ", wybrane";
+        if (st.kind == 1 && st.selected) say += strings::T(", wybrane", ", selected");
         if (!say.empty()) tolk::Speak(say, tolk::Priority::Ui, !pageSaid);  // after the page name
         return;
     }
@@ -399,9 +399,15 @@ bool LooksLikeHint(const std::string& raw)
         raw.find(';', amp) - amp <= 40)
         return true;
     auto starts = [&](const char* p) { return raw.rfind(p, 0) == 0; };
+    // Polish build first, then the English one ("Press ... to ...", "Hold
+    // ...", "To ..."). Both are matched whatever language the mod speaks: the
+    // text is the game's, and so is its language.
     return starts("Aby ") || starts("Naciśnij") || starts("Wciśnij") ||
            raw.find(" naciśnij ") != std::string::npos ||
-           raw.find("naciśnij ESC") != std::string::npos;
+           raw.find("naciśnij ESC") != std::string::npos ||
+           starts("Press ") || starts("Hold ") || starts("To ") ||
+           raw.find(" press ") != std::string::npos ||
+           raw.find("Press ESC") != std::string::npos;
 }
 
 // Hints already read this game session (cleared only when the game restarts).
@@ -457,6 +463,16 @@ std::vector<std::string> g_hud_seen;
 
 struct HudSaid { std::string text; DWORD when; };
 std::vector<HudSaid> g_hud_said;
+
+// When the last voice line (a subtitle on the HUD) has probably been spoken:
+// audio description waits for it. Polish game voices run ~15 characters a
+// second.
+std::atomic<DWORD> g_voice_quiet_at{ 0 };
+
+// Quest stages for audio description, read on the game's thread.
+std::mutex g_qs_mx;
+struct QuestSample { uint32_t id; int stage; bool running; bool have; };
+std::vector<QuestSample> g_qs;           // under g_qs_mx
 constexpr DWORD kHudRepeatAfterMs = 5 * 60 * 1000;   // five minutes
 
 bool HudAlreadySaid(const std::string& line)
@@ -491,6 +507,7 @@ void PollHudProse()
             continue;
         }
         F3A_INFO("HUD: %s", line.c_str());
+        NoteVoiceLine(line.size());
         tolk::Speak(game::ExpandControlTokens(line), tolk::Priority::Ui, false);
     }
     g_hud_seen = std::move(now);
@@ -691,7 +708,7 @@ void PollQuestChange()
 
     if (quest_changed) {
         std::string name = game::GetTrackedQuestName();
-        std::string line = "Zadanie: " + (name.empty() ? obj : name);
+        std::string line = strings::T("Zadanie: ", "Quest: ") + (name.empty() ? obj : name);
         if (!name.empty() && !obj.empty()) line += ", " + obj;
         // The HUD's quest popup (PollQuestReminder) normally says this first.
         bool popupSaid = !g_qr_last_objective.empty() && !obj.empty() &&
@@ -709,7 +726,7 @@ void PollQuestChange()
                         g_qr_last_objective.find(obj) != std::string::npos;
         F3A_INFO("Quest change: new objective '%s'%s", obj.c_str(),
                  justSaid ? " (already read from the HUD)" : "");
-        if (!justSaid) tolk::Speak("Nowy cel: " + obj, tolk::Priority::Ui, false);
+        if (!justSaid) tolk::Speak(strings::T("Nowy cel: ", "New objective: ") + obj, tolk::Priority::Ui, false);
     }
 }
 
@@ -717,9 +734,12 @@ void PollQuestChange()
 // the image-only "You're SPECIAL!" book (and any +SPECIAL effect) accessible:
 // when a value changes we say "<name> <new value>". Throttled, and only while in
 // gameplay (where SPECIAL can change), since it calls a game getter per attr.
-const char* g_special_names[7] = {
-    "Siła", "Percepcja", "Wytrzymałość", "Charyzma",
-    "Inteligencja", "Zręczność", "Szczęście"
+// { Polish, English }: the language is picked when the name is spoken.
+const char* g_special_names[7][2] = {
+    { "Siła", "Strength" }, { "Percepcja", "Perception" },
+    { "Wytrzymałość", "Endurance" }, { "Charyzma", "Charisma" },
+    { "Inteligencja", "Intelligence" }, { "Zręczność", "Agility" },
+    { "Szczęście", "Luck" }
 };
 int  g_special[7]      = { -1, -1, -1, -1, -1, -1, -1 };
 bool g_special_init    = false;
@@ -778,7 +798,8 @@ void PollSpecialChange()
         g_special[i] = cur[i];
         pending_set[i] = false;
         char buf[64];
-        std::snprintf(buf, sizeof(buf), "%s %d", g_special_names[i], cur[i]);
+        std::snprintf(buf, sizeof(buf), "%s %d",
+                      strings::T(g_special_names[i][0], g_special_names[i][1]), cur[i]);
         tolk::Speak(buf, tolk::Priority::Ui, true);
     }
 }
@@ -803,7 +824,8 @@ constexpr DWORD kPovSettleMs = 350;         // > the ~100-150 ms zoom blip
 void AnnouncePov(int cur)
 {
     g_pov_announced.store(cur);
-    tolk::Speak(cur ? "Trzecia osoba" : "Pierwsza osoba",
+    tolk::Speak(cur ? strings::T("Trzecia osoba", "Third person")
+                    : strings::T("Pierwsza osoba", "First person"),
                 tolk::Priority::Ui, true);
 }
 
@@ -949,6 +971,12 @@ std::atomic<uint32_t> g_los_dist{ 0 };
 int  g_los_every = 0;
 bool g_los_on = false;
 bool g_los_said = false;        // has the first reading been logged yet
+// Someone who is NOT an enemy standing in the line of fire of a held aim:
+// found on the game's thread (the ray), spoken by the poll thread.
+std::mutex  g_fire_mx;
+std::string g_fire_name;        // under g_fire_mx; non-empty = a warning to speak
+uint32_t    g_fire_warned = 0;  // main thread: who was last warned about
+int         g_fire_clear  = 0;  // main thread: readings since the ray left them
 int  g_aim_reapply = 0;         // passes until the held aim is re-applied
 // Watching the held target's health, to notice a shot landing.
 std::atomic<uint32_t> g_hit_last_hp{ 0 };
@@ -1028,6 +1056,68 @@ void AimTrackReset()
     // resumes from it if this target says otherwise.
     if (!g_aim_settled) { g_aim_probe = 0; g_aim_bias = 0.0f; }
 }
+
+// Lead a target that is running: a shot is not instant. The BB gun's pellet
+// flies at 8000 units a second (BBProjectile in Fallout3.esm) and a charging
+// radroach is only 32 units wide, so aiming at where it IS puts the pellet
+// where it was. The speed is measured from the reference's own movement,
+// frame to frame and smoothed; a target standing still (a practice board, a
+// person waiting) gets no lead at all. Main thread only (AimTick). Call with
+// refid 0 to forget the target. Returns false when there is nothing to add.
+bool AimLead(uint32_t refid, const game::Vec3& origin, const game::Vec3& aim,
+             game::Vec3* out)
+{
+    constexpr float kShotSpeed = 8000.0f;   // units/s; FO3 bullets are this fast or faster
+    constexpr float kMinSpeed  = 40.0f;     // slower than this is standing still
+    constexpr float kMaxLead   = 64.0f;     // never swing further off than this
+    static uint32_t      s_id = 0;
+    static game::Vec3    s_last{};
+    static LARGE_INTEGER s_t{};
+    static float s_vx = 0.0f, s_vy = 0.0f, s_vz = 0.0f;
+    static int   s_samples = 0;
+    if (!refid || !out) { s_id = 0; return false; }
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    float dt = freq.QuadPart > 0
+        ? (float)(now.QuadPart - s_t.QuadPart) / (float)freq.QuadPart : 0.0f;
+    if (refid != s_id || !(dt > 0.0f && dt <= 0.5f)) {
+        // A new target, or the lock was paused (a menu): start measuring again.
+        s_id = refid; s_last = origin; s_t = now;
+        s_vx = s_vy = s_vz = 0.0f; s_samples = 0;
+        return false;
+    }
+    if (dt < 0.004f) return false;          // same frame twice: nothing new
+    float ix = (origin.x - s_last.x) / dt;
+    float iy = (origin.y - s_last.y) / dt;
+    float iz = (origin.z - s_last.z) / dt;
+    s_last = origin; s_t = now;
+    // "Must be within": a jump of thousands of units a second is a teleport
+    // or a respawn, not running — and NaN fails this test too.
+    if (!(ix * ix + iy * iy + iz * iz <= 2000.0f * 2000.0f)) {
+        s_vx = s_vy = s_vz = 0.0f; s_samples = 0;
+        return false;
+    }
+    const float a = 0.35f;                  // smoothing: a few frames' worth
+    s_vx += (ix - s_vx) * a; s_vy += (iy - s_vy) * a; s_vz += (iz - s_vz) * a;
+    if (++s_samples < 3) return false;
+    float sp = std::sqrt(s_vx * s_vx + s_vy * s_vy);
+    if (!(sp >= kMinSpeed)) return false;
+    game::Vec3 eye{ aim.x, aim.y, aim.z };
+    if (auto* pl = fose_rt::Player()) {
+        eye = { pl->posX, pl->posY, pl->posZ + 100.0f };
+        game::GetCameraPos(&eye);
+    }
+    float ex = aim.x - eye.x, ey = aim.y - eye.y, ez = aim.z - eye.z;
+    float range = std::sqrt(ex * ex + ey * ey + ez * ez);
+    float t = range / kShotSpeed + 1.0f / 60.0f;   // flight + the frame until it fires
+    float lx = s_vx * t, ly = s_vy * t, lz = s_vz * t;
+    float len = std::sqrt(lx * lx + ly * ly + lz * lz);
+    if (!(len > 0.5f)) return false;
+    if (len > kMaxLead) { float k = kMaxLead / len; lx *= k; ly *= k; lz *= k; }
+    *out = { lx, ly, lz };
+    return true;
+}
 // Aim at a REFERENCE's body (collision centre, measured from the camera). The
 // model reads and virtual calls make this main-thread-only.
 const void*       g_aimref_refr = nullptr;
@@ -1050,7 +1140,8 @@ void AnnounceStatus()
     int rad = (int)(game::GetPlayerAV(54) + 0.5f);   // RadLevel
     char buf[128];
     std::snprintf(buf, sizeof(buf),
-                  "Zdrowie %d, akcja %d, promieniowanie %d", hp, ap, rad);
+                  strings::T("Zdrowie %d, akcja %d, promieniowanie %d",
+                             "Health %d, action points %d, rads %d"), hp, ap, rad);
     tolk::Speak(buf, tolk::Priority::Ui, true);
 }
 
@@ -1114,7 +1205,7 @@ void TickNativeAim()
     // Did the last probe land the crosshair on the target?
     uint32_t cur = game::GetCrosshairRefID();
     if (g_naim_refid && cur == g_naim_refid) {
-        tolk::Speak("Na celu, strzelaj.", tolk::Priority::Ui, true);
+        tolk::Speak(strings::T("Na celu, strzelaj.", "On target, fire."), tolk::Priority::Ui, true);
         g_naim_phase = 0;
         return;
     }
@@ -1123,7 +1214,7 @@ void TickNativeAim()
         // (typically out of its short range). Re-centre on the geometric aim and
         // trust it; the player fires with the LOS cue.
         PointAt(0.0f, 0.0f);
-        tolk::Speak("Celuję na oko, strzelaj.", tolk::Priority::Ui, true);
+        tolk::Speak(strings::T("Celuję na oko, strzelaj.", "Aiming roughly, fire."), tolk::Priority::Ui, true);
         g_naim_phase = 0;
         return;
     }
@@ -1304,13 +1395,28 @@ void PollXpChange()
     s_xp = xp; s_pending = -1;
     F3A_INFO("XP +%d (now %d)", gain, xp);
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "+%d PD", gain);
+    std::snprintf(buf, sizeof(buf), strings::T("+%d PD", "+%d XP"), gain);
     tolk::Speak(buf, tolk::Priority::Ui, false);
 }
 
 void MainThreadWork()
 {
     game::NoteMainThread();
+    // Quest stages the audio description watches, four times a second.
+    {
+        static DWORD s_qs_at = 0;
+        DWORD now = GetTickCount();
+        if (now - s_qs_at >= 250) {
+            s_qs_at = now;
+            std::lock_guard<std::mutex> lk(g_qs_mx);
+            for (auto& q : g_qs) {
+                bool run = false;
+                int st = game::GetQuestStage(q.id, &run);
+                q.have = st >= 0;
+                if (q.have) { q.stage = st; q.running = run; }
+            }
+        }
+    }
     // Who is fighting the player: a virtual call per actor, so it is worked
     // out here and ScanNearby (poll thread) reads the result.
     {
@@ -1362,15 +1468,18 @@ void MainThreadWork()
         // play, so a spoken "open the controls page first" fired on every
         // reload — advice for something the player was not trying to do.
         if (game::ClickRestoreDefaults())
-            tolk::Speak("Przywracam domyślne sterowanie. Potwierdź wybór.",
+            tolk::Speak(strings::T("Przywracam domyślne sterowanie. Potwierdź wybór.",
+                                   "Restoring default controls. Confirm your choice."),
                         tolk::Priority::System, true);
         else
             F3A_DEBUG("RestoreDefaults: not on the controls page — ignored.");
     }
     if (g_skip_pending.exchange(false)) {
         bool ok = game::AdvanceTrackedQuestStage();
-        tolk::Speak(ok ? "Przeskoczono etap zadania. Sprawdź nowy cel."
-                       : "Nie udało się przeskoczyć etapu — brak aktywnego zadania.",
+        tolk::Speak(ok ? strings::T("Przeskoczono etap zadania. Sprawdź nowy cel.",
+                                    "Quest stage skipped. Check the new objective.")
+                       : strings::T("Nie udało się przeskoczyć etapu — brak aktywnego zadania.",
+                                    "Could not skip the stage: no active quest."),
                     tolk::Priority::System, true);
     }
     // Sample the quantity prompt while we are on the thread that owns it — but
@@ -1465,20 +1574,22 @@ void MainThreadWork()
         game::ClickMenuButton(g_menuclick_menu.load(), g_menuclick_tile, 8);
     }
     if (g_press_row_pending.exchange(false)) {
-        // No list filter: this is the generic "activate what I have selected".
-        if (game::ClickSelectedRowIn(nullptr)) {
-            // Only the controls page (in the pause/start menu) waits for a
-            // key; elsewhere the row's own action speaks for itself.
-            if (menu::ActiveMenu() == menu::Id::Start)
-                tolk::Speak("Naciśnij nowy klawisz.", tolk::Priority::System, true);
-        } else
-            tolk::Speak("Nie ma zaznaczonej pozycji.", tolk::Priority::System, true);
+        // Settings pages only. The key is F2 — a Pip-Boy page key of the
+        // game's own — so anywhere else it is the game's: in the Pip-Boy a
+        // "click the selected row" would use or equip whatever is selected.
+        if (!game::SettingsPageOpen()) {
+            F3A_DEBUG("PressRow: not on a settings page - left to the game.");
+        } else if (game::ClickSelectedRowIn(nullptr)) {
+            tolk::Speak(strings::T("Naciśnij nowy klawisz.", "Press the new key."), tolk::Priority::System, true);
+        } else {
+            tolk::Speak(strings::T("Nie ma zaznaczonej pozycji.", "Nothing is selected."), tolk::Priority::System, true);
+        }
     }
     if (g_track_quest_pending.exchange(false)) {
         if (game::ClickSelectedRowIn("MM_QuestsList"))
-            tolk::Speak("Śledzę to zadanie.", tolk::Priority::Ui, true);
+            tolk::Speak(strings::T("Śledzę to zadanie.", "Tracking this quest."), tolk::Priority::Ui, true);
         else
-            tolk::Speak("Najpierw wybierz zadanie na liście.",
+            tolk::Speak(strings::T("Najpierw wybierz zadanie na liście.", "First select a quest in the list."),
                         tolk::Priority::System, true);
     }
     if (g_drop_pending.exchange(false)) {
@@ -1486,24 +1597,27 @@ void MainThreadWork()
         // engine gives the vanilla behaviour, including the quantity prompt for
         // a stack. No item juggling on our side.
         if (!game::ClickMenuButton(kMenuType_Inventory, "IM_DropButton", 8))
-            tolk::Speak("Otwórz ekwipunek i wybierz przedmiot, potem Delete.",
+            tolk::Speak(strings::T("Otwórz ekwipunek i wybierz przedmiot, potem Delete.",
+                                   "Open the inventory and select an item, then press Delete."),
                         tolk::Priority::System, true);
     }
     if (g_map_marker_pending.exchange(false)) {
         if (!game::ClickMapMarkerTile(g_map_marker_tile))
-            tolk::Speak("Nie znalazłem tej lokacji na mapie świata.",
+            tolk::Speak(strings::T("Nie znalazłem tej lokacji na mapie świata.",
+                                   "Could not find this location on the world map."),
                         tolk::Priority::System, true);
     }
     if (g_map_travel_pending.exchange(false)) {
         bool ok = game::ClickMapTravelButton();
-        if (!ok) tolk::Speak("Nie znalazłem przycisku podróży na mapie.",
+        if (!ok) tolk::Speak(strings::T("Nie znalazłem przycisku podróży na mapie.",
+                                        "Could not find the travel button on the map."),
                              tolk::Priority::System, true);
     }
     if (int c = g_container_filter.exchange(0)) {
         int v = c - 1;
         bool side = (v & 2) != 0, next = (v & 1) != 0;
         if (!game::ClickContainerFilter(side, next))
-            tolk::Speak("Nie znalazłem przełącznika kategorii.",
+            tolk::Speak(strings::T("Nie znalazłem przełącznika kategorii.", "Could not find the category switch."),
                         tolk::Priority::System, true);
     }
     if (int c = g_container_step.exchange(0)) {
@@ -1517,7 +1631,8 @@ void MainThreadWork()
                 tolk::Speak(s->value.empty() ? s->label : s->label + ", " + s->value,
                             tolk::Priority::Ui, true);
         } else if (r == 0) {
-            tolk::Speak(side ? "Pojemnik jest pusty." : "Nie masz nic przy sobie.",
+            tolk::Speak(side ? strings::T("Pojemnik jest pusty.", "The container is empty.")
+                            : strings::T("Nie masz nic przy sobie.", "You are carrying nothing."),
                         tolk::Priority::Ui, true);
         }
     }
@@ -1531,10 +1646,12 @@ void MainThreadWork()
         if (quiet) {
             if (r <= 0) F3A_INFO("Container: focus restore refused (r=%d)", r);
         } else if (r == 0)
-            tolk::Speak(toContainer ? "Pojemnik jest pusty." : "Nie masz nic przy sobie.",
+            tolk::Speak(toContainer ? strings::T("Pojemnik jest pusty.", "The container is empty.")
+                                   : strings::T("Nie masz nic przy sobie.", "You are carrying nothing."),
                         tolk::Priority::Ui, true);
         else if (r < 0)
-            tolk::Speak("Nie mogę przełączyć kolumny w tej wersji gry.",
+            tolk::Speak(strings::T("Nie mogę przełączyć kolumny w tej wersji gry.",
+                                "Cannot switch columns in this version of the game."),
                         tolk::Priority::System, true);
     }
     if (int c = g_vats_click.exchange(0)) {
@@ -1619,9 +1736,9 @@ void MainThreadWork()
             if (game::AimAtReference(g_aimref_refr, &how)) {
                 // The aim point tells the player how precise this is: a
                 // collision hit is exact, an origin fallback is a guess.
-                tolk::Speak(how == "collision" ? "Na celu."
-                          : how == "bounds"    ? "Na celu."
-                                               : "Celuję z grubsza.",
+                tolk::Speak(how == "collision" ? strings::T("Na celu.", "On target.")
+                          : how == "bounds"    ? strings::T("Na celu.", "On target.")
+                                               : strings::T("Celuję z grubsza.", "Aiming roughly."),
                             tolk::Priority::Ui, false);
             }
         }
@@ -1773,7 +1890,8 @@ void Tick(float dt)
             // menu_dispatch suppresses Start's generic announcement either way.
             if (t == kMenuType_Start && !g_in_gameplay) {
                 tolk::Speak(
-                    strings::RenderArgs(strings::Key::MenuOpened, "Menu główne"),
+                    strings::RenderArgs(strings::Key::MenuOpened,
+                                        strings::T("Menu główne", "Main menu")),
                     tolk::Priority::Ui, true);
             }
         }
@@ -1786,6 +1904,7 @@ void Tick(float dt)
             if (t == kMenuType_Loading) {
                 g_postload_cooldown = kPostLoadCooldownTicks;
                 modules::worldscan::ResetSession();
+                modules::audiodesc::ResetSession();   // quest stages read afresh, silently
                 g_pov_announced.store(-1);
                 // A held or calibration aim must not carry into the loaded
                 // save (F9 is the game's quickload), nor the old save's map
@@ -1856,6 +1975,8 @@ void Tick(float dt)
         modules::quantity::Tick(dt);   // sampled state only — safe
         modules::lootmenu::Tick(dt);   // sampled state only — safe
         modules::sonar::Tick(dt);      // speaks the sweep's summary when it ends
+        modules::explore::Tick(dt);    // finds on the way during auto-walk
+        modules::audiodesc::Tick(dt);  // descriptions of scenes and people
         PollQuestChange();
         // NOTE: SPECIAL/status read game functions (GetActorValue) and so MUST
         // run on the main thread — see MainThreadWork(), invoked by the
@@ -2279,6 +2400,27 @@ void AimTick()
             g_los_hit.store(ok ? hit : 0);
             g_los_dist.store(FToBits(ok ? dist : 0.0f));
             bool now_on = (hit == want);
+            // A person or creature who is not an enemy is in the way: say so
+            // before the player fires. Butch's mother died to four shots of
+            // an aim that was on her; with the aim right, she can still step
+            // in front of the radroach.
+            if (ok && hit && hit != want && !game::IsKnownHostile(hit) &&
+                !game::IsKnownDead(hit)) {
+                g_fire_clear = 0;
+                if (hit != g_fire_warned) {
+                    bool isActor = false;
+                    std::string nm = game::RefActorName(hit, &isActor);
+                    if (isActor) {
+                        g_fire_warned = hit;
+                        F3A_INFO("AimLOS: %08X '%s' (not an enemy) is in the line of fire "
+                                 "at %.0f units", hit, nm.c_str(), dist);
+                        std::lock_guard<std::mutex> lk(g_fire_mx);
+                        g_fire_name = nm.empty() ? std::string(strings::T("ktoś", "someone")) : nm;
+                    }
+                }
+            } else if (g_fire_warned && ++g_fire_clear >= 10) {
+                g_fire_warned = 0;          // out of the way for ~0.5 s: warn again next time
+            }
             if (now_on != g_los_on || !g_los_said) {
                 g_los_on = now_on;
                 g_los_said = true;
@@ -2326,11 +2468,24 @@ void AimTick()
                 game::Vec3 at{ eye.x + std::sin(yaw) * cp * pick->dist,
                                eye.y + std::cos(yaw) * cp * pick->dist,
                                eye.z - std::sin(pitch) * pick->dist };
-                // No reference id on purpose: `at` is the measured spot a ray
-                // actually reached. Handing over the reference as well would
-                // make the tracker look it up and go back to aiming at its
-                // origin, undoing the measurement.
-                RequestAimTrack(nullptr, 0, at, 0.0f, -1);
+                // Keep the REFERENCE, with the measured spot as its offset
+                // (RequestAimTrack stores at - origin): the tracker then aims
+                // at that spot on the target wherever it goes. Locking onto
+                // the bare point instead is why a radroach could be hit once
+                // and then never again — the first shot landed, the roach ran,
+                // and the aim stayed on the floor where it had been. Only a
+                // bare point when the ray reached some other part of the same
+                // target we cannot follow (no live reference to hang it on).
+                const void* tr = g_aimtrack_refr.load();
+                uint32_t    tid = g_aimtrack_refid.load();
+                int left = g_aimtrack_frames.load();   // the lock's own length
+                game::Vec3 live{};
+                if (left == 0)
+                    ;                                   // the lock is already over
+                else if (tr && tid == want && game::GetRefPosition(tr, tid, &live))
+                    RequestAimTrack(tr, tid, at, 0.0f, left);
+                else
+                    RequestAimTrack(nullptr, 0, at, 0.0f, left);
                 g_aim_solve.store(false);
                 F3A_INFO("AimRefine: ray hit %08X '%s' at %.0f units, "
                          "%+.1f deg side, %+.1f deg up/down - locked on that spot",
@@ -2363,11 +2518,14 @@ void AimTick()
             // what the player is looking for.
             if (h.samples > 200 && h.name.empty()) continue;
             char buf[192];
-            std::snprintf(buf, sizeof(buf), "%s, %.0f jednostek, %.0f stopni %s. ",
-                          h.name.empty() ? "obiekt" : h.name.c_str(),
+            std::snprintf(buf, sizeof(buf),
+                          strings::T("%s, %.0f jednostek, %.0f stopni %s. ",
+                                     "%s, %.0f units, %.0f degrees %s. "),
+                          h.name.empty() ? strings::T("obiekt", "object") : h.name.c_str(),
                           h.dist, std::fabs(h.yaw),
-                          h.yaw < -1.0f ? "w lewo" : (h.yaw > 1.0f ? "w prawo"
-                                                                  : "na wprost"));
+                          h.yaw < -1.0f ? strings::T("w lewo", "left")
+                                        : (h.yaw > 1.0f ? strings::T("w prawo", "right")
+                                                        : strings::T("na wprost", "ahead")));
             say += buf;
             ++spoken;
         }
@@ -2407,13 +2565,15 @@ void AimTick()
             g_aim_solve.store(false);   // nothing to solve: the ray already did
             char buf[160];
             std::snprintf(buf, sizeof(buf),
-                          "Celuję w najbliższy obiekt: %.0f jednostek, %.0f stopni %s.",
+                          strings::T("Celuję w najbliższy obiekt: %.0f jednostek, %.0f stopni %s.",
+                                     "Aiming at the nearest object: %.0f units, %.0f degrees %s."),
                           pick->dist, std::fabs(pick->yaw),
-                          pick->yaw < -1.0f ? "w lewo"
-                                            : (pick->yaw > 1.0f ? "w prawo" : "na wprost"));
+                          pick->yaw < -1.0f ? strings::T("w lewo", "left")
+                                            : (pick->yaw > 1.0f ? strings::T("w prawo", "right")
+                                                                : strings::T("na wprost", "ahead")));
             say += buf;
         }
-        if (say.empty()) say = "Nic, w co dałoby się trafić.";
+        if (say.empty()) say = strings::T("Nic, w co dałoby się trafić.", "Nothing that could be hit.");
         tolk::Speak(say, tolk::Priority::Ui, true);
     }
 
@@ -2428,17 +2588,30 @@ void AimTick()
     // the view while the player is reading their Pip-Boy fights the game for no
     // benefit. Skipped, not cancelled — the lock resumes when play does.
     if (trackFrames != 0 && (!IsGameplayActive() || MenuModeActive())) trackFrames = 0;
+    // Nor while auto-walk drives the player: both turned the body every frame
+    // (Home pressed mid-walk, a lock with no end), and the walk zig-zagged.
+    // A lock with no end is dropped; a timed one just waits.
+    if (trackFrames != 0 && mover::Active()) {
+        if (trackFrames < 0) g_aimtrack_frames.store(0);
+        trackFrames = 0;
+    }
     if (trackFrames != 0) {
         // Live reference position when there is one (it may be walking away),
         // otherwise the point we were given.
         game::Vec3 tp{};
         if (game::GetRefPosition(g_aimtrack_refr.load(),
                                  g_aimtrack_refid.load(), &tp)) {
+            game::Vec3 origin = tp;
             // The live origin plus where on it we were asked to aim.
             tp.x += BitsToF(g_aimtrack_offx.load());
             tp.y += BitsToF(g_aimtrack_offy.load());
             tp.z += BitsToF(g_aimtrack_offz.load());
+            game::Vec3 lead{};
+            if (AimLead(g_aimtrack_refid.load(), origin, tp, &lead)) {
+                tp.x += lead.x; tp.y += lead.y; tp.z += lead.z;
+            }
         } else {
+            AimLead(0, {}, {}, nullptr);       // nothing moving to lead
             tp.x = BitsToF(g_aimtrack_x.load());
             tp.y = BitsToF(g_aimtrack_y.load());
             tp.z = BitsToF(g_aimtrack_z.load());
@@ -2464,7 +2637,9 @@ void AimTick()
             static float s_rx = 0.0f, s_ry = 0.0f, s_rz = 0.0f, s_pz = 0.0f;
             static uint32_t s_flags = 0;
             const void* r = g_aimtrack_refr.load();
-            if (r && !IsBadReadPtr(r, 0x40)) {
+            // Not for a person or a creature: they turn and step all the
+            // time, and every frame of it was logged as "a hit".
+            if (r && !IsBadReadPtr(r, 0x40) && !game::RefIsActor(r)) {
                 auto* ref = reinterpret_cast<const TESObjectREFR*>(r);
                 if (r != s_watch) {
                     s_watch = r;
@@ -2531,8 +2706,10 @@ void AimTick()
             game::Vec3 solved{};
             uint32_t want = g_aimtrack_refid.load();
             if (game::SolveAimPoint(tp, want, &solved)) {
-                g_aim_ox.store(FToBits(solved.x - tp.x));
-                g_aim_oy.store(FToBits(solved.y - tp.y));
+                // Sideways only for things that stay put (see RequestAimTrack).
+                bool still = !game::RefIsActor(g_aimtrack_refr.load());
+                g_aim_ox.store(FToBits(still ? solved.x - tp.x : 0.0f));
+                g_aim_oy.store(FToBits(still ? solved.y - tp.y : 0.0f));
                 g_aim_oz.store(FToBits(solved.z - tp.z));
                 // Only the offset is kept. The stored point stays the
                 // reference's ORIGIN, so the correction is applied exactly once
@@ -2711,6 +2888,12 @@ void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
                 !(ox * ox + oy * oy + oz * oz <= 1000.0f * 1000.0f)) {
                 ox = oy = oz = 0.0f;       // implausible: aim at the origin
             }
+            // A person or creature turns and runs: a sideways offset kept in
+            // world terms points beside it as soon as it moves (a ray that
+            // touched a radroach's flank stayed 15 units to that side while
+            // the roach circled). Their middle is over the origin, so only the
+            // height is kept.
+            if (game::RefIsActor(refr)) ox = oy = 0.0f;
         }
         g_aimtrack_offx.store(FToBits(ox));
         g_aimtrack_offy.store(FToBits(oy));
@@ -2768,6 +2951,43 @@ void WatchAimLos(uint32_t refid)
     if (refid == 0) { g_los_hit.store(0); g_los_dist.store(0); g_los_on = false; }
     g_los_said = false;
     g_los_want.store(refid);
+}
+
+void NoteVoiceLine(size_t chars)
+{
+    DWORD until = GetTickCount() + 500 + (DWORD)(chars * 70);
+    DWORD cur = g_voice_quiet_at.load();
+    if (until > cur) g_voice_quiet_at.store(until);
+}
+
+DWORD VoiceQuietAt() { return g_voice_quiet_at.load(); }
+
+void WatchQuestStages(const std::vector<uint32_t>& ids)
+{
+    std::lock_guard<std::mutex> lk(g_qs_mx);
+    g_qs.clear();
+    for (uint32_t id : ids) g_qs.push_back({ id, 0, false, false });
+}
+
+bool QuestStage(uint32_t id, int* stage, bool* running)
+{
+    std::lock_guard<std::mutex> lk(g_qs_mx);
+    for (const auto& q : g_qs) {
+        if (q.id != id || !q.have) continue;
+        if (stage) *stage = q.stage;
+        if (running) *running = q.running;
+        return true;
+    }
+    return false;
+}
+
+bool TakeLineOfFireWarning(std::string* name)
+{
+    std::lock_guard<std::mutex> lk(g_fire_mx);
+    if (g_fire_name.empty()) return false;
+    if (name) *name = g_fire_name;
+    g_fire_name.clear();
+    return true;
 }
 
 bool AimLosHit(uint32_t* outHit, float* outDist)
@@ -3226,7 +3446,8 @@ void DumpActiveMenuTree()
     // The quantity prompt and VATS are freed by a key press on the main
     // thread; walking their tiles from here is a known crash.
     if (menu::ActiveMenu() == menu::Id::Quantity || menu::IsOpen(menu::Id::VATS)) {
-        tolk::Speak("Zrzut niedostępny w tym ekranie.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Zrzut niedostępny w tym ekranie.", "Dump not available on this screen."),
+                    tolk::Priority::System, true);
         return;
     }
     InterfaceManager* ifm = fose_rt::IFM();
@@ -3327,7 +3548,7 @@ void DumpActiveMenuTree()
 
     log::DumpWrite("===== End dump =====");
     log::EndDump();
-    tolk::Speak("Zrzut zapisany w pliku dump.",
+    tolk::Speak(strings::T("Zrzut zapisany w pliku dump.", "Dump saved to the dump file."),
                 tolk::Priority::System, true);
 }
 

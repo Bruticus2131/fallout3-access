@@ -3,8 +3,10 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace f3a::config {
 namespace {
@@ -84,6 +86,15 @@ std::vector<AimOffset> LoadAimOffsets()
     return out;
 }
 
+std::wstring DataDir()
+{
+    if (!g_ini_path[0]) return std::wstring();
+    std::wstring dir = g_ini_path;
+    size_t slash = dir.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return std::wstring();
+    return dir.substr(0, slash) + L"\\Fallout3Access";
+}
+
 void SaveAimOffset(uint32_t base_form_id, float x, float y, float z)
 {
     if (!g_ini_path[0] || !base_form_id) return;
@@ -95,14 +106,85 @@ void SaveAimOffset(uint32_t base_form_id, float x, float y, float z)
                  g_ini_path, GetLastError());
 }
 
+namespace {
+
+// The language the game itself is in, from Fallout3.esm beside the plugin
+// (Data\FOSE\Plugins\..\..\Fallout3.esm): the game setting sYes, in the first
+// group of the file, is "Tak" in the Polish release and "Yes" in the English
+// one. "pl", "en", "de", "fr", "es", "it", or empty when it cannot be told.
+std::string DetectGameLanguage(const wchar_t* ini_path)
+{
+    std::wstring path = ini_path;
+    for (int up = 0; up < 3; ++up) {                 // the INI, Plugins, FOSE
+        size_t slash = path.find_last_of(L"\\/");
+        if (slash == std::wstring::npos) return {};
+        path.resize(slash);
+    }
+    path += L"\\Fallout3.esm";
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return {};
+    std::string found;
+    unsigned char hdr[24];
+    bool ok = std::fread(hdr, 1, 24, f) == 24 && std::memcmp(hdr, "TES4", 4) == 0;
+    uint32_t size = 0;
+    if (ok) std::memcpy(&size, hdr + 4, 4);
+    ok = ok && std::fseek(f, 24 + (long)size, SEEK_SET) == 0 && std::fread(hdr, 1, 24, f) == 24 &&
+         std::memcmp(hdr, "GRUP", 4) == 0 && std::memcmp(hdr + 8, "GMST", 4) == 0;
+    if (ok) std::memcpy(&size, hdr + 4, 4);
+    // "Must be within": a damaged header must not make us read the whole disk.
+    if (ok && size > 24 && size <= 8u * 1024 * 1024) {
+        std::vector<unsigned char> g(size - 24);
+        if (std::fread(g.data(), 1, g.size(), f) == g.size()) {
+            for (size_t o = 0; o + 24 <= g.size() && found.empty();) {
+                uint32_t rsize = 0, flags = 0;
+                std::memcpy(&rsize, &g[o + 4], 4);
+                std::memcpy(&flags, &g[o + 8], 4);
+                size_t body = o + 24, end = body + rsize;
+                if (end > g.size()) break;
+                bool isYes = false;
+                for (size_t q = body; !(flags & 0x40000) && q + 6 <= end;) {
+                    uint16_t n = 0;
+                    std::memcpy(&n, &g[q + 4], 2);
+                    if (q + 6 + n > end) break;
+                    const char* d = reinterpret_cast<const char*>(&g[q + 6]);
+                    if (std::memcmp(&g[q], "EDID", 4) == 0) {
+                        isYes = n == 5 && std::memcmp(d, "sYes", 5) == 0;
+                    } else if (isYes && std::memcmp(&g[q], "DATA", 4) == 0) {
+                        std::string v(d, strnlen(d, n));
+                        if (v == "Tak") found = "pl";
+                        else if (v == "Yes") found = "en";
+                        else if (v == "Ja") found = "de";
+                        else if (v == "Oui") found = "fr";
+                        else if (v == "S\xED" || v == "Si") found = "es";
+                        else if (v == "S\xEC") found = "it";
+                        else found = "?";
+                        F3A_INFO("Game language: sYes = '%s' -> %s", v.c_str(), found.c_str());
+                        break;
+                    }
+                    q += 6 + n;
+                }
+                o = end;
+            }
+        }
+    }
+    std::fclose(f);
+    return found == "?" ? std::string() : found;
+}
+
+} // namespace
+
 bool Load(const wchar_t* ini_path)
 {
+    auto& s = g_settings;
+    // The mod speaks the game's language unless the INI says otherwise:
+    // Polish for the Polish release, English for every other.
+    s.game_language = DetectGameLanguage(ini_path);
+    s.language = s.game_language == "pl" ? "pl" : "en";
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
-        F3A_WARN("INI not found at the expected path; using defaults.");
+        F3A_WARN("INI not found at the expected path; using defaults (language '%s').",
+                 s.language.c_str());
         return false;
     }
-
-    auto& s = g_settings;
 
     wcscpy_s(g_ini_path, ini_path);
 
@@ -140,6 +222,11 @@ bool Load(const wchar_t* ini_path)
     s.nearby_scan_radius    = ReadInt (L"Voice", L"NearbyScanRadius",   1200, ini_path);
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
     s.hide_empty_containers = ReadBool(L"Voice", L"HideEmptyContainers", true, ini_path);
+    s.explore_mode          = ReadBool(L"Voice", L"ExploreMode",        true, ini_path);
+    s.explore_radius        = ReadInt (L"Voice", L"ExploreRadius",      900,  ini_path);
+    if (s.explore_radius < 200 || s.explore_radius > 4000) s.explore_radius = 900;
+    s.audio_desc            = ReadBool(L"Voice", L"AudioDescription",   true,  ini_path);
+    s.audio_desc_capture    = ReadBool(L"Voice", L"AudioDescCapture",   false, ini_path);
     s.engine_path           = ReadBool(L"Voice", L"EnginePath", true, ini_path);
     s.hint_mode             = ReadInt (L"Voice", L"Hints", 1, ini_path);
     s.engine_aim_deg        = ReadInt (L"Voice", L"EngineAim", 15, ini_path);
@@ -149,7 +236,8 @@ bool Load(const wchar_t* ini_path)
     s.autowalk_turn_gain    = ReadInt (L"Voice", L"AutoWalkTurnGain",   4, ini_path);
     s.activate_pick_radius  = ReadInt (L"Voice", L"ActivatePickRadius", 150, ini_path);
 
-    s.language    = ReadStr(L"General", L"Language",   "pl",   ini_path);
+    std::string lang = ReadStr(L"General", L"Language", "auto", ini_path);
+    if (lang == "pl" || lang == "en") s.language = lang;     // else "auto": the game's
     s.prefer_sapi = ReadBool(L"General", L"PreferSAPI", false, ini_path);
     s.game_text_codepage = ReadInt(L"General", L"GameTextCodepage", 0, ini_path);
 
@@ -190,6 +278,10 @@ bool Load(const wchar_t* ini_path)
     h.attack_key       = ReadKey(L"Hotkeys", L"AttackKey",       h.attack_key,       ini_path);
     h.drop_item        = ReadKey(L"Hotkeys", L"DropItem",        h.drop_item,        ini_path);
     h.sonar            = ReadKey(L"Hotkeys", L"Sonar",           h.sonar,            ini_path);
+    h.explore_go       = ReadKey(L"Hotkeys", L"ExploreGo",       h.explore_go,       ini_path);
+    h.sweep_summary    = ReadKey(L"Hotkeys", L"SweepSummary",    h.sweep_summary,    ini_path);
+    h.sweep_next       = ReadKey(L"Hotkeys", L"SweepNext",       h.sweep_next,       ini_path);
+    h.audio_desc_repeat = ReadKey(L"Hotkeys", L"AudioDescRepeat", h.audio_desc_repeat, ini_path);
     h.press_row        = ReadKey(L"Hotkeys", L"PressRow",        h.press_row,        ini_path);
     h.aim_hold         = ReadKey(L"Hotkeys", L"AimHold",         h.aim_hold,         ini_path);
     h.container_side   = ReadKey(L"Hotkeys", L"ContainerSide",   h.container_side,   ini_path);
@@ -197,7 +289,8 @@ bool Load(const wchar_t* ini_path)
     h.aim_up           = ReadKey(L"Hotkeys", L"AimUp",           h.aim_up,           ini_path);
     h.aim_down         = ReadKey(L"Hotkeys", L"AimDown",         h.aim_down,         ini_path);
 
-    F3A_INFO("Config loaded. Language='%s'.", s.language.c_str());
+    F3A_INFO("Config loaded. Language='%s' (INI '%s', game '%s').", s.language.c_str(),
+             lang.c_str(), s.game_language.empty() ? "unknown" : s.game_language.c_str());
     F3A_INFO("Hotkeys: toggle=0x%02X silence=0x%02X dump=0x%02X",
              h.toggle_mod, h.silence, h.dump_menu_tree);
     return true;

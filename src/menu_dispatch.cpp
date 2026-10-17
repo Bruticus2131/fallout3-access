@@ -157,30 +157,30 @@ bool IsOpen(Id id)
 std::string_view DisplayName(Id id)
 {
     switch (id) {
-    case Id::Message:        return "Wiadomość";
-    case Id::Inventory:      return "Ekwipunek";
-    case Id::Stats:          return "Statystyki";
-    case Id::Loading:        return "Wczytywanie";
-    case Id::Container:      return "Kontener";
-    case Id::Dialog:         return "Dialog";
-    case Id::SleepWait:      return "Sen i czekanie";
-    case Id::Start:          return "Menu główne";
-    case Id::LockPick:       return "Wytrych";
-    case Id::Quantity:       return "Ilość";
-    case Id::Map:            return "Mapa";
-    case Id::Book:           return "Notatka";
-    case Id::LevelUp:        return "Awans poziomu";
-    case Id::Repair:         return "Naprawa";
-    case Id::Race:           return "Wybór postaci";
-    case Id::TextEdit:       return "Edycja tekstu";
-    case Id::Barter:         return "Handel";
-    case Id::Surgery:        return "Operacja";
-    case Id::HackingShort:   return "Hackowanie";
+    case Id::Message:        return strings::T("Wiadomość", "Message");
+    case Id::Inventory:      return strings::T("Ekwipunek", "Inventory");
+    case Id::Stats:          return strings::T("Statystyki", "Stats");
+    case Id::Loading:        return strings::T("Wczytywanie", "Loading");
+    case Id::Container:      return strings::T("Kontener", "Container");
+    case Id::Dialog:         return strings::T("Dialog", "Dialogue");
+    case Id::SleepWait:      return strings::T("Sen i czekanie", "Sleep and wait");
+    case Id::Start:          return strings::T("Menu główne", "Main menu");
+    case Id::LockPick:       return strings::T("Wytrych", "Lockpick");
+    case Id::Quantity:       return strings::T("Ilość", "Quantity");
+    case Id::Map:            return strings::T("Mapa", "Map");
+    case Id::Book:           return strings::T("Notatka", "Note");
+    case Id::LevelUp:        return strings::T("Awans poziomu", "Level up");
+    case Id::Repair:         return strings::T("Naprawa", "Repair");
+    case Id::Race:           return strings::T("Wybór postaci", "Character creation");
+    case Id::TextEdit:       return strings::T("Edycja tekstu", "Text edit");
+    case Id::Barter:         return strings::T("Handel", "Barter");
+    case Id::Surgery:        return strings::T("Operacja", "Surgery");
+    case Id::HackingShort:   return strings::T("Hackowanie", "Hacking");
     case Id::VATS:           return "V.A.T.S.";
     case Id::Computers:      return "Terminal";
-    case Id::RepairServices: return "Usługi naprawcze";
-    case Id::Tutorial:       return "Samouczek";
-    case Id::SpecialBookMenu:return "Księga S.P.E.C.I.A.L.";
+    case Id::RepairServices: return strings::T("Usługi naprawcze", "Repair services");
+    case Id::Tutorial:       return strings::T("Samouczek", "Tutorial");
+    case Id::SpecialBookMenu:return strings::T("Księga S.P.E.C.I.A.L.", "S.P.E.C.I.A.L. book");
     case Id::PipBoy:         return "Pip-Boy";
     default:                 return {};
     }

@@ -30,3 +30,11 @@ sso-integration-demo/
 third_party/NSE-sources-*/
 # Draft of the e-mail to Nexus Mods (not part of the project).
 docs/nexus/sso-request-email.md
+/sso-request-email.md
+FalloutNVAccess.zip
+__pycache__/
+
+# Generated from the game's own data files by tools/generate_walk_graph.py and
+# tools/generate_world_doors.py (needs the game), 35 MB; shipped in the
+# release archive, not kept in git.
+data/roadnet/*.dat

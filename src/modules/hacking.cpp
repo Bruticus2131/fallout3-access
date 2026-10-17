@@ -2,6 +2,7 @@
 #include "f3a/game_access.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/logger.h"
+#include "f3a/strings.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -85,9 +86,11 @@ std::string Join(const std::vector<std::string>& v)
     for (auto& e : v) { if (!s.empty()) s += " "; s += e; }
     return s;
 }
-// Polish plural: 1 proba / 2-4 proby / 5+ prob.
+// Polish plural: 1 proba / 2-4 proby / 5+ prob. English: 1 attempt / N attempts.
 std::string Attempts(int n)
 {
+    if (!strings::Polish())
+        return n == 1 ? std::string("1 attempt") : std::to_string(n) + " attempts";
     if (n == 1)             return "1 proba";
     if (n >= 2 && n <= 4)   return std::to_string(n) + " proby";
     return std::to_string(n) + " prob";
@@ -155,7 +158,8 @@ void TickGuess()
 {
     if (--g_gbudget <= 0) {
         EndGuess();
-        tolk::Speak("Nie moge trafic w slowo.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Nie moge trafic w slowo.", "Can't reach the word."),
+                    tolk::Priority::System, true);
         return;
     }
     const std::string want = (g_gindex >= 0 && g_gindex < static_cast<int>(g_words.size()))
@@ -180,7 +184,8 @@ void TickGuess()
         if (!g_verify_ok) { MouseClick(); EndGuess(); return; }
         if (g_scan > kScanSteps) {
             EndGuess();
-            tolk::Speak("Nie moge trafic w slowo.", tolk::Priority::System, true);
+            tolk::Speak(strings::T("Nie moge trafic w slowo.", "Can't reach the word."),
+                        tolk::Priority::System, true);
             return;
         }
         if (g_scan == 0) g_scan = 1;
@@ -214,7 +219,9 @@ void Tick(float)
         if (!g_locked_said) {
             g_locked_said = true;
             std::string s = Join(game::GetHackingTextLines());
-            tolk::Speak(s.empty() ? "Terminal zablokowany." : s, tolk::Priority::Ui, true);
+            tolk::Speak(s.empty() ? std::string(strings::T("Terminal zablokowany.", "Terminal locked."))
+                                  : s,
+                        tolk::Priority::Ui, true);
         }
         return;
     }
@@ -230,9 +237,11 @@ void Tick(float)
         g_attempts = h.attempts;
         int L = g_words.empty() ? 0 : static_cast<int>(g_words.front().size());
         char buf[224];
-        std::snprintf(buf, sizeof(buf),
+        std::snprintf(buf, sizeof(buf), strings::T(
             "Hakowanie. %s. %d slow po %d liter. "
             "Gora dol wybiera slowo, Enter zgaduje, lewo prawo czyta ekran.",
+            "Hacking. %s. %d words, %d letters each. "
+            "Up and down choose a word, Enter guesses, left and right read the screen."),
             Attempts(h.attempts).c_str(), static_cast<int>(g_words.size()), L);
         tolk::Speak(buf, tolk::Priority::Ui, true);
         SeedKeyEdges();
@@ -253,7 +262,8 @@ void Tick(float)
     // Attempts spent — short announce (the log carries the reason).
     if (h.attempts != g_attempts) {
         g_attempts = h.attempts;
-        tolk::Speak(Attempts(h.attempts) + " pozostalo", tolk::Priority::Ui, false);
+        tolk::Speak(Attempts(h.attempts) + strings::T(" pozostalo", " left"),
+                    tolk::Priority::Ui, false);
     }
 
     // The engine tells us which word the cursor is on, so the player can also
@@ -280,7 +290,7 @@ void Tick(float)
         if (g_index < 0) g_index = up ? n - 1 : 0;
         else             g_index = (g_index + (up ? -1 : 1) + n) % n;
         char idx[24];
-        std::snprintf(idx, sizeof(idx), ", %d z %d", g_index + 1, n);
+        std::snprintf(idx, sizeof(idx), strings::T(", %d z %d", ", %d of %d"), g_index + 1, n);
         tolk::Speak(g_words[g_index] + ", " + Spell(g_words[g_index]) + idx,
                     tolk::Priority::Ui, true);
     }
@@ -299,7 +309,8 @@ void Tick(float)
             g_gtx = tx; g_gty = ty; g_gbudget = 150;
             g_gindex = g_index; g_guessing = true;
             g_scan = 0; g_scan_off = 0;
-            tolk::Speak("Zgaduje: " + g_words[g_index], tolk::Priority::Ui, true);
+            tolk::Speak(strings::T("Zgaduje: ", "Guessing: ") + g_words[g_index],
+                        tolk::Priority::Ui, true);
         }
     }
 }

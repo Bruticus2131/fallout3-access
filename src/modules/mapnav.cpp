@@ -84,9 +84,9 @@ bool Passes(const game::MapMarker& m)
 const char* FilterName()
 {
     switch (g_filter) {
-        case F_Discovered:   return "tylko odkryte";
-        case F_Undiscovered: return "tylko nieodkryte";
-        default:             return "wszystkie";
+        case F_Discovered:   return strings::T("tylko odkryte", "discovered only");
+        case F_Undiscovered: return strings::T("tylko nieodkryte", "undiscovered only");
+        default:             return strings::T("wszystkie", "all");
     }
 }
 
@@ -111,14 +111,15 @@ std::string Describe(const game::MapMarker& m)
         while (bearing < -180.0f) bearing += 360.0f;
         s += ", " + strings::ClockDirection(bearing);
     }
-    if (!m.discovered) s += ", nieodkryta";
+    if (!m.discovered) s += strings::T(", nieodkryta", ", undiscovered");
     return s;
 }
 
 void Step(int dir)
 {
     if (g_markers.empty()) {
-        tolk::Speak("Brak lokacji na mapie.", tolk::Priority::Ui, true);
+        tolk::Speak(strings::T("Brak lokacji na mapie.", "No locations on the map."),
+                    tolk::Priority::Ui, true);
         return;
     }
     int n = (int)g_markers.size();
@@ -129,12 +130,14 @@ void Step(int dir)
             g_index = start;
             g_confirm_pending.clear();
             char idx[32];
-            std::snprintf(idx, sizeof(idx), ", %d z %d", g_index + 1, n);
+            std::snprintf(idx, sizeof(idx), strings::T(", %d z %d", ", %d of %d"),
+                          g_index + 1, n);
             tolk::Speak(Describe(g_markers[g_index]) + idx, tolk::Priority::Ui, true);
             return;
         }
     }
-    tolk::Speak(std::string("Brak lokacji w filtrze: ") + FilterName(),
+    tolk::Speak(std::string(strings::T("Brak lokacji w filtrze: ", "No locations in filter: ")) +
+                    FilterName(),
                 tolk::Priority::Ui, true);
 }
 
@@ -142,21 +145,27 @@ void Step(int dir)
 void TravelToSelected()
 {
     if (g_index < 0 || g_index >= (int)g_markers.size()) {
-        tolk::Speak("Najpierw wybierz lokację.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Najpierw wybierz lokację.", "Select a location first."),
+                    tolk::Priority::System, true);
         return;
     }
     const auto& m = g_markers[g_index];
     if (!m.has_tile) {
-        tolk::Speak("Nie widzę tego markera na mapie świata. "
-                    "Przełącz się na mapę świata.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Nie widzę tego markera na mapie świata. "
+                               "Przełącz się na mapę świata.",
+                               "I can't see this marker on the world map. "
+                               "Switch to the world map."),
+                    tolk::Priority::System, true);
         return;
     }
     // The game itself refuses undiscovered locations — this is only a heads-up
     // so the player isn't left wondering why nothing happened.
     if (!m.discovered && g_confirm_pending != m.name) {
         g_confirm_pending = m.name;
-        tolk::Speak("Lokacja nieodkryta — gra tam nie pozwoli podróżować. "
-                    "Enter jeszcze raz, aby spróbować.",
+        tolk::Speak(strings::T("Lokacja nieodkryta — gra tam nie pozwoli podróżować. "
+                               "Enter jeszcze raz, aby spróbować.",
+                               "Undiscovered location — the game won't let you fast travel "
+                               "there. Press Enter again to try."),
                     tolk::Priority::System, true);
         return;
     }
@@ -165,13 +174,15 @@ void TravelToSelected()
              m.name.c_str(), (int)m.discovered);
     poll::RequestMapMarkerClick(m.tile);
     g_confirm_travel = 4;                // ~0.3 s, then press the travel button
-    tolk::Speak("Podróż do: " + m.name, tolk::Priority::System, true);
+    tolk::Speak(strings::T("Podróż do: ", "Fast travel to: ") + m.name,
+                tolk::Priority::System, true);
 }
 
 void WalkToSelected()
 {
     if (g_index < 0 || g_index >= (int)g_markers.size()) {
-        tolk::Speak("Najpierw wybierz lokację.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Najpierw wybierz lokację.", "Select a location first."),
+                    tolk::Priority::System, true);
         return;
     }
     const auto& m = g_markers[g_index];
@@ -204,7 +215,8 @@ void Tick(float)
                 autowalk::StartTo(g_walk.pos, g_walk.name, g_walk.refr, g_walk.form);
             } else if (--g_walk.ticks <= 0) {
                 g_walk.on = false;
-                tolk::Speak("Zamknij Pip-Boya i wybierz cel jeszcze raz.",
+                tolk::Speak(strings::T("Zamknij Pip-Boya i wybierz cel jeszcze raz.",
+                                       "Close the Pip-Boy and pick the destination again."),
                             tolk::Priority::System, true);
             }
         }
@@ -212,7 +224,8 @@ void Tick(float)
     }
     if (g_walk.on && --g_walk.ticks <= 0) {   // the map never closed
         g_walk.on = false;
-        tolk::Speak("Zamknij Pip-Boya i wybierz cel jeszcze raz.",
+        tolk::Speak(strings::T("Zamknij Pip-Boya i wybierz cel jeszcze raz.",
+                               "Close the Pip-Boy and pick the destination again."),
                     tolk::Priority::System, true);
     }
 
@@ -232,8 +245,10 @@ void Tick(float)
         Refresh();
         char buf[160];
         std::snprintf(buf, sizeof(buf),
-            "Mapa: %d lokacji. Page Up i Page Down przeglądają, "
-            "Enter podróżuje, Home idzie pieszo, End filtruje.",
+            strings::T("Mapa: %d lokacji. Page Up i Page Down przeglądają, "
+                       "Enter podróżuje, Home idzie pieszo, End filtruje.",
+                       "Map: %d locations. Page Up and Page Down browse, "
+                       "Enter fast travels, Home walks there, End filters."),
             (int)g_markers.size());
         tolk::Speak(buf, tolk::Priority::Ui, true);
         return;
@@ -262,7 +277,8 @@ void Tick(float)
     if (KeyEdge(VK_END,    &g_end)) {
         g_filter = (g_filter + 1) % F_Count;
         g_index  = -1;
-        tolk::Speak(std::string("Filtr: ") + FilterName(), tolk::Priority::Ui, true);
+        tolk::Speak(std::string(strings::T("Filtr: ", "Filter: ")) + FilterName(),
+                    tolk::Priority::Ui, true);
     }
 }
 

@@ -28,6 +28,8 @@
 #include "f3a/game_access.h"
 #include "f3a/console.h"
 #include "f3a/fose_runtime.h"
+#include "f3a/roadnet.h"
+#include "f3a/worlddoors.h"
 
 namespace tolk = f3a::tolk;
 namespace cfg  = f3a::config;
@@ -106,6 +108,8 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
     // Main-thread executor (IAT-hooks DispatchMessageA) so the poll thread can
     // safely run game code like TESObjectREFR::Activate.
     f3a::game::InstallMainThreadHook();
+    // The films (opening, "years later" cards, endings) for audio description.
+    f3a::game::InstallMovieHooks();
 
     // Load INI from <Game>/Data/FOSE/Plugins/Fallout3Access.ini
     std::wstring ini = ResolvePluginIniPath();
@@ -221,8 +225,12 @@ void OnGameLoaded()
     // scanner, beacon...) are registered once at plugin load and would be
     // wiped, leaving only F11/F12/Backspace working after a save loads.
     // The bindings from load stay valid across game loads, so we keep them.
-    tolk::Speak(str::Render(str::Key::LoadingDone),
-                tolk::Priority::System, true);
+    // No "Loaded." of our own: the game's own sounds and the HUD say enough,
+    // and it talked over the first thing the player heard after a load.
+    // The walk graphs and the door table, matched to the plugins (DLCs) the
+    // game has loaded - once, the first time a game is up.
+    f3a::roadnet::Resolve();
+    f3a::worlddoors::Resolve();
 }
 
 void OnNewGame()

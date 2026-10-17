@@ -79,11 +79,17 @@ QuestTarget GetCurrentQuestTarget();
 // ---- World scan ----
 
 struct WorldEntity {
-    enum class Kind { Actor, Container, Door, Item, Note, Quest };
+    enum class Kind { Actor, Container, Door, Item, Note, Quest, Location };
     Kind        kind;
     std::string name;
     Vec3        position;
     bool        hostile  = false;
+    bool        dead     = false;     // actors: a body (the game's GetDead)
+    // Bodies and containers: 1 = something in/on them, 0 = nothing, -1 = could
+    // not tell.
+    int         items    = -1;
+    uint8_t     form_type = 0;        // the base form's type (FOSE kFormType_*)
+    bool        discovered = true;    // places: visited (can fast travel there)
     bool        owned    = false;
     bool        locked   = false;
     bool        has_marker = true;    // false = quest with no map-marker position
@@ -101,11 +107,37 @@ struct WorldEntity {
 // MAIN THREAD ONLY (a virtual call); returns false anywhere else.
 bool IsHostileToPlayer(const void* refr);
 
+// Map markers (places) within `radius` of the player in this worldspace —
+// they live in the worldspace's persistent cell, not the loaded ones, so the
+// ordinary scan never sees them. Name only when the place is on the map; one
+// not yet heard of is "nieodkryte miejsce". Nearest first. Empty indoors.
+std::vector<WorldEntity> GetNearbyLocations(float radius, int max_results);
+
 // Which nearby actors are fighting the player, worked out on the MAIN thread
 // (RefreshHostiles, from MainThreadWork) and read anywhere: ScanNearby marks
 // `hostile` and honours `hostiles_only` from this set.
 void RefreshHostiles();
 bool IsKnownHostile(uint32_t refid);
+// Dead actors near the player, from the same main-thread pass (the game's
+// own GetDead test). False when not known to be dead.
+bool IsKnownDead(uint32_t refid);
+// A quest's current stage (TESQuest+0x60, what the game's GetStage reads via
+// 0x0055C780) and whether it is running (+0x3C). -1 when there is no such
+// quest. MAIN THREAD (looks the form up through the engine).
+int GetQuestStage(uint32_t questId, bool* running = nullptr);
+// Is this reference an actor (NPC or creature)? A plain data read.
+bool RefIsActor(const void* refr);
+// A placed creature (radroach, mole rat...) rather than a person.
+bool RefIsCreature(const void* refr);
+// The name of the placed actor with this reference id, empty when it is not
+// an actor. MAIN THREAD ONLY (looks the form up through the engine).
+std::string RefActorName(uint32_t refid, bool* isActor = nullptr);
+
+// The plugins the game has loaded (DataHandler's mod list), indexed by their
+// load-order byte - the top byte of every form id from that file. Empty until
+// the game has read its data files (it does before the main menu). A plain
+// data read.
+std::vector<std::string> LoadedPlugins();
 
 // The game's main thread, as seen by MainThreadWork (NoteMainThread).
 void NoteMainThread();
@@ -472,6 +504,12 @@ bool ForceCrosshairRef(const void* refr, uint32_t expectedRefID);
 //
 // Install the main-thread executor (IAT-hooks DispatchMessageA) once at load:
 void InstallMainThreadHook();
+// Watch the game's films (Bink): which one is playing and how far in.
+void InstallMovieHooks();
+// The film playing now: its file name (lower case, no folder), the position
+// in seconds (from the film's own frame counter), and a number that changes
+// with every new playback. False when no film is playing.
+bool CurrentMovie(std::string* name, double* seconds, uint32_t* seq);
 // Queue an activation from any thread; it runs on the main thread next message
 // dispatch. expectedRefID guards against a stale pointer.
 void QueueActivate(const void* refr, uint32_t expectedRefID);
@@ -664,6 +702,14 @@ bool PlayerIsInInterior();
 // building is reached by going through more interiors.
 bool RefIsInInterior(const void* refr);
 
+// Which PLACE (worldspace or interior cell — see worlddoors.h) the player /
+// a reference is in, as that form's id: the worldspace's id for an exterior
+// cell, the cell's own id for an interior. 0 when it cannot be read — for a
+// reference, also when its place is not loaded (it then has no cell).
+// Memory reads only.
+uint32_t PlayerSpaceId();
+uint32_t RefSpaceId(const void* refr);
+
 // All refs sharing the base object of the currently-marked quest target, within
 // `radius` (game units), nearest first. For "shoot the N targets" objectives:
 // the targets are unnamed (scanner-invisible) but identical placements, so this
@@ -746,6 +792,10 @@ bool ClickMenuBack();
 // via the game's Menu::HandleClick. Returns false if no such button is visible
 // (i.e. you're not on the controls page). MUST run on the main thread.
 bool ClickRestoreDefaults();
+
+// Is a settings page (gameplay, display, audio, controls) of the main/pause
+// menu showing? Told by its "Restore Defaults" button. MAIN THREAD.
+bool SettingsPageOpen();
 
 // ---- Pip-Boy ----
 

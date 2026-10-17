@@ -157,10 +157,10 @@ void DebugStartGame()
     const auto& cmd = config::Get().debug_start_command;
     if (cmd.empty()) return;
     if (!console::Available()) {
-        tolk::Speak("Konsola niedostępna.", tolk::Priority::System, true);
+        tolk::Speak(strings::T("Konsola niedostępna.", "Console unavailable."), tolk::Priority::System, true);
         return;
     }
-    tolk::Speak("Uruchamiam grę przez konsolę.", tolk::Priority::System, true);
+    tolk::Speak(strings::T("Uruchamiam grę przez konsolę.", "Starting the game through the console."), tolk::Priority::System, true);
     console::Run(cmd.c_str());
 }
 

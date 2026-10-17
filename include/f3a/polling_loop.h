@@ -233,6 +233,21 @@ void WatchAimLos(uint32_t refid);
 // nothing is being watched.
 bool AimLosHit(uint32_t* outHit, float* outDist);
 
+// Someone who is not an enemy has stepped into the line of fire of the held
+// aim: their name, once per time they step in. False when there is nothing
+// to say.
+bool TakeLineOfFireWarning(std::string* name);
+
+// A voice line (a subtitle) of `chars` characters has just appeared: it is
+// probably being spoken for a while. VoiceQuietAt is when that ends.
+void  NoteVoiceLine(size_t chars);
+DWORD VoiceQuietAt();
+
+// Audio description: the quests whose stages to read on the game's thread,
+// and the last reading (false until there is one, or no such quest).
+void WatchQuestStages(const std::vector<uint32_t>& ids);
+bool QuestStage(uint32_t id, int* stage, bool* running);
+
 // Ask for a ray map around a point. The sweep itself runs on the GAME's thread
 // — casting the engine's rays from the polling thread crashed the game, which
 // is the rule this mod has broken once before and should not break again.

@@ -110,7 +110,7 @@ std::string PointsLeftText(int maxPoints)
 {
     int left = PointsLeft(maxPoints);
     if (left < 0) return {};
-    return ", pozostało punktów: " + std::to_string(left);
+    return strings::T(", pozostało punktów: ", ", points left: ") + std::to_string(left);
 }
 
 // The attribute a page shows (0-6), as the game maps it (0x00675BE0): pages
@@ -254,8 +254,8 @@ void Tick(float)
             for (int i = 0; i < kNumSpecials; ++i) g_values[i] = ReadValue(i);
             int st = StatForPage(page, indexStat);
             std::string say;
-            if (page == 0) say = "Okładka";
-            else if (page == 8 && newPage) say = "Podsumowanie. ";
+            if (page == 0) say = strings::T("Okładka", "Cover");
+            else if (page == 8 && newPage) say = strings::T("Podsumowanie. ", "Summary. ");
             if (st >= 0) {
                 g_index = st;
                 say += Describe(st, /*withDescription=*/false) + PointsLeftText(maxPoints) +

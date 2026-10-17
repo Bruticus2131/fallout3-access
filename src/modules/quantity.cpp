@@ -3,6 +3,7 @@
 #include "f3a/menu_dispatch.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/logger.h"
+#include "f3a/strings.h"
 
 #include <string>
 #include <cstdio>
@@ -38,7 +39,8 @@ std::string Describe(int amount, int maximum)
     char buf[64];
     // Only give a ratio when the maximum is trustworthy — an earlier version
     // read the wrong slider trait and announced nonsense like "7 z 5".
-    if (maximum > amount) std::snprintf(buf, sizeof(buf), "%d z %d", amount, maximum);
+    if (maximum > amount) std::snprintf(buf, sizeof(buf), strings::T("%d z %d", "%d of %d"),
+                                        amount, maximum);
     else                  std::snprintf(buf, sizeof(buf), "%d", amount);
     return buf;
 }
@@ -60,8 +62,9 @@ void Tick(float)
         g_open = true;
         g_last_said = Describe(amount, maximum);
         F3A_INFO("Quantity: open amount=%d max=%d", amount, maximum);
-        tolk::Speak("Ile? " + g_last_said +
-                    ". Strzałkami ustaw ilość, A zatwierdza, E anuluje.",
+        tolk::Speak(strings::T("Ile? ", "How many? ") + g_last_said +
+                    strings::T(". Strzałkami ustaw ilość, A zatwierdza, E anuluje.",
+                               ". Arrows set the amount, A confirms, E cancels."),
                     tolk::Priority::Ui, true);
         return;
     }

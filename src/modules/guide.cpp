@@ -132,9 +132,9 @@ void StartTo(const game::Vec3& pos, const std::string& name)
              pp.x, pp.y, pp.z, pos.x, pos.y, pos.z,
              (int)g_have_path, (int)g_waypoints.size());
 
-    tolk::Speak("Prowadzę do: " + name + ", " +
+    tolk::Speak(strings::T("Prowadzę do: ", "Guiding to: ") + name + ", " +
                 strings::FormatDistance(dist) +
-                (g_have_path ? ", trasa wyznaczona" : ""),
+                (g_have_path ? strings::T(", trasa wyznaczona", ", route found") : ""),
                 tolk::Priority::System, true);
 }
 
@@ -162,7 +162,8 @@ void Stop()
     if (!g_active) return;
     g_active = false;
     g_follow_quest = false;
-    tolk::Speak("Naprowadzanie wyłączone.", tolk::Priority::System, true);
+    tolk::Speak(strings::T("Naprowadzanie wyłączone.", "Guidance off."),
+                tolk::Priority::System, true);
 }
 
 void Tick(float dt)
@@ -187,7 +188,7 @@ void Tick(float dt)
                 g_wp_index  = 0;
                 g_have_path = navmesh::BuildPath(pp0, g_target, g_waypoints) &&
                               !g_waypoints.empty();
-                tolk::Speak("Cel zadania zmieniony.",
+                tolk::Speak(strings::T("Cel zadania zmieniony.", "Quest target changed."),
                             tolk::Priority::Background, false);
             }
         }
@@ -202,7 +203,8 @@ void Tick(float dt)
     float dist = std::sqrt(fdx * fdx + fdy * fdy);
     if (dist <= kArriveDist && std::fabs(g_target.z - pp.z) <= kFloorDelta) {
         g_active = false;
-        tolk::Speak("Dotarłeś: " + g_name, tolk::Priority::System, true);
+        tolk::Speak(strings::T("Dotarłeś: ", "Arrived: ") + g_name,
+                    tolk::Priority::System, true);
         return;
     }
 
@@ -241,10 +243,10 @@ void Tick(float dt)
     if (zone != g_last_zone && g_dir_timer >= 1.0f) {
         g_dir_timer = 0.0f;
         g_last_zone = zone;
-        const char* msg = zone == 0 ? "prosto"
-                        : zone == 1 ? "w prawo"
-                        : zone == 2 ? "w lewo"
-                                    : "zawróć";
+        const char* msg = zone == 0 ? strings::T("prosto", "straight")
+                        : zone == 1 ? strings::T("w prawo", "right")
+                        : zone == 2 ? strings::T("w lewo", "left")
+                                    : strings::T("zawróć", "turn around");
         tolk::Speak(msg, tolk::Priority::Ui, true);
     }
 
@@ -254,9 +256,14 @@ void Tick(float dt)
         std::string msg = strings::FormatDistance(dist);
         if (std::fabs(dz) > kFloorDelta) {
             // With a navmesh path the beacon already leads to the stairs.
-            if (g_have_path) msg += dz > 0 ? ", cel wyżej" : ", cel niżej";
-            else msg += dz > 0 ? ", cel wyżej — poszukaj schodów"
-                               : ", cel niżej — poszukaj schodów";
+            if (g_have_path)
+                msg += dz > 0 ? strings::T(", cel wyżej", ", target above")
+                              : strings::T(", cel niżej", ", target below");
+            else
+                msg += dz > 0 ? strings::T(", cel wyżej — poszukaj schodów",
+                                           ", target above — look for stairs")
+                              : strings::T(", cel niżej — poszukaj schodów",
+                                           ", target below — look for stairs");
         }
         tolk::Speak(msg, tolk::Priority::Background, false);
     }
@@ -270,8 +277,10 @@ void Tick(float dt)
         if (closed < kProgMin) {
             if (!g_warned_blocked) {
                 g_warned_blocked = true;
-                tolk::Speak("Brak postępu — przeszkoda. Poszukaj obejścia "
-                            "skanerem, na przykład drzwi.",
+                tolk::Speak(strings::T("Brak postępu — przeszkoda. Poszukaj obejścia "
+                                       "skanerem, na przykład drzwi.",
+                                       "No progress — something is in the way. Use the "
+                                       "scanner to find a way around, for example a door."),
                             tolk::Priority::System, true);
             }
         } else {

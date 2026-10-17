@@ -19,7 +19,6 @@ enum class Key {
     SelectionFmt,              // %s = item, %s = extra
     EmptyList,
     Loading,
-    LoadingDone,
     LowHealth,
     Crippled,                  // %s = body part
     InCombat,
@@ -73,7 +72,15 @@ enum class Key {
     LootWeightFmt,             // %s = carry weight as the overlay shows it
     LootPositionFmt,           // %s = position, %s = total
     LootClosed,
+    LootTakenFmt,              // %s = the entry taken
 };
+
+// Is the mod speaking Polish (config Language, or the game's language)?
+bool Polish();
+
+// The text in the mod's language: T("Polish", "English"). For text written
+// in place in the modules; the keyed table above is the older way.
+inline const char* T(const char* pl, const char* en) { return Polish() ? pl : en; }
 
 // All format directives are positional printf-style for std::snprintf.
 const char* Fmt(Key k);

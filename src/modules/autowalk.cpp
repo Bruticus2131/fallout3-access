@@ -14,6 +14,8 @@
 #include "f3a/navmesh.h"
 #include "f3a/polling_loop.h"
 #include "f3a/player_mover.h"
+#include "f3a/roadnet.h"
+#include "f3a/worlddoors.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/hotkeys.h"
 #include "f3a/tolk_bridge.h"
@@ -75,6 +77,40 @@ constexpr float kEngineWaitSecs  = 1.5f;
 constexpr int   kMaxRouteLegs    = 100;     // the FNV mod's cap
 constexpr float kPartialResidual = 256.0f;  // route ends this far short = partial
 constexpr float kLegMinGain      = 500.0f;  // a leg must gain this to ask for another
+// --- Long walks: legs along the roads ------------------------------------------
+// A far goal in this worldspace is walked in legs — points ~1500 units apart
+// on the walk graph (roadnet::Route: the navmesh worked out offline, roads
+// preferred), or, with no graph, pieces of the straight line — and each leg
+// is asked of the engine as a point. g_legs holds the intermediate goals;
+// the walk's own goal (g_target_pos) is not among them.
+std::vector<game::Vec3> g_legs;
+size_t g_leg = 0;
+bool   g_legs_road = false;
+int    g_leg_skips = 0;                   // legs given up on in a row
+constexpr float kLegArrive = 250.0f;      // this near a leg's point: on to the next
+// Beyond this the walk is cut into legs. Nearer, the engine sees the whole way
+// (the loaded cells reach ~8000 units out) and routes it better than any
+// coarse graph: in Megaton, at 3700 units, the graph took the player down into
+// the crater under Moira's shop instead of along the walkway to its door.
+constexpr float kLongWalk  = 7000.0f;
+constexpr float kLegMax    = 3500.0f;     // a straight leg is at most this long
+bool OnLegs() { return g_leg < g_legs.size(); }
+game::Vec3 LegGoal();                     // defined below (needs g_target_pos)
+
+// --- A door far away, on the way to another place --------------------------------
+// The world-door table can name a door that is not loaded yet (Megaton's gate,
+// seen from the Vault 101 exit). It is walked to like an ordinary target — the
+// legs above — and crossed once it is in reach. The real target waits here.
+bool        g_far_door = false;
+uint32_t    g_far_door_form = 0;
+std::string g_far_door_name;
+int         g_far_travel = 0;       // the far "door" is a DLC travel point (worlddoors::Hop::travel)
+game::Vec3  g_far_door_pos{};
+game::Vec3  g_final_pos{};
+std::string g_final_name;
+const void* g_final_refr = nullptr;
+uint32_t    g_final_form = 0;
+
 // While we have no path, keep retrying BuildPath as we move — once we near the
 // stairs / a connected mesh region the path (which handles height) is found.
 float        g_path_retry_timer = 0.0f;
@@ -145,6 +181,9 @@ const void*  g_cross_from_cell  = nullptr;        // cell we left (skip the door
 // Doors taken on this walk. They are DEPRIORITISED, not banned: a route that
 // has to back out of a dead end still needs them, and in a vault that happens.
 std::vector<uint32_t> g_cross_used_doors;
+// Doors the world-door table named that were not there when the walk arrived
+// (switched off by a quest): asked for again without them.
+std::vector<uint32_t> g_table_missing;
 bool         g_target_indoors   = false;          // is the destination inside?
 constexpr int   kMaxHops        = 12;             // give up chaining doors past this
 constexpr float kCrossTimeout   = 8.0f;           // s of active play w/o a cell change → fallback
@@ -152,6 +191,151 @@ constexpr float kCrossSettle    = 0.8f;           // s to settle after the cell 
 constexpr float kCrossDoorReach = 160.0f;         // close enough to use a load door
 constexpr int   kCrossMaxStuck  = 4;              // stalls before the teleport fallback
 constexpr int   kCrossScan      = 6000;           // radius to hunt for a load door
+
+// --- Spots the game checks with a trigger box --------------------------------
+// Some objectives mark a person, but what the game actually waits for is the
+// player standing inside a small trigger box near them, often facing someone.
+// Arriving "at arm's length" of the marked person never sets those off, so
+// for these the walk goes to the box itself and stops ON it.
+struct QuestSpot {
+    uint32_t    marked;        // the reference the objective marks
+    game::Vec3  spots[2];      // where to stand: the trigger boxes' centres
+    int         count;
+    uint32_t    face;          // who to face there (0 = nobody)
+    const char* say;           // spoken on arrival (Polish)
+    const char* say_en;        // ...and in English
+};
+const QuestSpot kQuestSpots[] = {
+    // "Stań obok taty i pozwól Jonasowi zrobić zdjęcie" (CG02, Szybkie
+    // dorastanie). The objective marks Dad, but the photo waits for the player
+    // inside one of two small CG02PlayerPictureTrigger boxes (recorded bounds
+    // 13 x 18 and 13 x 23 units) facing Jonas within 45 degrees —
+    // CG02PlayerPictureTriggerSCRIPT in Fallout3.esm. The walk used to stop
+    // beside Dad, and nothing happened.
+    { 0x000300EF, { { 1654.0f, -12604.0f, 7100.0f }, { 1652.0f, -12749.0f, 7100.0f } }, 2,
+      0x000300E8, "Stoisz na miejscu do zdjęcia, przodem do Jonasa.",
+      "You're standing on the photo spot, facing Jonas." },
+};
+bool        g_precise = false;        // walking to a spot to stand ON
+uint32_t    g_face_form = 0;          // turn to this person on arrival
+std::string g_precise_say;
+game::Vec3  g_marked_pos{};           // where the objective's marker was (quest walks)
+// The boxes' recorded bounds are 13 x 18 units; whether those are half or
+// whole sizes is not certain, so the mover aims for the middle. The walk
+// counts as there a little wider: it looks only every 80 ms, and in play the
+// photo was taken ("Uśmiech!") with the player 9 units from the middle while
+// the walk, wanting 7, sidestepped about beside it until stopped by hand.
+constexpr float kSpotRadius   = 5.0f;   // what the mover aims for
+constexpr float kSpotArrive   = 12.0f;  // what counts as standing on it
+constexpr float kSpotStall    = 40.0f;  // stalled this near: as near as it gets
+constexpr float kSpotApproach = 64.0f;  // from here on, straight onto the spot
+uint32_t    g_marked_form = 0;          // the person the objective marks (Dad)
+const void* g_marked_refr = nullptr;
+
+// The spot to walk to instead of the marked reference, if this is one of
+// those walks. Only while the marked person is near the spot: Dad is marked at
+// the party too, rooms away from where the photo is taken.
+const QuestSpot* SpotFor(uint32_t form, const game::Vec3& marked, game::Vec3* spot)
+{
+    for (const auto& q : kQuestSpots) {
+        if (q.marked != form) continue;
+        auto pp = game::GetPlayerPosition();
+        const game::Vec3* best = nullptr;
+        float bestd = 1e30f;
+        for (int i = 0; i < q.count; ++i) {
+            const auto& s = q.spots[i];
+            float mx = s.x - marked.x, my = s.y - marked.y;
+            float md2 = mx * mx + my * my;
+            if (!(md2 <= 600.0f * 600.0f)) continue;   // the person is elsewhere
+            if (md2 < 40.0f * 40.0f) continue;          // they stand on this one
+            float px = s.x - pp.x, py = s.y - pp.y;
+            float d = px * px + py * py;
+            if (d < bestd) { bestd = d; best = &s; }
+        }
+        if (best) { *spot = *best; return &q; }
+    }
+    return nullptr;
+}
+
+// --- Locked doors on a route ---------------------------------------------------
+// The game's pathfinder routes the player through any door, locked or not, and
+// so does our own mesh (a doorway is walkable floor). A walk along such a route
+// ends at a door the player cannot open — in the prologue a friend could not
+// reach Dad that way and had to teleport. So a route is checked BEFORE it is
+// walked: a locked door near one of its legs goes on the avoid list and the
+// route is worked out again round it.
+constexpr float kDoorOnRoute = 70.0f;   // a leg this close passes through the door
+
+float SegDist2D(const game::Vec3& p, const game::Vec3& a, const game::Vec3& b)
+{
+    float sx = b.x - a.x, sy = b.y - a.y;
+    float len2 = sx * sx + sy * sy;
+    float t = len2 > 1.0f ? ((p.x - a.x) * sx + (p.y - a.y) * sy) / len2 : 0.0f;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    float dx = a.x + t * sx - p.x, dy = a.y + t * sy - p.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+bool AlreadyAvoided(const game::Vec3& p)
+{
+    for (const auto& a : g_avoid) {
+        float dx = a.x - p.x, dy = a.y - p.y;
+        if (dx * dx + dy * dy < 16.0f * 16.0f && std::fabs(a.z - p.z) < 64.0f) return true;
+    }
+    return false;
+}
+
+// The first locked door (not yet avoided) that the route passes, starting from
+// where the player stands. Load doors are left out: a route inside one area
+// ends at those, it does not pass through them.
+bool LockedDoorOnRoute(const std::vector<game::Vec3>& wp, game::WorldEntity* out)
+{
+    if (wp.empty()) return false;
+    auto pp = game::GetPlayerPosition();
+    float reach = 0.0f;
+    for (const auto& p : wp) {
+        float dx = p.x - pp.x, dy = p.y - pp.y;
+        float d = std::sqrt(dx * dx + dy * dy);
+        if (d > reach) reach = d;
+    }
+    reach += 200.0f;
+    if (reach > 9000.0f) reach = 9000.0f;
+    auto ents = game::ScanNearby((int)reach, 400, /*actors_only*/false, false);
+    const game::WorldEntity* best = nullptr;
+    size_t bestLeg = (size_t)-1;
+    for (const auto& e : ents) {
+        if (e.kind != game::WorldEntity::Kind::Door || !e.locked || !e.refr) continue;
+        if (e.load_door == 1 || e.open_state == 1) continue;
+        if (AlreadyAvoided(e.position)) continue;
+        game::Vec3 a = pp;
+        for (size_t i = 0; i < wp.size() && i < bestLeg; ++i) {
+            const auto& b = wp[i];
+            bool level = std::fabs(e.position.z - a.z) < 160.0f ||
+                         std::fabs(e.position.z - b.z) < 160.0f;
+            if (level && SegDist2D(e.position, a, b) <= kDoorOnRoute) {
+                best = &e; bestLeg = i;
+                break;
+            }
+            a = b;
+        }
+    }
+    if (!best) return false;
+    *out = *best;
+    return true;
+}
+
+// What the lock on a door is, in words.
+std::string LockWords(int level)
+{
+    if (level >= 250 || level < 0) return strings::T("potrzebny klucz", "requires a key");
+    if (!strings::Polish())
+        return std::string((level < 25) ? "very easy" : (level < 50) ? "easy" :
+                           (level < 75) ? "average" : (level < 100) ? "hard" : "very hard") +
+               " lock";
+    return std::string("zamek ") +
+           ((level < 25) ? "bardzo łatwy" : (level < 50) ? "łatwy" :
+            (level < 75) ? "średni" : (level < 100) ? "trudny" : "bardzo trudny");
+}
 
 constexpr float kArriveDist = 90.0f;   // ~1.4 m — close enough to activate
 // If we stall this close to the target, treat it as arrival rather than an
@@ -231,8 +415,10 @@ void WarnNoMover()
     g_no_mover_said = now;
     F3A_INFO("autowalk: NativeWalk on but the mover hook is not installed — "
              "refusing to walk (set [Voice] NativeWalk = 0 for the old key walk).");
-    tolk::Speak("Auto-chodzenie niedostępne na tej wersji gry. "
-                "Ustaw NativeWalk na 0 w pliku INI, żeby chodzić klawiszami.",
+    tolk::Speak(strings::T("Auto-chodzenie niedostępne na tej wersji gry. "
+                           "Ustaw NativeWalk na 0 w pliku INI, żeby chodzić klawiszami.",
+                           "Auto-walk is not available on this game version. "
+                           "Set NativeWalk to 0 in the INI file to walk with keys."),
                 tolk::Priority::System, true);
 }
 
@@ -362,36 +548,151 @@ float DistanceToTarget()
     return std::sqrt(dx * dx + dy * dy);
 }
 
+game::Vec3 LegGoal() { return OnLegs() ? g_legs[g_leg] : g_target_pos; }
+
+// What progress is measured against: the leg being walked on a long walk
+// (a road can lead away from the target for a while), the target otherwise.
+float ProgressDistance()
+{
+    if (!OnLegs()) return DistanceToTarget();
+    auto pp = game::GetPlayerPosition();
+    game::Vec3 g = g_legs[g_leg];
+    float dx = g.x - pp.x, dy = g.y - pp.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
 // The point we currently steer toward: the active waypoint if we have a path,
-// otherwise the final target.
+// otherwise the leg's point (or the final target).
 game::Vec3 CurrentGoal()
 {
     if (g_have_path && g_wp_index < g_waypoints.size())
         return g_waypoints[g_wp_index];
-    return g_target_pos;
+    return LegGoal();
 }
 
 // Ask the game's own pathfinder for a route (it routes NPCs: doors, stairs,
-// the links between navmeshes). False when it can't be asked — no reference to
-// route to, switched off, or given up on for this walk.
+// the links between navmeshes). To a reference when there is one, else to
+// the bare point. False when it can't be asked — a reference whose place is
+// not loaded (nothing for the engine to route to), switched off, or given up
+// on for this walk.
 bool RequestEngineRouteTo(const void* refr, uint32_t form, const game::Vec3& goal,
                           float radius)
 {
-    if (!refr || !form || g_engine_given_up || !config::Get().engine_path) return false;
+    if (g_engine_given_up || !config::Get().engine_path) return false;
+    if (refr || form) {
+        if (!refr || !form || game::RefSpaceId(refr) == 0) return false;
+        g_route_goal = goal;
+        mover::RequestEnginePath(refr, form, radius);
+        return true;
+    }
     g_route_goal = goal;
-    mover::RequestEnginePath(refr, form, radius);
+    mover::RequestEnginePathToPoint(goal.x, goal.y, goal.z, radius);
     return true;
 }
 
 // The route for what the walk is doing now: the door it is heading for in
-// cross mode, the target otherwise.
+// cross mode, the leg's point on a long walk, the target otherwise.
 bool RequestEngineRoute()
 {
     if (g_cross)
         return g_cross_door_refr &&
                RequestEngineRouteTo(g_cross_door_refr, g_cross_door_form,
                                     g_cross_door_pos, kCrossDoorReach * 0.5f);
+    if (OnLegs()) {
+        // A leg's point on a straight line has a guessed height; the engine
+        // needs it on the ground. The leg is in the loaded cells by now.
+        float z;
+        game::Vec3& g = g_legs[g_leg];
+        if (navmesh::GroundZ(g.x, g.y, g.z, &z)) g.z = z;
+        return RequestEngineRouteTo(nullptr, 0, g, kLegArrive * 0.5f);
+    }
     return RequestEngineRouteTo(g_target_refr, g_target_form, g_target_pos, kArriveDist);
+}
+
+// The place the target is in: from its cell when that is loaded, else from
+// the world-door table (a quest target in a place nobody has loaded).
+uint32_t TargetSpace()
+{
+    uint32_t s = g_target_refr ? game::RefSpaceId(g_target_refr) : 0;
+    if (!s && g_target_form) s = worlddoors::RefSpace(g_target_form);
+    return s;
+}
+
+// Is the target in the player's coordinate frame?
+// Two points of one worldspace can still be apart: a roof or a ledge reached
+// only through the building under it is a part of the walk graph of its own.
+bool DifferentAreas(const game::Vec3& a, const game::Vec3& b)
+{
+    uint32_t ps = game::PlayerSpaceId();
+    if (!ps || game::PlayerIsInInterior()) return false;
+    int x = roadnet::Area(ps, a), y = roadnet::Area(ps, b);
+    return x >= 0 && y >= 0 && x != y;
+}
+
+bool TargetHere()
+{
+    bool here = false;
+    if (g_target_refr && game::TargetSharesPlayerSpace(g_target_refr)) {
+        here = true;
+    } else {
+        uint32_t ps = game::PlayerSpaceId();
+        uint32_t ts = TargetSpace();
+        here = ps != 0 && ts != 0 && ps == ts;
+    }
+    if (here && DifferentAreas(game::GetPlayerPosition(), g_target_pos)) {
+        static uint32_t s_logged_for = 0;
+        if (s_logged_for != g_target_form) {
+            s_logged_for = g_target_form;
+            F3A_INFO("autowalk: '%s' is in this place but on a part of it reached only "
+                     "through doors", g_target_name.c_str());
+        }
+        return false;
+    }
+    return here;
+}
+
+worlddoors::AreaFn MakeAreaFn()
+{
+    return [](uint32_t space, const game::Vec3& p) { return roadnet::Area(space, p); };
+}
+
+// Cut a walk to a far goal in this worldspace into legs: along the walk graph
+// (the whole navmesh offline, roads preferred; roadnet::Route), else
+// straight there in pieces the engine can route. Nothing for a near goal,
+// and nothing indoors.
+void PlanLegs(const game::Vec3& goal)
+{
+    g_legs.clear();
+    g_leg = 0;
+    g_legs_road = false;
+    g_leg_skips = 0;
+    if (game::PlayerIsInInterior()) return;
+    auto pp = game::GetPlayerPosition();
+    float dx = goal.x - pp.x, dy = goal.y - pp.y;
+    float d = std::sqrt(dx * dx + dy * dy);
+    if (!(d > kLongWalk)) return;
+    std::vector<game::Vec3> road;
+    float share = 0.0f;
+    bool graph = roadnet::Route(game::PlayerSpaceId(), pp, goal, &road, nullptr, &share);
+    if (graph) {
+        g_legs = std::move(road);
+        g_legs_road = share >= 0.5f;          // "drogami" only when it mostly is
+    } else {
+        int n = (int)std::ceil(d / kLegMax);
+        for (int i = 1; i < n; ++i) {
+            float t = (float)i / (float)n;
+            g_legs.push_back({ pp.x + dx * t, pp.y + dy * t, pp.z + (goal.z - pp.z) * t });
+        }
+    }
+    // A first road point the player is already standing at is no leg.
+    while (OnLegs()) {
+        float lx = g_legs[g_leg].x - pp.x, ly = g_legs[g_leg].y - pp.y;
+        if (lx * lx + ly * ly > kLegArrive * kLegArrive) break;
+        ++g_leg;
+    }
+    F3A_INFO("autowalk: long walk of %.0f units in %u leg(s), %s", d,
+             (unsigned)(g_legs.size() - g_leg + 1),
+             !graph ? "straight" : g_legs_road ? "mostly along roads" : "across open ground");
 }
 
 float DistanceToRouteGoal()
@@ -425,6 +726,68 @@ bool RouteHitsAvoided(const std::vector<game::Vec3>& wp)
     return false;
 }
 
+// The locked door the walk last found on its way, for the stop sentence when
+// there turns out to be no way round it.
+std::string g_lockdoor_name;
+uint32_t    g_avoid_space = 0;            // the place g_avoid's points belong to
+int         g_lockdoor_level = -1;
+game::Vec3  g_lockdoor_pos{};
+std::vector<uint32_t> g_lockdoor_said;    // doors already announced this walk
+
+// Said once per door per walk, and only when there IS a way round it: with
+// none, the walk goes on as before and the door is dealt with when reached.
+void NoteLockedDoor(const game::WorldEntity& d)
+{
+    g_lockdoor_name  = d.name;
+    g_lockdoor_level = d.lock_level;
+    g_lockdoor_pos   = d.position;
+    for (uint32_t id : g_lockdoor_said) if (id == d.form_id) return;
+    g_lockdoor_said.push_back(d.form_id);
+    tolk::Speak(strings::T("Omijam zamknięte drzwi: ", "Going round the locked door: ") +
+                d.name + ".", tolk::Priority::Ui, false);
+}
+
+// Our own route to `to`, round every locked door it would pass (a few at
+// most). A door is avoided from then on only if a route round it was found:
+// one that merely stands beside the corridor would otherwise close the
+// corridor off (the avoid zone is 120 units) and leave no route at all.
+// False when there is no route.
+bool BuildOwnPath(const game::Vec3& to, std::vector<game::Vec3>& wp)
+{
+    std::vector<game::Vec3> plain;           // the best route found so far
+    std::vector<game::WorldEntity> passed;   // locked doors routed round
+    const size_t avoidBefore = g_avoid.size();
+    for (int round = 0; round < 4; ++round) {
+        wp.clear();
+        if (!navmesh::BuildPath(game::GetPlayerPosition(), to, wp, &g_avoid) || wp.empty())
+            break;
+        // The avoid list steers the search, but a route that still runs
+        // through a locked door is no route round it.
+        if (!g_avoid.empty() && RouteHitsAvoided(wp)) break;
+        plain = wp;
+        game::WorldEntity d;
+        if (!LockedDoorOnRoute(wp, &d)) {
+            for (const auto& p : passed) {
+                F3A_INFO("autowalk: our route goes round the locked door '%s' (%08X, lock %d)",
+                         p.name.c_str(), (unsigned)p.form_id, p.lock_level);
+                NoteLockedDoor(p);
+            }
+            return true;
+        }
+        g_avoid.push_back(d.position);
+        passed.push_back(d);
+    }
+    // No way round the doors found on the way: forget them (the walk deals
+    // with a door when it gets there) and use the best route there was.
+    if (g_avoid.size() > avoidBefore) {
+        F3A_INFO("autowalk: no way round %u locked door(s) on our route - keeping it",
+                 (unsigned)(g_avoid.size() - avoidBefore));
+        g_avoid.resize(avoidBefore);
+    }
+    wp = plain;
+    return !wp.empty();
+}
+
 // Start a freshly adopted route at the leg the player is on now, not at its
 // first point: the answer takes a moment, and turning back to where the
 // player stood when asking is a step backwards. Only the route's first stretch
@@ -451,6 +814,8 @@ void SnapToRoute()
     g_wp_index = bestI;
 }
 
+void StopWalking(const char* reason_utf8);   // defined below
+
 // Take the game's route once it is ready.
 void AdoptEngineRoute()
 {
@@ -470,6 +835,37 @@ void AdoptEngineRoute()
         F3A_INFO("autowalk: engine route goes through an avoided door - ignored");
         return;
     }
+    if (!g_cross) {
+        // The engine routes the player through locked doors as if they
+        // opened. Look before walking: if our own mesh has a way round the
+        // door, that is walked instead and the door stays avoided (the
+        // engine's later answers through it are then ignored above). With no
+        // way round, the engine's route is walked as before, and the door is
+        // dealt with when the walk gets there (TryOpenBlockingDoor).
+        game::WorldEntity door;
+        if (LockedDoorOnRoute(wp, &door)) {
+            g_avoid.push_back(door.position);
+            std::vector<game::Vec3> own;
+            if (BuildOwnPath(LegGoal(), own)) {
+                F3A_INFO("autowalk: the engine's route runs through the locked door '%s' "
+                         "(%08X, lock %d) - walking our own route round it",
+                         door.name.c_str(), (unsigned)door.form_id, door.lock_level);
+                NoteLockedDoor(door);
+                g_waypoints = std::move(own);
+                g_wp_index = 0;
+                g_have_path = true;
+                g_route_engine = false;
+                g_route_partial = false;
+                SnapToRoute();
+                g_last_probe_dist = ProgressDistance();
+                return;
+            }
+            g_avoid.pop_back();
+            F3A_INFO("autowalk: the engine's route runs through the locked door '%s' "
+                     "(%08X, lock %d) and there is no way round - walking it anyway",
+                     door.name.c_str(), (unsigned)door.form_id, door.lock_level);
+        }
+    }
     // Partial: it ends well short of where it was asked to go. The engine
     // routes only as far as the navmesh it has loaded; the next leg is asked
     // for when this one is walked (see Tick).
@@ -486,7 +882,7 @@ void AdoptEngineRoute()
     g_route_partial = partial;
     g_leg_start_dist = DistanceToRouteGoal();
     SnapToRoute();
-    g_last_probe_dist = DistanceToTarget();
+    g_last_probe_dist = ProgressDistance();
 }
 
 // Before walking a route of the engine's, the player waits for it: drop what
@@ -509,15 +905,9 @@ bool RebuildPath(const char* why)
 {
     g_rebuild_cooldown = kRebuildEvery;
     std::vector<game::Vec3> wp;
-    bool ok = navmesh::BuildPath(game::GetPlayerPosition(), g_target_pos, wp,
-                                 &g_avoid) && !wp.empty();
-    // The avoid list steers the search, but a route that still runs through
-    // a locked door is no route round it.
-    bool hits = ok && !g_avoid.empty() && RouteHitsAvoided(wp);
-    if (hits) ok = false;
+    bool ok = BuildOwnPath(LegGoal(), wp);
     F3A_INFO("autowalk: rebuild (%s) -> %s, %u waypoint(s), %u avoided",
-             why ? why : "silent",
-             ok ? "OK" : hits ? "only through an avoided door" : "no path",
+             why ? why : "silent", ok ? "OK" : "no path",
              (unsigned)wp.size(), (unsigned)g_avoid.size());
     if (ok) {
         g_waypoints = std::move(wp);
@@ -529,6 +919,79 @@ bool RebuildPath(const char* why)
     RequestEngineRoute();
     if (why && *why) tolk::Speak(why, tolk::Priority::Ui, false);
     return ok;
+}
+
+// On to the next leg of a long walk: the engine is asked for the way to its
+// point, and our own route stands in until it answers, so the walk does not
+// stop at every road point.
+void BeginCurrentLeg();
+
+void NextLeg()
+{
+    if (OnLegs()) ++g_leg;
+    BeginCurrentLeg();
+}
+
+// Set the walk up for the leg g_leg points at (or the goal itself).
+void BeginCurrentLeg()
+{
+    g_waypoints.clear();
+    g_wp_index = 0;
+    g_route_engine = false;
+    g_route_partial = false;
+    g_engine_said_none = false;
+    // Each leg asks the engine afresh: giving up on one leg's point (inside a
+    // rock) must not leave the rest of a long walk on straight lines.
+    g_engine_given_up = false;
+    g_route_legs = 1;
+    g_stuck_count = 0;
+    g_recover_timer = 0.0f;
+    g_have_path = BuildOwnPath(LegGoal(), g_waypoints);
+    RequestEngineRoute();
+    g_last_probe_dist = ProgressDistance();
+    g_probe_timer = 0.0f;
+    g_probe_pos = game::GetPlayerPosition();
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
+    F3A_INFO("autowalk: leg %u of %u%s", (unsigned)g_leg + 1, (unsigned)g_legs.size() + 1,
+             OnLegs() ? "" : " - the last one, to the goal itself");
+}
+
+// The engine found no way (or only part of one), and neither did our mesh of
+// the loaded cells: ask the walk graph, at any distance. The way up to
+// Arefu's deck is the case in point - a ramp at the town's south edge that
+// the engine does not find from the ground below the deck (the FNV mod keeps
+// a hand-made "bridge" table for it); the graph knows every navmesh link.
+bool g_walkgraph_tried = false;
+
+bool TryWalkGraph()
+{
+    if (g_walkgraph_tried || OnLegs() || g_cross || g_precise || game::PlayerIsInInterior())
+        return false;
+    g_walkgraph_tried = true;
+    std::vector<game::Vec3> legs;
+    float share = 0.0f, length = 0.0f;
+    auto pp = game::GetPlayerPosition();
+    if (!roadnet::Route(game::PlayerSpaceId(), pp, g_target_pos, &legs, &length, &share, 0.0f) ||
+        legs.empty())
+        return false;
+    g_legs = std::move(legs);
+    g_leg = 0;
+    g_legs_road = share >= 0.5f;
+    g_leg_skips = 0;
+    while (OnLegs()) {
+        float lx = g_legs[g_leg].x - pp.x, ly = g_legs[g_leg].y - pp.y;
+        if (lx * lx + ly * ly > kLegArrive * kLegArrive) break;
+        ++g_leg;
+    }
+    if (!OnLegs()) return false;
+    F3A_INFO("autowalk: no direct way - the walk graph goes round, %.0f units in %u leg(s)",
+             length, (unsigned)(g_legs.size() - g_leg + 1));
+    tolk::Speak(strings::T("Nie ma prostej drogi. Idę naokoło, ", "No direct way. Going round, ") +
+                strings::FormatDistance(length) + ".",
+                tolk::Priority::Ui, false);
+    BeginCurrentLeg();
+    return true;
 }
 
 // Advance past waypoints we've already reached — or already passed: the
@@ -568,6 +1031,22 @@ void AdvanceWaypoints()
 // inside into a wall. `corner` gets the real next waypoint, for braking.
 constexpr float kLookAhead      = 60.0f;   // 1.5x the turning radius (160 u/s / 4 rad/s)
 constexpr float kSharpCornerCos = 0.5f;    // cos 60°
+// Where the route climbs or drops (ramps, stairs, Megaton's walkways with no
+// rails) the corners are not cut: the player walked off a walkway there,
+// fell 180 units and spent the next minute under it.
+constexpr float kLookAheadTight = 12.0f;
+constexpr float kRouteClimb     = 24.0f;   // height change between waypoints that counts
+
+// Does the route rise or fall around the waypoint being walked to?
+bool RouteClimbsHere()
+{
+    if (!g_have_path || g_wp_index >= g_waypoints.size()) return false;
+    size_t lo = g_wp_index > 0 ? g_wp_index - 1 : 0;
+    size_t hi = g_wp_index + 2 < g_waypoints.size() ? g_wp_index + 2 : g_waypoints.size() - 1;
+    for (size_t i = lo; i < hi; ++i)
+        if (std::fabs(g_waypoints[i + 1].z - g_waypoints[i].z) > kRouteClimb) return true;
+    return false;
+}
 
 game::Vec3 LookAheadGoal(game::Vec3* corner)
 {
@@ -584,7 +1063,7 @@ game::Vec3 LookAheadGoal(game::Vec3* corner)
     float curX = a.x + abx * t, curY = a.y + aby * t;
     size_t next = g_wp_index;
     float nx = b.x, ny = b.y;
-    float remaining = kLookAhead;
+    float remaining = RouteClimbsHere() ? kLookAheadTight : kLookAhead;
     for (int guard = 0; guard < 64; ++guard) {
         float dx = nx - curX, dy = ny - curY;
         float seg = std::sqrt(dx * dx + dy * dy);
@@ -701,11 +1180,207 @@ void LookAtTarget()
 
 void StopWalking(const char* reason_utf8);   // defined below
 
-// The walk is over at the target: say so and face it.
+// DLC travel points (worlddoors::Hop::travel): what one is, as in "Prowadzę
+// do ...", and what to do there.
+const char* TravelWhat(int kind)
+{
+    switch (kind) {
+    case 1:  return strings::T("drezyny", "the handcart");
+    case 2:  return strings::T("koi na łodzi", "the bunk on the boat");
+    case 3:  return strings::T("konsoli metra", "the metro console");
+    default: return strings::T("przejazdu", "the transport");
+    }
+}
+
+std::string TravelHowTo(int kind, const std::string& to)
+{
+    switch (kind) {
+    case 1:
+        return strings::T("Jesteś przy drezynie. Aktywuj ją, żeby pojechać w stronę: ",
+                          "You're at the handcart. Activate it to ride towards: ") + to +
+               strings::T(". Za pierwszym razem jedzie się z Wernherem.",
+                          ". The first ride is with Wernher.");
+    case 2:
+        return strings::T("Jesteś przy koi na łodzi Księżna. Aktywuj ją, żeby popłynąć w stronę: ",
+                          "You're at the bunk on the Duchess Gambit. Activate it to sail towards: ") + to +
+               strings::T(". Na pierwszy rejs potrzebny jest bilet od Tobara.",
+                          ". The first trip needs a ticket from Tobar.");
+    case 3:
+        return strings::T("Jesteś przy konsoli metra. Aktywuj ją, żeby pojechać w stronę: ",
+                          "You're at the metro console. Activate it to ride towards: ") + to + ".";
+    default:
+        return strings::T("Jesteś przy przejeździe w stronę: ", "You're at the transport towards: ") +
+               to + strings::T(". Aktywuj go.", ". Activate it.");
+    }
+}
+
+// Walk to a door the world-door table named but that is not loaded yet: the
+// door becomes the walk's goal for now (with legs along the roads), and the
+// real target waits in g_final_*.
+void BeginFarDoorWalk(const worlddoors::Hop& hop)
+{
+    g_final_pos  = g_target_pos;
+    g_final_name = g_target_name;
+    g_final_refr = g_target_refr;
+    g_final_form = g_target_form;
+    g_far_door      = true;
+    g_far_door_form = hop.door;
+    g_far_door_name = hop.to_name;
+    g_far_travel    = hop.travel;
+    g_far_door_pos  = hop.pos;
+    g_cross = false;
+    g_cross_engine = false;
+    g_cross_door_refr = nullptr;
+    g_target_pos  = hop.pos;
+    g_target_refr = nullptr;
+    g_target_form = 0;
+    g_waypoints.clear();
+    g_wp_index = 0;
+    g_route_engine = false;
+    g_route_partial = false;
+    g_engine_given_up = false;
+    g_engine_said_none = false;
+    g_route_legs = 1;
+    g_stuck_count = 0;
+    g_recover_timer = 0.0f;
+    g_close_timer = 0.0f;
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
+    PlanLegs(hop.pos);
+    g_have_path = BuildOwnPath(LegGoal(), g_waypoints);
+    g_last_probe_dist = ProgressDistance();
+    g_probe_timer = 0.0f;
+    g_probe_pos = game::GetPlayerPosition();
+    if (RequestEngineRoute()) g_engine_wait = kEngineWaitSecs;
+    float d = DistanceToTarget();
+    F3A_INFO("autowalk: the way to '%s' leads through door %08X to '%s', %.0f units "
+             "away (%d door(s) in all)", g_final_name.c_str(), (unsigned)hop.door,
+             hop.to_name.c_str(), d, hop.doors);
+    std::string say = hop.travel
+        ? strings::T("Prowadzę do ", "Leading you to ") + std::string(TravelWhat(hop.travel)) +
+              strings::T(" w stronę: ", " towards: ") + hop.to_name
+        : strings::T("Prowadzę do wejścia: ", "Leading you to the entrance: ") +
+              (hop.to_name.empty() ? std::string(strings::T("przejście", "a doorway")) : hop.to_name);
+    say += ", " + strings::FormatDistance(d) +
+           (g_legs_road ? strings::T(", drogami.", ", by road.") : ".");
+    tolk::Speak(say, tolk::Priority::Background, false);
+}
+
+bool CrossByTable();   // defined below
+
+// At the far door (its place is loaded now): find it, put the real target
+// back, and cross the ordinary way.
+void ReachedFarDoor()
+{
+    if (g_far_travel) {
+        // A DLC travel point: the game moves the player when it is activated
+        // (and asks first), so the walk ends here, facing it. The real target
+        // is put back (StopWalking): the next walk goes on from the far side.
+        F3A_INFO("autowalk: at travel point %08X (kind %d) to '%s'", (unsigned)g_far_door_form,
+                 g_far_travel, g_far_door_name.c_str());
+        std::string say = TravelHowTo(g_far_travel, g_far_door_name);
+        game::Vec3 at = g_far_door_pos;
+        g_far_travel = 0;
+        StopWalking(say.c_str());
+        poll::RequestAimTrack(nullptr, 0, at, 0.0f, kLookAtFrames);
+        return;
+    }
+    auto ents = game::ScanNearby(1500, 400, /*actors_only*/false, false);
+    const game::WorldEntity* door = nullptr;
+    for (const auto& e : ents)
+        if (e.kind == game::WorldEntity::Kind::Door && e.form_id == g_far_door_form && e.refr) {
+            door = &e;
+            break;
+        }
+    g_target_pos  = g_final_pos;
+    g_target_name = g_final_name;
+    g_target_refr = g_final_refr;
+    g_target_form = g_final_form;
+    g_far_door = false;
+    g_legs.clear();
+    g_leg = 0;
+    g_engine_given_up = false;      // the door and what lies beyond: engine first again
+    g_route_legs = 0;
+    if (!door) {
+        // Switched off by a quest, most likely: ask the table again without
+        // it — the next way in may be a short walk away (Megaton's gate,
+        // 1700 units past its quest hatch).
+        F3A_INFO("autowalk: at the far door's place, but door %08X is not here - "
+                 "asking the door table for another", (unsigned)g_far_door_form);
+        if (g_table_missing.size() < 16) g_table_missing.push_back(g_far_door_form);
+        g_cross = true;
+        g_cross_from_cell = game::GetPlayerCell();
+        g_cross_door_refr = nullptr;
+        if (g_table_missing.size() <= 4 && CrossByTable()) {
+            tolk::Speak(strings::T("Tego wejścia tu nie ma. Szukam innego.",
+                                   "That entrance isn't here. Looking for another."),
+                        tolk::Priority::Ui, false);
+            return;
+        }
+        g_cross = false;
+        std::string say = strings::T("Nie znajduję wejścia: ", "Can't find the entrance: ") +
+                          g_far_door_name + ".";
+        StopWalking(say.c_str());
+        return;
+    }
+    g_cross = true;
+    g_cross_from_cell = game::GetPlayerCell();
+    g_cross_door_refr = door->refr;
+    g_cross_door_form = door->form_id;
+    g_cross_door_pos  = door->position;
+    g_cross_door_name = door->name;
+    if (g_cross_used_doors.size() < 32) g_cross_used_doors.push_back(door->form_id);
+    g_cross_stuck = 0;
+    g_probe_timer = 0.0f;
+    g_best_dist = 1e9f;
+    g_noimprove = 0;
+    auto pp = game::GetPlayerPosition();
+    float dx = door->position.x - pp.x, dy = door->position.y - pp.y;
+    g_last_probe_dist = std::sqrt(dx * dx + dy * dy);
+    F3A_INFO("autowalk: at the far door '%s' - crossing", door->name.c_str());
+    RouteToDoor();
+}
+
+// The walk is over at the target: say so and face it. On the way to a far
+// door, "arriving" is reaching that door: it is crossed, the walk goes on.
 void Arrive(const char* say)
 {
+    if (g_far_door) { ReachedFarDoor(); return; }
     StopWalking(say);
     LookAtTarget();
+}
+
+// Standing on a trigger-box spot: say so, and turn to whoever the game wants
+// faced (the photographer). Held like the arrival look, so the engine's own
+// view update does not turn the player away again.
+void ArriveOnSpot()
+{
+    uint32_t face = g_face_form;
+    std::string say = g_precise_say;
+    StopWalking(say.c_str());
+    if (!face) return;
+    auto ents = game::ScanNearby(2000, 64, /*actors_only*/true, false);
+    for (const auto& e : ents) {
+        if (e.form_id != face || !e.refr) continue;
+        game::Vec3 at = e.position;
+        game::Vec3 body{};
+        if (game::GetAimPointFor(e.refr, &body, nullptr)) at = body;
+        poll::RequestAimTrack(e.refr, e.form_id, at, 0.0f, kLookAtFrames);
+        return;
+    }
+    F3A_INFO("autowalk: on the spot, but %08X is nowhere near to face", (unsigned)face);
+}
+
+// The last stretch onto a spot: straight at it, stopping ON it (the mover
+// eases in frame by frame; this module only looks every 80 ms).
+void SteerOntoSpot()
+{
+    if (config::Get().native_walk && mover::Available()) {
+        Move(false, false, false, false);
+        mover::SetGoalPrecise(g_target_pos.x, g_target_pos.y, kSpotRadius);
+        return;
+    }
+    Steer(g_target_pos);
 }
 
 // Steer along the route: at the look-ahead point, braking for the real corner.
@@ -754,10 +1429,22 @@ void StopWalking(const char* reason_utf8)
     g_cross_wait    = 0.0f;
     g_cross_door_refr = nullptr;
     g_cross_used_doors.clear();   // a new walk gets a clean map of the building
+    g_table_missing.clear();
     g_engine_wait    = 0.0f;
     g_route_engine   = false;
     g_route_partial  = false;
     g_cross_engine   = false;
+    g_legs.clear();
+    g_leg = 0;
+    if (g_far_door) {
+        // Stopped on the way to a far door: what was being walked to is the
+        // real target (Alt+Home and the next walk ask for it).
+        g_far_door    = false;
+        g_target_pos  = g_final_pos;
+        g_target_name = g_final_name;
+        g_target_refr = g_final_refr;
+        g_target_form = g_final_form;
+    }
     g_state = State::Idle;
     if (reason_utf8 && *reason_utf8)
         tolk::Speak(reason_utf8, tolk::Priority::System, true);
@@ -817,20 +1504,18 @@ bool TryOpenBlockingDoor()
         if (!g_cross && RebuildPath(nullptr)) {
             F3A_INFO("autowalk: locked door '%s' (%08X) — routing round it",
                      best->name.c_str(), (unsigned)best->form_id);
-            tolk::Speak("Drzwi zamknięte na zamek. Szukam innej drogi.",
+            tolk::Speak(strings::T("Drzwi zamknięte na zamek. Szukam innej drogi.",
+                                   "The door is locked. Looking for another way."),
                         tolk::Priority::Ui, false);
-            g_last_probe_dist = DistanceToTarget();
+            g_last_probe_dist = ProgressDistance();
             g_stuck_count = 0;
             return true;
         }
         F3A_INFO("autowalk: locked door '%s' (%08X) lock=%d, %.0f units — stopping",
                  best->name.c_str(), (unsigned)best->form_id, best->lock_level, dist);
-        std::string what = "Zamknięte drzwi na drodze: " + best->name + ", ";
-        int L = best->lock_level;
-        if (L >= 250 || L < 0) what += "potrzebny klucz.";
-        else what += std::string("zamek ") +
-                     ((L < 25) ? "bardzo łatwy" : (L < 50) ? "łatwy" :
-                      (L < 75) ? "średni" : (L < 100) ? "trudny" : "bardzo trudny") + ".";
+        std::string what = strings::T("Zamknięte drzwi na drodze: ", "Locked door on the way: ") +
+                           best->name + ", " +
+                           LockWords(best->lock_level) + ".";
         const void* r = best->refr; uint32_t f = best->form_id;
         StopWalking(what.c_str());
         game::Vec3 at{};
@@ -858,7 +1543,7 @@ bool TryOpenBlockingDoor()
     g_door_hold = kDoorHoldSecs;
     g_door_checks = 2;
     g_door_cooldown = 2.0f * kDoorHoldSecs + kDoorGraceSecs;
-    tolk::Speak("Otwieram drzwi.", tolk::Priority::Background, false);
+    tolk::Speak(strings::T("Otwieram drzwi.", "Opening the door."), tolk::Priority::Background, false);
     return true;
 }
 
@@ -878,14 +1563,15 @@ bool DoorHoldTick(float dt)
         return true;
     }
     if (st == 0) {
-        std::string what = "Drzwi się nie otworzyły: " + g_door_name + ".";
+        std::string what = strings::T("Drzwi się nie otworzyły: ", "The door didn't open: ") +
+                           g_door_name + ".";
         const void* r = g_door_refr; uint32_t f = g_door_form;
         StopWalking(what.c_str());
         game::Vec3 at{};
         if (game::GetRefPosition(r, f, &at)) poll::RequestFacePoint(at);
         return true;
     }
-    g_last_probe_dist = DistanceToTarget();   // fresh progress base past the door
+    g_last_probe_dist = ProgressDistance();   // fresh progress base past the door
     return false;
 }
 
@@ -914,20 +1600,25 @@ std::string DescribeObstacle()
         if (br.distance < bestd) { bestd = br.distance; best = &e; }
     }
     if (!best)
-        return "Przeszkoda terenowa — ściana lub skała. Omijam.";
+        return strings::T("Przeszkoda terenowa — ściana lub skała. Omijam.",
+                          "Terrain in the way — a wall or rock. Going round.");
     switch (best->kind) {
         case game::WorldEntity::Kind::Actor:
-            return (best->hostile ? "Wróg na drodze: " : "Ktoś na drodze: ")
-                   + best->name + ". Omijam.";
+            return (best->hostile ? strings::T("Wróg na drodze: ", "Enemy in the way: ")
+                                  : strings::T("Ktoś na drodze: ", "Someone in the way: "))
+                   + best->name + strings::T(". Omijam.", ". Going round.");
         case game::WorldEntity::Kind::Door:
             // A door still in the cone here is one we already handed to the
             // player (we stop at each door only once per walk), so if we are
             // still stuck on it, it is locked or blocked rather than just shut.
-            return "Drzwi zablokowane lub zamknięte: " + best->name + ".";
+            return strings::T("Drzwi zablokowane lub zamknięte: ", "Door blocked or locked: ") +
+                   best->name + ".";
         case game::WorldEntity::Kind::Container:
-            return "Blokuje pojemnik: " + best->name + ". Omijam.";
+            return strings::T("Blokuje pojemnik: ", "A container is in the way: ") + best->name +
+                   strings::T(". Omijam.", ". Going round.");
         default:
-            return "Przeszkoda: " + best->name + ". Omijam.";
+            return strings::T("Przeszkoda: ", "Obstacle: ") + best->name +
+                   strings::T(". Omijam.", ". Going round.");
     }
 }
 
@@ -1031,11 +1722,14 @@ void CrossFallbackTeleport()
     // a few doors away, it was the worst possible thing to say. Point at the
     // doors instead, which is what the route actually needs.
     if (game::PlayerIsInInterior()) {
-        StopWalking("Nie mogę dojść pieszo. Cel jest w innej części tej lokacji — "
-                    "poszukaj drzwi klawiszem X i przejdź przez nie.");
+        StopWalking(strings::T("Nie mogę dojść pieszo. Cel jest w innej części tej lokacji — "
+                               "poszukaj drzwi klawiszem X i przejdź przez nie.",
+                               "I can't get there on foot. The target is in another part of this "
+                               "location — find a door with the X key and go through it."));
         return;
     }
-    StopWalking("Nie mogę dojść pieszo. Otwórz mapę świata i użyj szybkiej podróży.");
+    StopWalking(strings::T("Nie mogę dojść pieszo. Otwórz mapę świata i użyj szybkiej podróży.",
+                           "I can't get there on foot. Open the world map and use fast travel."));
 }
 
 // The load door the game's route runs through: the one nearest the point
@@ -1066,10 +1760,54 @@ bool PickDoorNear(const game::Vec3& at)
     return true;
 }
 
-// Our own door ranking (PickCrossDoor) and the game's route to that door.
-// False when there is no door at all (the walk has then been stopped).
+// The door the world-door table says to take: the first of the shortest chain
+// of doors to the target's place. Nearby and loaded -> the ordinary walk to a
+// door; far away -> a walk there first (BeginFarDoorWalk). False when the
+// table has no answer (not loaded, the target's place unknown, no chain).
+bool CrossByTable()
+{
+    if (!worlddoors::Loaded()) return false;
+    uint32_t ps = game::PlayerSpaceId();
+    uint32_t ts = TargetSpace();
+    if (!ps || !ts) {
+        F3A_INFO("autowalk: door table not asked - player place %08X, target place %08X",
+                 (unsigned)ps, (unsigned)ts);
+        return false;
+    }
+    worlddoors::Hop hop;
+    worlddoors::AreaFn areaFn = MakeAreaFn();
+    if (!worlddoors::NextDoor(ps, game::GetPlayerPosition(), ts, g_target_pos, &hop,
+                              &g_table_missing, &areaFn)) {
+        F3A_INFO("autowalk: the door table knows no way from %08X to %08X",
+                 (unsigned)ps, (unsigned)ts);
+        return false;
+    }
+    auto ents = game::ScanNearby(kCrossScan, 400, /*actors_only*/false, false);
+    for (const auto& e : ents) {
+        if (e.kind != game::WorldEntity::Kind::Door || e.form_id != hop.door || !e.refr)
+            continue;
+        F3A_INFO("autowalk: door table: next door '%s' (%08X) to '%s', %d door(s) in all",
+                 e.name.c_str(), (unsigned)e.form_id, hop.to_name.c_str(), hop.doors);
+        if (g_cross_used_doors.size() < 32) g_cross_used_doors.push_back(e.form_id);
+        g_best_dist = 1e9f;
+        g_noimprove = 0;
+        g_cross_door_refr = e.refr;
+        g_cross_door_form = e.form_id;
+        g_cross_door_pos  = e.position;
+        g_cross_door_name = e.name;
+        RouteToDoor();
+        return true;
+    }
+    BeginFarDoorWalk(hop);
+    return true;
+}
+
+// The next door from the world-door table, else our own door ranking
+// (PickCrossDoor), and the game's route to that door. False when there is no
+// door at all (the walk has then been stopped).
 bool CrossPickDoorOurselves()
 {
+    if (CrossByTable()) return true;
     if (!PickCrossDoor()) { CrossFallbackTeleport(); return false; }
     RouteToDoor();
     return true;
@@ -1111,7 +1849,7 @@ void BeginCross()
         (g_cross_door_pos.x - game::GetPlayerPosition().x) +
         (g_cross_door_pos.y - game::GetPlayerPosition().y) *
         (g_cross_door_pos.y - game::GetPlayerPosition().y));
-    tolk::Speak("Prowadzę do przejścia: " + g_cross_door_name,
+    tolk::Speak(strings::T("Prowadzę do przejścia: ", "Leading you to the door: ") + g_cross_door_name,
                 tolk::Priority::Background, false);
 }
 
@@ -1133,7 +1871,8 @@ void TickCross(float dt)
             g_cross_wait  -= dt;
             if (g_cross_wait <= 0.0f) {
                 if (g_cross_teleported) {
-                    StopWalking("Nie udało się dotrzeć do celu. Spróbuj ręcznie.");
+                    StopWalking(strings::T("Nie udało się dotrzeć do celu. Spróbuj ręcznie.",
+                                           "Couldn't reach the target. Try on your own."));
                     return;
                 }
                 CrossFallbackTeleport();
@@ -1150,7 +1889,7 @@ void TickCross(float dt)
         // reference) a successful navmesh path is the evidence that the target is
         // reachable from here.
         bool arrived_in_space = g_target_refr
-            ? game::TargetSharesPlayerSpace(g_target_refr)
+            ? TargetHere()
             : navmesh::BuildPath(game::GetPlayerPosition(), g_target_pos,
                                  g_waypoints) && !g_waypoints.empty();
         if (arrived_in_space) {
@@ -1158,22 +1897,26 @@ void TickCross(float dt)
             g_best_dist = 1e9f;
             g_noimprove = 0;
             g_waypoints.clear(); g_wp_index = 0;
-            g_have_path = navmesh::BuildPath(game::GetPlayerPosition(),
-                          g_target_pos, g_waypoints) && !g_waypoints.empty();
+            PlanLegs(g_target_pos);                  // a far target here: by road
+            g_engine_given_up = false;               // a new place: ask the engine again
+            g_route_legs = 1;
+            g_have_path = BuildOwnPath(LegGoal(), g_waypoints);
             g_route_engine  = false;
             g_route_partial = false;
             if (RequestEngineRoute()) g_engine_wait = kEngineWaitSecs;   // engine first
-            g_last_probe_dist = DistanceToTarget();
+            g_last_probe_dist = ProgressDistance();
             g_probe_timer = 0.0f;
             g_stuck_count = 0;
-            tolk::Speak("Jesteś w tej samej lokacji co cel. Idę dalej.",
+            tolk::Speak(strings::T("Jesteś w tej samej lokacji co cel. Idę dalej.",
+                                   "You're in the same location as the target. Walking on."),
                         tolk::Priority::Background, false);
             return;
         }
         // Still elsewhere. If the teleport fallback already ran and even that
         // didn't land us in the target's space, give up cleanly.
         if (g_cross_teleported) {
-            StopWalking("Nie udało się dotrzeć do celu. Spróbuj ręcznie.");
+            StopWalking(strings::T("Nie udało się dotrzeć do celu. Spróbuj ręcznie.",
+                                           "Couldn't reach the target. Try on your own."));
             return;
         }
         // Otherwise chain to the next door (bounded). Mark the cell we JUST left
@@ -1193,7 +1936,7 @@ void TickCross(float dt)
             (g_cross_door_pos.x - game::GetPlayerPosition().x) +
             (g_cross_door_pos.y - game::GetPlayerPosition().y) *
             (g_cross_door_pos.y - game::GetPlayerPosition().y));
-        tolk::Speak("Kolejne przejście: " + g_cross_door_name,
+        tolk::Speak(strings::T("Kolejne przejście: ", "Next door: ") + g_cross_door_name,
                     tolk::Priority::Background, false);
         return;
     }
@@ -1217,13 +1960,14 @@ void TickCross(float dt)
             auto pp0 = game::GetPlayerPosition();
             float ddx = g_cross_door_pos.x - pp0.x, ddy = g_cross_door_pos.y - pp0.y;
             g_last_probe_dist = std::sqrt(ddx * ddx + ddy * ddy);
-            tolk::Speak("Prowadzę do przejścia: " + g_cross_door_name,
+            tolk::Speak(strings::T("Prowadzę do przejścia: ", "Leading you to the door: ") + g_cross_door_name,
                         tolk::Priority::Background, false);
         } else {
             F3A_INFO("autowalk: no route of the game's through a door - choosing one ourselves");
             if (!CrossPickDoorOurselves()) return;
-            tolk::Speak("Prowadzę do przejścia: " + g_cross_door_name,
-                        tolk::Priority::Background, false);
+            if (g_cross && g_cross_door_refr)      // not a walk to a far door
+                tolk::Speak(strings::T("Prowadzę do przejścia: ", "Leading you to the door: ") + g_cross_door_name,
+                            tolk::Priority::Background, false);
             return;
         }
     }
@@ -1251,7 +1995,7 @@ void TickCross(float dt)
         g_cross_wait      = kCrossTimeout;    // wait for the cell to change
         g_cross_settle    = 0.0f;
         Move(false, false, false, false);
-        tolk::Speak("Przechodzę: " + g_cross_door_name,
+        tolk::Speak(strings::T("Przechodzę: ", "Going through: ") + g_cross_door_name,
                     tolk::Priority::Background, false);
         return;
     }
@@ -1304,7 +2048,7 @@ void TickCross(float dt)
         } else if (g_best_dist < kOrbitRadius) {
             if (++g_noimprove >= kOrbitProbes) {
                 char buf[192];
-                std::snprintf(buf, sizeof(buf), "Bliżej nie dojdę: %s.",
+                std::snprintf(buf, sizeof(buf), strings::T("Bliżej nie dojdę: %s.", "This is as close as I can get: %s."),
                               g_target_name.c_str());
                 StopWalking(buf);
                 return;
@@ -1339,9 +2083,30 @@ bool IsWalking() { return g_state != State::Idle; }
 // The current destination's ref/form/name — for Alt+Home to teleport to WHERE
 // YOU'RE WALKING (not the scanner selection, which drifts as DLC auto-tracks
 // other quests). Null/empty when idle.
-const void*        TargetRefr()   { return g_state != State::Idle ? g_target_refr : nullptr; }
-uint32_t           TargetFormId() { return g_state != State::Idle ? g_target_form : 0; }
+// On the way to a far door the real target waits in g_final_*, and a walk to
+// a photo spot has no reference of its own: the marked person stands for it.
+const void* TargetRefr()
+{
+    if (g_state == State::Idle) return nullptr;
+    if (g_far_door) return g_final_refr;
+    if (g_precise)  return g_marked_refr;
+    return g_target_refr;
+}
+uint32_t TargetFormId()
+{
+    if (g_state == State::Idle) return 0;
+    if (g_far_door) return g_final_form;
+    if (g_precise)  return g_marked_form;
+    return g_target_form;
+}
 const std::string& TargetName()   { return g_target_name; }
+game::Vec3 TargetPos()
+{
+    if (g_far_door) return g_final_pos;
+    if (g_precise)  return g_marked_pos;
+    return g_target_pos;
+}
+bool IsFollowingQuest() { return g_state != State::Idle && g_follow_quest; }
 
 std::string DiagString()
 {
@@ -1380,20 +2145,46 @@ std::string DiagString()
 
 namespace { bool TryTravelLeg(); }   // defined below, used by StartTo
 
-void StartTo(const game::Vec3& pos, const std::string& name,
-             const void* refr, uint32_t form_id)
+void StartTo(const game::Vec3& pos_in, const std::string& name,
+             const void* refr_in, uint32_t form_in)
 {
     // Native walking with no hook = nothing may drive the player. Refuse out
     // loud instead of falling back to held keys: that fallback is what produced
     // a walk which carried on after "Zatrzymano".
     if (config::Get().native_walk && !mover::Available()) { WarnNoMover(); return; }
     DropAimLock();
+    game::Vec3  pos     = pos_in;
+    const void* refr    = refr_in;
+    uint32_t    form_id = form_in;
+    g_marked_pos  = pos_in;
+    g_marked_refr = refr_in;
+    g_marked_form = form_in;
+    g_precise     = false;
+    g_face_form   = 0;
+    g_precise_say.clear();
+    {
+        // A trigger-box spot: walk to the spot itself — a place, not the
+        // person, so our own route (the game's routes need a reference).
+        game::Vec3 spot{};
+        if (const QuestSpot* q = SpotFor(form_in, pos_in, &spot)) {
+            F3A_INFO("autowalk: '%s' is a spot to stand on - (%.0f,%.0f,%.0f), "
+                     "facing %08X", name.c_str(), spot.x, spot.y, spot.z,
+                     (unsigned)q->face);
+            pos = spot;
+            refr = nullptr;
+            form_id = 0;
+            g_precise     = true;
+            g_face_form   = q->face;
+            g_precise_say = strings::T(q->say, q->say_en);
+        }
+    }
+    g_lockdoor_said.clear();
+    g_lockdoor_name.clear();
     g_target_pos  = pos;
     g_target_name = name;
     g_target_refr = refr;
     g_target_form = form_id;
 
-    g_last_probe_dist = DistanceToTarget();
     g_probe_timer    = 0.0f;
     g_recover_timer  = 0.0f;
     g_recover_tries  = 0;
@@ -1426,17 +2217,27 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     g_engine_said_none = false;
     g_cross_engine     = false;
     g_probe_pos        = game::GetPlayerPosition();
+    g_far_door         = false;
+    g_legs.clear();
+    g_leg              = 0;
+    g_legs_road        = false;
+    g_leg_skips        = 0;
+    g_walkgraph_tried  = false;
+    g_last_probe_dist  = ProgressDistance();   // after the legs are gone: to the target
 
     g_path_retry_timer = 0.0f;
     g_floor_warned     = false;
     g_follow_quest     = false;   // a plain target; StartToQuest re-sets this
     g_state            = State::Walking;
 
-    bool shares = game::TargetSharesPlayerSpace(refr);
-    F3A_INFO("autowalk StartTo '%s' refr=%p shares_space=%d cross=%d | player_at:%s | target_at:%s",
+    // Same place: the cells say so, or — for a target whose place is not
+    // loaded, so it has no cell — the world-door table does.
+    bool shares = refr ? TargetHere() : false;
+    F3A_INFO("autowalk StartTo '%s' refr=%p shares_space=%d cross=%d | player_at:%s (%08X) "
+             "| target_at:%s (%08X)",
              name.c_str(), refr, (int)shares, (int)(refr && !shares),
-             game::GetCurrentLocationName().c_str(),
-             game::GetRefSpaceLabel(refr).c_str());
+             game::GetCurrentLocationName().c_str(), (unsigned)game::PlayerSpaceId(),
+             game::GetRefSpaceLabel(refr).c_str(), (unsigned)TargetSpace());
     // Ask the engine, once per walk, whether it already has a path for us.
     mover::ProbePath();
 
@@ -1448,11 +2249,16 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     // Try a real path first: whether the target is even reachable on foot is the
     // evidence we need below when there's no reference to test the space with.
     g_avoid.clear();
+    g_avoid_space = game::PlayerSpaceId();
     g_rebuild_cooldown = 0.0f;
     g_waypoints.clear();
     g_wp_index  = 0;
-    g_have_path = navmesh::BuildPath(game::GetPlayerPosition(), pos,
-                                     g_waypoints) && !g_waypoints.empty();
+    // A plain path for the question "is it here at all?". Locked doors are
+    // looked for only once that is answered (below): a target in another
+    // place has coordinates that mean something else here, and checking a
+    // route to them announced doors that had nothing to do with the walk.
+    g_have_path = navmesh::BuildPath(game::GetPlayerPosition(), pos, g_waypoints) &&
+                  !g_waypoints.empty();
 
     // Target in ANOTHER coordinate frame (another cell/worldspace)? We can't walk
     // straight at its coordinates — route through the load doors that connect us.
@@ -1498,16 +2304,31 @@ void StartTo(const game::Vec3& pos, const std::string& name,
     }
 
     if (other_space) {
-        tolk::Speak("Cel w innej lokacji: " + name +
-                    ". Prowadzę przez przejścia.",
+        tolk::Speak(strings::T("Cel w innej lokacji: ", "Target in another location: ") + name +
+                    strings::T(". Prowadzę przez przejścia.", ". Leading you through the doors."),
                     tolk::Priority::System, true);
         BeginCross();
         return;
     }
 
+    // Here: our route, round any locked door on it.
+    if (g_have_path) {
+        g_waypoints.clear();
+        g_have_path = BuildOwnPath(pos, g_waypoints);
+    }
+
+    // A far target here is walked in legs, along the roads when that is
+    // worth it; the first leg's way is then what we and the engine work out.
+    PlanLegs(pos);
+    if (OnLegs()) {
+        g_waypoints.clear();
+        g_wp_index  = 0;
+        g_have_path = BuildOwnPath(LegGoal(), g_waypoints);
+        g_last_probe_dist = ProgressDistance();
+    }
+
     // The engine's route first: stand for a moment (Tick) while it answers,
-    // and walk ours only if it has none. Without a reference to route to, ours
-    // straight away.
+    // and walk ours only if it has none.
     if (RequestEngineRoute()) {
         g_engine_wait = kEngineWaitSecs;
         g_route_legs  = 1;
@@ -1515,7 +2336,9 @@ void StartTo(const game::Vec3& pos, const std::string& name,
         SteerRoute();
     }
 
-    tolk::Speak("Idę do: " + name, tolk::Priority::System, true);
+    tolk::Speak(strings::T("Idę do: ", "Walking to: ") + name +
+                (g_legs_road && OnLegs() ? strings::T(", drogami.", ", by road.") : ""),
+                tolk::Priority::System, true);
 }
 
 namespace {
@@ -1552,7 +2375,8 @@ bool TryTravelLeg()
 
     F3A_INFO("autowalk: travel leg to '%s' (%.0f from target, was %.0f)",
              best->name.c_str(), bestDist, playerToTarget);
-    tolk::Speak("Szybka podróż do: " + best->name + ", dalej pieszo.",
+    tolk::Speak(strings::T("Szybka podróż do: ", "Fast travel to: ") + best->name +
+                strings::T(", dalej pieszo.", ", then on foot."),
                 tolk::Priority::System, true);
 
     Move(false, false, false, false);
@@ -1596,7 +2420,7 @@ void Stop()
     // idle, so the engine-side stop goes first and unconditionally.
     mover::Clear();
     ReleaseKeysHard();
-    StopWalking("Zatrzymano.");
+    StopWalking(strings::T("Zatrzymano.", "Stopped."));
 }
 
 namespace {
@@ -1611,15 +2435,18 @@ bool FollowQuestRetarget()
     if (!qt.valid) return false;
     if (qt.position.x == 0.0f && qt.position.y == 0.0f && qt.position.z == 0.0f)
         return false;
-    float dx = qt.position.x - g_target_pos.x;
-    float dy = qt.position.y - g_target_pos.y;
-    float dz = qt.position.z - g_target_pos.z;
+    // Against where the MARKER was, not where we are walking: a walk to a
+    // spot near the marked person goes somewhere else on purpose.
+    float dx = qt.position.x - g_marked_pos.x;
+    float dy = qt.position.y - g_marked_pos.y;
+    float dz = qt.position.z - g_marked_pos.z;
     if (dx * dx + dy * dy + dz * dz <= 200.0f * 200.0f) return false;  // same marker
 
     std::string label = qt.name;
     std::string q = game::GetTrackedQuestName();
     if (!q.empty()) label = q + ": " + qt.name;
-    tolk::Speak("Cel zadania zmieniony.", tolk::Priority::System, true);
+    tolk::Speak(strings::T("Cel zadania zmieniony.", "Quest objective changed."),
+                tolk::Priority::System, true);
     StartTo(qt.position, label, qt.refr, qt.refid);
     g_follow_quest = true;
     return true;
@@ -1677,6 +2504,7 @@ void Tick(float dt)
     // and its answer is still adopted when it comes.
     if (g_engine_wait > 0.0f) {
         AdoptEngineRoute();                  // clears g_engine_wait on an answer
+        if (g_state == State::Idle) return;  // a locked door with no way round
         if (g_engine_wait > 0.0f) {
             g_engine_wait -= dt;
             g_probe_timer = 0.0f;            // standing on purpose is no stall
@@ -1684,6 +2512,20 @@ void Tick(float dt)
             if (g_engine_wait > 0.0f) return;
             F3A_INFO("autowalk: the engine has not answered yet - %s",
                      g_have_path ? "walking our own route meanwhile" : "no route yet");
+        }
+    }
+
+    // Locked doors to avoid are points in one place's coordinates: in the
+    // next place they would wall off whatever happens to lie there.
+    {
+        uint32_t sp = game::PlayerSpaceId();
+        if (sp != 0 && sp != g_avoid_space) {
+            if (!g_avoid.empty())
+                F3A_INFO("autowalk: a new place - forgetting %u avoided door(s)",
+                         (unsigned)g_avoid.size());
+            g_avoid.clear();
+            g_lockdoor_said.clear();
+            g_avoid_space = sp;
         }
     }
 
@@ -1695,12 +2537,23 @@ void Tick(float dt)
     float dz   = g_target_pos.z - game::GetPlayerPosition().z;
     bool  sameFloor = std::fabs(dz) <= kFloorDelta;
 
+    // A spot to stand on: only the spot counts — none of the arm's-length or
+    // "in the area" endings below, which are exactly what left the player
+    // beside Dad instead of in the photo box.
+    if (g_precise) {
+        if (dist <= kSpotArrive && sameFloor) {
+            ArriveOnSpot();
+            return;
+        }
+    }
+
     // Arrival requires being on the SAME floor too — DistanceToTarget is 2D, so
     // without this we'd falsely "arrive" while standing directly under/over a
     // target on another floor.
-    if (dist <= kArriveDist && sameFloor) {
+    if (!g_precise && dist <= kArriveDist && sameFloor) {
         char buf[192];
-        std::snprintf(buf, sizeof(buf), "Dotarłeś: %s", g_target_name.c_str());
+        std::snprintf(buf, sizeof(buf), strings::T("Dotarłeś: %s", "Arrived: %s"),
+                      g_target_name.c_str());
         Arrive(buf);
         return;
     }
@@ -1710,21 +2563,25 @@ void Tick(float dt)
     // rifle range you are meant to shoot from, and the walk kept shuffling
     // around it long after the player was standing exactly where the game
     // wanted them. Unconditional on purpose — no floor test, no path test.
-    if (g_follow_quest && config::Get().quest_arrive_dist > 0 &&
+    if (!g_precise && g_follow_quest && config::Get().quest_arrive_dist > 0 &&
         dist <= (float)config::Get().quest_arrive_dist) {
         char buf[192];
-        std::snprintf(buf, sizeof(buf), "Jesteś w rejonie celu: %s",
+        std::snprintf(buf, sizeof(buf), strings::T("Jesteś w rejonie celu: %s",
+                                                   "You're in the target area: %s"),
                       g_target_name.c_str());
         Arrive(buf);
         return;
     }
 
     // ...and the backstop, which does not care about the floor.
-    if (dist <= kNearArrive) {
+    if (!g_precise && dist <= kNearArrive) {
         g_close_timer += dt;
         if (g_close_timer >= kCloseArriveSecs) {
+            // Right under (or over) the target, a floor away: under Arefu's
+            // deck this is not arriving. The walk graph knows the way up.
+            if (!sameFloor && TryWalkGraph()) { g_close_timer = 0.0f; return; }
             char buf[192];
-            std::snprintf(buf, sizeof(buf), "Jesteś przy celu: %s",
+            std::snprintf(buf, sizeof(buf), strings::T("Jesteś przy celu: %s", "You're at the target: %s"),
                           g_target_name.c_str());
             Arrive(buf);
             return;
@@ -1743,27 +2600,42 @@ void Tick(float dt)
         if (g_path_retry_timer >= kPathRetryEvery) {
             g_path_retry_timer = 0.0f;
             g_waypoints.clear(); g_wp_index = 0;
-            if (navmesh::BuildPath(game::GetPlayerPosition(), g_target_pos,
-                                   g_waypoints, &g_avoid) && !g_waypoints.empty()) {
+            if (BuildOwnPath(LegGoal(), g_waypoints)) {
                 g_have_path = true;
                 g_route_engine  = false;
                 g_route_partial = false;
-                g_last_probe_dist = dist;   // fresh progress base for the new route
-                tolk::Speak("Trasa wyznaczona.", tolk::Priority::Background, false);
+                g_last_probe_dist = ProgressDistance();   // fresh base for the new route
+                tolk::Speak(strings::T("Trasa wyznaczona.", "Route found."),
+                        tolk::Priority::Background, false);
             }
             // And the engine again, unless it is already working on one.
             if (mover::EnginePathState() != 1) RequestEngineRoute();
         }
         if (!g_floor_warned && !sameFloor) {
             g_floor_warned = true;
-            tolk::Speak(dz > 0 ? "Cel wyżej — szukam drogi po schodach."
-                               : "Cel niżej — szukam drogi po schodach.",
+            tolk::Speak(dz > 0 ? strings::T("Cel wyżej — szukam drogi po schodach.",
+                                            "Target is above — looking for stairs.")
+                               : strings::T("Cel niżej — szukam drogi po schodach.",
+                                            "Target is below — looking for stairs."),
                         tolk::Priority::Background, false);
         }
     }
 
     AdoptEngineRoute();
+    if (g_state == State::Idle) return;     // it found a locked door it cannot pass
     AdvanceWaypoints();
+
+    // On a long walk: at a leg's point (or at the end of the route to it,
+    // near enough) — on to the next leg.
+    if (OnLegs()) {
+        bool routeDone = g_have_path && g_wp_index >= g_waypoints.size();
+        float ld = ProgressDistance();
+        if (ld <= kLegArrive || (routeDone && ld <= 3.0f * kLegArrive)) {
+            g_leg_skips = 0;
+            NextLeg();
+            return;
+        }
+    }
 
     // The engine's route ended short of the target — it routes only as far as
     // the navmesh it has loaded. Ask for the next leg from here, as the FNV mod
@@ -1772,6 +2644,18 @@ void Tick(float dt)
         g_wp_index >= g_waypoints.size()) {
         g_route_partial = false;
         float gain = g_leg_start_dist - DistanceToRouteGoal();
+        if (OnLegs() && gain <= kLegMinGain) {
+            // A road point the engine cannot quite reach (inside a ruin, on
+            // the far side of a fence): as the FNV mod does, skip it — a few
+            // in a row at most — rather than give up on the engine for the
+            // rest of a long walk.
+            if (++g_leg_skips <= 3) {
+                F3A_INFO("autowalk: leg %u gained only %.0f - skipping its point",
+                         (unsigned)g_leg, gain);
+                NextLeg();
+                return;
+            }
+        }
         if (gain > kLegMinGain && g_route_legs < kMaxRouteLegs && RequestEngineRoute()) {
             ++g_route_legs;
             F3A_INFO("autowalk: engine leg %d ended short (gained %.0f) - asking for the next",
@@ -1785,15 +2669,36 @@ void Tick(float dt)
         g_engine_given_up = true;
         g_route_engine    = false;
         if (!RebuildPath(nullptr)) {
+            if (TryWalkGraph()) return;
+            // On a long walk this is one leg's point, not the goal: skip it,
+            // a few in a row at most.
+            if (OnLegs() && g_leg_skips < 3) {
+                ++g_leg_skips;
+                F3A_INFO("autowalk: no way on to leg %u's point - skipping it", (unsigned)g_leg);
+                NextLeg();
+                return;
+            }
+            // Thousands of units out (a long walk, the way to a far door):
+            // "as close as walking gets" would be a lie — and on the way to a
+            // far door, "arriving" would go looking for the door right here.
+            if (OnLegs() || g_far_door) {
+                std::string say = strings::T("Nie mogę iść dalej w stronę: ",
+                                             "I can't go any further towards: ") +
+                                  g_target_name + ".";
+                StopWalking(say.c_str());
+                return;
+            }
             // Neither the engine nor our mesh goes any further: this is as
             // close as walking gets — a rifle-range target behind its
             // counter, a marker on a roof. Stop here and face it (the FNV
             // mod's "closest reachable point"), instead of pushing on into
-            // the counter.
-            char buf[192];
-            std::snprintf(buf, sizeof(buf), "Bliżej nie dojdę: %s.", g_target_name.c_str());
-            Arrive(buf);
-            return;
+            // the counter. Not beside a spot: that is steered onto below.
+            if (!g_precise) {
+                char buf[192];
+                std::snprintf(buf, sizeof(buf), strings::T("Bliżej nie dojdę: %s.", "This is as close as I can get: %s."), g_target_name.c_str());
+                Arrive(buf);
+                return;
+            }
         }
     }
 
@@ -1802,9 +2707,11 @@ void Tick(float dt)
     // a ledge). Stop and face it rather than walk at it in a straight line.
     if (g_engine_said_none) {
         g_engine_said_none = false;
-        if (!g_have_path && DistanceToTarget() <= 600.0f) {
+        if (!g_have_path && TryWalkGraph()) return;
+        if (!g_have_path && !OnLegs() && !g_far_door && !g_precise &&
+            DistanceToTarget() <= 600.0f) {
             char buf[192];
-            std::snprintf(buf, sizeof(buf), "Bliżej nie dojdę: %s.", g_target_name.c_str());
+            std::snprintf(buf, sizeof(buf), strings::T("Bliżej nie dojdę: %s.", "This is as close as I can get: %s."), g_target_name.c_str());
             Arrive(buf);
             return;
         }
@@ -1831,7 +2738,9 @@ void Tick(float dt)
         float dx = a.x + t * sx - pp.x, dy = a.y + t * sy - pp.y;
         if (std::sqrt(dx * dx + dy * dy) > kLostDist) {
             // Said once per episode; a second rebuild in a row is silent.
-            if (!RebuildPath(g_lost_said ? nullptr : "Zgubiłem trasę, przeliczam."))
+            if (!RebuildPath(g_lost_said ? nullptr
+                                         : strings::T("Zgubiłem trasę, przeliczam.",
+                                                      "Lost the route, recalculating.")))
                 g_rebuild_cooldown = kRebuildEvery;   // try again in a moment
             g_lost_said = true;
         } else {
@@ -1851,7 +2760,9 @@ void Tick(float dt)
             Move(!backOut, g_recover_dir < 0, backOut, g_recover_dir > 0);
         g_recover_timer -= dt;
         if (g_recover_timer <= 0.0f)
-            g_last_probe_dist = DistanceToTarget();   // fresh progress base
+            g_last_probe_dist = ProgressDistance();   // fresh progress base
+    } else if (g_precise && dist <= kSpotApproach) {
+        SteerOntoSpot();          // the last stretch, stopping ON the spot
     } else {
         SteerRoute();             // along the route, rounding its bends
     }
@@ -1860,7 +2771,7 @@ void Tick(float dt)
     // through. Reset the progress base when the grace ends.
     if (g_door_cooldown > 0.0f) {
         g_door_cooldown -= dt;
-        if (g_door_cooldown <= 0.0f) g_last_probe_dist = DistanceToTarget();
+        if (g_door_cooldown <= 0.0f) g_last_probe_dist = ProgressDistance();
     }
 
     // Stuck detection: measure PROGRESS TOWARD THE TARGET over the window. If we
@@ -1880,8 +2791,9 @@ void Tick(float dt)
         const bool onEngineRoute = g_route_engine && g_have_path &&
                                    g_wp_index < g_waypoints.size();
         if (g_recover_timer <= 0.0f && driving && g_door_cooldown <= 0.0f) {
-            float progress = g_last_probe_dist - dist;   // + = got closer
-            g_last_probe_dist = dist;
+            float pdist = ProgressDistance();            // the leg's point on a long walk
+            float progress = g_last_probe_dist - pdist;  // + = got closer
+            g_last_probe_dist = pdist;
             // The engine's route may lead away from the target first (round a
             // wall, down a corridor); there a stall means NOT MOVING, as in the
             // FNV mod — measured as distance covered, not distance gained.
@@ -1890,17 +2802,34 @@ void Tick(float dt)
                 // Stalled right next to the target → we've effectively arrived
                 // (the exact origin may be unreachable). Announce arrival, not
                 // an obstacle — fixes "doszedł, ale się nie zatrzymał".
-                if (dist <= kNearArrive && sameFloor) {
+                if (!g_precise && dist <= kNearArrive && sameFloor) {
                     char buf[192];
-                    std::snprintf(buf, sizeof(buf), "Jesteś przy celu: %s",
+                    std::snprintf(buf, sizeof(buf), strings::T("Jesteś przy celu: %s", "You're at the target: %s"),
                                   g_target_name.c_str());
                     Arrive(buf);
+                    return;
+                }
+                // Stalled right beside a spot (someone stands on its edge):
+                // that is as near as it gets, and sidestepping off it is worse.
+                if (g_precise && dist <= kSpotStall && sameFloor) {
+                    F3A_INFO("autowalk: stalled %.0f units from the spot - stopping there", dist);
+                    ArriveOnSpot();
                     return;
                 }
                 // Blocked further out — a closed door is the usual culprit. Open
                 // the nearest one and keep going before treating this as a real
                 // obstacle. (No-op if it's the same door we already opened.)
                 if (TryOpenBlockingDoor()) return;
+                // On a long walk, a leg's point that cannot be reached (in a
+                // rock, behind a fence) is skipped after the first try — a few
+                // in a row at most — instead of ending the whole trip.
+                if (OnLegs() && g_stuck_count >= 1 && g_leg_skips < 3) {
+                    ++g_leg_skips;
+                    F3A_INFO("autowalk: stuck on the way to leg %u's point - skipping it",
+                             (unsigned)g_leg);
+                    NextLeg();
+                    return;
+                }
                 // On a navmesh path but wedged at this waypoint (e.g. off-mesh on
                 // a rock, or an awkward corner) → SKIP to the next waypoint so one
                 // bad hop doesn't stall the whole route. Changing the heading
@@ -1914,11 +2843,12 @@ void Tick(float dt)
                     size_t skip = (size_t)(1 + (g_stuck_count > 3 ? 3 : g_stuck_count));
                     size_t ni = g_wp_index + skip;
                     g_wp_index = ni < g_waypoints.size() ? ni : g_waypoints.size() - 1;
-                    g_last_probe_dist = DistanceToTarget();
+                    g_last_probe_dist = ProgressDistance();
                 }
                 ++g_stuck_count;
                 if (g_stuck_count >= kMaxStuck) {
-                    StopWalking("Utknąłem. Spróbuj naprowadzania ręcznego.");
+                    StopWalking(strings::T("Utknąłem. Spróbuj naprowadzania ręcznego.",
+                                           "I'm stuck. Try walking with the guide beacon."));
                     return;
                 }
                 // Wedged twice in a row: the route itself may be the problem
@@ -1926,7 +2856,7 @@ void Tick(float dt)
                 // here before more sidestepping.
                 // On the engine's route at once (it repaths, as the FNV mod does).
                 if (g_stuck_count == (onEngineRoute ? 1 : 2) && g_rebuild_cooldown <= 0.0f)
-                    RebuildPath("Przeliczam trasę.");
+                    RebuildPath(strings::T("Przeliczam trasę.", "Recalculating the route."));
                 g_recover_dir   = -g_recover_dir;   // try the other side
                 g_recover_timer = kRecoverSecs;
                 TriggerJump();   // hop while strafing — frees ledges/lips/rubble
@@ -1935,12 +2865,20 @@ void Tick(float dt)
                 g_stuck_count = 0;                  // made progress — reset
             }
         }
-        if (!driving) g_last_probe_dist = DistanceToTarget();
+        if (!driving) g_last_probe_dist = ProgressDistance();
     }
 }
 
 void Init()
 {
+    // Long walks: the road graphs and the world's load doors, both worked out
+    // offline from the game's data (tools/generate_*). Without them walks still
+    // work, only not to places far off.
+    std::wstring dir = config::DataDir();
+    if (!dir.empty()) {
+        roadnet::LoadDir(dir);
+        worlddoors::Load(dir + L"\\doors.dat");
+    }
     F3A_INFO("AutoWalk module ready.");
 }
 

@@ -23,4 +23,10 @@ bool BuildPath(const game::Vec3& from, const game::Vec3& to,
                std::vector<game::Vec3>& out_waypoints,
                const std::vector<game::Vec3>* avoid = nullptr);
 
+// The height of the walkable ground at (x, y) in the loaded cells — the
+// navmesh triangle under that point whose height is nearest `nearZ`. For a
+// point picked on a straight line across the wasteland, whose own height is
+// only a guess: the engine's pathfinder needs a point on the ground.
+bool GroundZ(float x, float y, float nearZ, float* outZ);
+
 } // namespace f3a::navmesh

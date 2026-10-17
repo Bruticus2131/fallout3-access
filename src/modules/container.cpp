@@ -42,7 +42,8 @@ bool g_kUp = false, g_kDown = false;
 int  g_restore_wait = 0;      // ticks before another focus restore may be asked
 int  g_restore_tries = 0;     // restores asked since the focus was last seen right
 
-const char* SideName(const void* box);   // defined below
+int         SideOf(const void* box);     // defined below
+const char* SideLabel(bool container);   // defined below
 std::string CountSuffix(int rows);       // defined below
 void        PollFilterKeys();            // defined below
 void        AnnounceFilter();            // defined below
@@ -53,8 +54,7 @@ void OnTick(float)
     if (g_side_wait > 0 && --g_side_wait == 0 &&
         game::ContainerFocusSide() == (g_side_target ? 1 : 0)) {
         g_on_container = g_side_target;
-        tolk::Speak(g_side_target ? "Pojemnik" : "Twoje przedmioty",
-                    tolk::Priority::Ui, true);
+        tolk::Speak(SideLabel(g_side_target), tolk::Priority::Ui, true);
     }
     // A category switch is in flight.
     //
@@ -119,12 +119,12 @@ void OnTick(float)
         // is what identifies it, so log it here: once the names for this menu
         // are known, they become the spoken labels below.
         if (box_changed && sel->container) {
-            const char* side = SideName(sel->container);
-            if (!side && focusSide >= 0)
-                side = focusSide == 1 ? "Pojemnik" : "Twoje przedmioty";
-            if (side) {
-                text = std::string(side) + ": " + text;
-                g_on_container = (std::strcmp(side, "Pojemnik") == 0);
+            int side = SideOf(sel->container);
+            if (side < 0 && focusSide >= 0)
+                side = focusSide == 1 ? 1 : 0;
+            if (side >= 0) {
+                text = std::string(SideLabel(side == 1)) + ": " + text;
+                g_on_container = (side == 1);
             }
         }
 
@@ -148,16 +148,25 @@ void OnTick(float)
     tolk::Speak(*m, tolk::Priority::Ui, true);
 }
 
-// Which list holds the focus, by the list tile's own name.
-const char* SideName(const void* box)
+// Which list holds the focus, by the list tile's own name:
+// 1 = the container's list, 0 = yours, -1 = can't tell.
+int SideOf(const void* box)
 {
-    if (!box) return nullptr;
+    if (!box) return -1;
     const char* nm = fose_rt::TileName(
         reinterpret_cast<Tile*>(const_cast<void*>(box)));
-    if (!nm) return nullptr;
-    if (std::strstr(nm, "CM_Container_")) return "Pojemnik";
-    if (std::strstr(nm, "CM_Items_"))     return "Twoje przedmioty";
-    return nullptr;
+    if (!nm) return -1;
+    if (std::strstr(nm, "CM_Container_")) return 1;
+    if (std::strstr(nm, "CM_Items_"))     return 0;
+    return -1;
+}
+
+// The spoken name of a side. Only ever spoken, never compared: the logic
+// works on the side itself (SideOf / bool), not on this text.
+const char* SideLabel(bool container)
+{
+    return container ? strings::T("Pojemnik", "Container")
+                     : strings::T("Twoje przedmioty", "Your items");
 }
 
 // ", 4 przedmioty" / ", brak przedmiotów" — the tail that says how much is
@@ -169,7 +178,10 @@ const char* SideName(const void* box)
 // absent count has no gender.
 std::string CountSuffix(int rows)
 {
-    if (rows <= 0) return ", brak przedmiotów";
+    if (rows <= 0) return strings::T(", brak przedmiotów", ", no items");
+    if (!strings::Polish())
+        return rows == 1 ? std::string(", 1 item")
+                         : ", " + std::to_string(rows) + " items";
     // Polish counts: 1 przedmiot, 2-4 przedmioty, 5+ przedmiotow.
     int n10 = rows % 10, n100 = rows % 100;
     const char* word = (rows == 1) ? "przedmiot"
@@ -264,8 +276,7 @@ void AnnounceFilter()
     if (!game::GetContainerSides(&mine, &theirs)) return;
     const game::ContainerSide& s = g_on_container ? theirs : mine;
     std::string say = s.title.empty()
-                    ? std::string(g_on_container ? "Pojemnik"
-                                                 : "Twoje przedmioty")
+                    ? std::string(SideLabel(g_on_container))
                     : s.title;
     say += CountSuffix(s.rows);
     F3A_INFO("Container filter: %s side now '%s' rows=%d | other '%s' rows=%d",
@@ -287,7 +298,7 @@ void AnnounceContents()
 {
     game::ContainerSide mine{}, theirs{};
     if (!game::GetContainerSides(&mine, &theirs)) return;
-    std::string say = theirs.title.empty() ? "Pojemnik" : theirs.title;
+    std::string say = theirs.title.empty() ? std::string(SideLabel(true)) : theirs.title;
     say += CountSuffix(theirs.rows);
     F3A_INFO("Container: '%s' rows=%d | yours '%s' rows=%d",
              theirs.title.c_str(), theirs.rows, mine.title.c_str(), mine.rows);

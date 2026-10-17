@@ -26,6 +26,9 @@ void Speak(std::string_view text, Priority prio, bool interrupt = false);
 
 // Cancel anything currently being spoken.
 void Silence();
+// Is the screen reader (probably) still saying something we sent? Asked of
+// Tolk when the reader can tell, else estimated from the length of the text.
+bool IsSpeaking();
 
 // Repeat the most recent utterance (bound to the RepeatLast hotkey). Speaks
 // nothing if we haven't said anything yet.
