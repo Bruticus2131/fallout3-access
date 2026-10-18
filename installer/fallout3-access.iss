@@ -34,13 +34,18 @@ OutputBaseFilename=fallout3-access-setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; English is the language preselected in the language dialog, whatever the
+; Windows display language; Polish is one pick away. (Inno Setup takes the
+; first [Languages] entry when detection is off.)
+LanguageDetectionMethod=none
+ShowLanguageDialog=yes
 PrivilegesRequired=admin
 ; The game folder is usually under Program Files, and the patcher rewrites
 ; Fallout3.exe in place, so admin rights are needed for a normal Steam install.
 
 [Languages]
-Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
+Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"
 
 ; Every text of our own pages, in both languages. Code reads them through
 ; CustomMessage('...') and the sections through {cm:...}; a text typed straight

@@ -44,7 +44,7 @@ param(
     [switch] $SkipFose,
     [string] $LogPath = "",
     # "pl" or "en": the language the user picked in the wizard. Run on its own,
-    # the script follows the Windows display language.
+    # the script speaks English, as the wizard does by default.
     [string] $Language = ""
 )
 
@@ -73,9 +73,7 @@ function Get-NexusHeaders {
     return $h
 }
 
-if (-not $Language) {
-    $Language = if ((Get-UICulture).TwoLetterISOLanguageName -eq "pl") { "pl" } else { "en" }
-}
+if (-not $Language) { $Language = "en" }
 $script:Pl = ($Language -eq "pl")
 
 # Every message is written in both languages at the place it is used; this
