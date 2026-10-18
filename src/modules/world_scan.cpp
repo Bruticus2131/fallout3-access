@@ -861,7 +861,10 @@ void ItemInfo()
             if (!t.empty()) { tolk::Speak(t, tolk::Priority::Ui, true); return; }
         }
     }
-    auto sel = game::GetKeyboardSelectionText();
+    // In a conversation or a message box, with the row's place in the list,
+    // as moving onto it says.
+    const auto am = menu::ActiveMenu();
+    auto sel = game::GetKeyboardSelectionText(am == menu::Id::Dialog || am == menu::Id::Message);
     if (sel && !sel->empty()) tolk::Speak(*sel, tolk::Priority::Ui, true);
     else tolk::Speak(strings::T("Brak opisu.", "No description."), tolk::Priority::System, true);
 }

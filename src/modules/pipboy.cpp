@@ -6,6 +6,7 @@
 #include "f3a/config.h"
 #include "f3a/logger.h"
 
+#include <windows.h>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -18,6 +19,27 @@ std::string g_last_tab;
 std::string g_last_subtab;
 std::string g_last_kbd;      // the keyboard highlight's row, as last seen
 std::string g_last_act;      // the mouse's (activeTile) row, as last seen
+
+// The item card (damage, weight, value, condition, ammo, effects) is what a
+// sighted player reads off the Items page together with the name, so it is
+// said after the name. The game fills it in as the highlight lands, so it is
+// read a moment later - and only if the highlight is still on that row.
+std::string g_card_row;      // the row the card is due for
+DWORD       g_card_due = 0;
+constexpr DWORD kCardDelayMs = 150;
+
+bool ItemsPage()
+{
+    return menu::IsOpen(menu::Id::Inventory) && !menu::IsOpen(menu::Id::Stats) &&
+           !menu::IsOpen(menu::Id::Map);
+}
+
+void ScheduleCard(const std::string& row)
+{
+    if (!ItemsPage()) { g_card_due = 0; return; }
+    g_card_row = row;
+    g_card_due = GetTickCount() + kCardDelayMs;
+}
 
 // The row the player is on. The arrows move the list's highlight box, and in
 // the Pip-Boy they often leave activeTile empty - or on the row the hidden
@@ -68,7 +90,10 @@ void AnnounceSelection(bool force, bool mute = false, bool interrupt = true)
         if (!text || text->empty()) return;
         if (!force && *text == g_last_selection) return;
         g_last_selection = *text;
-        if (!mute) tolk::Speak(*text + QuestState(*text), tolk::Priority::Ui, interrupt);
+        if (!mute) {
+            tolk::Speak(*text + QuestState(*text), tolk::Priority::Ui, interrupt);
+            ScheduleCard(*text);
+        }
         return;
     }
 
@@ -179,6 +204,7 @@ void OnOpen()
     g_last_subtab.clear();
     g_last_kbd.clear();
     g_last_act.clear();
+    g_card_due = 0;
     AnnounceTabIfChanged();
     AnnounceSubTabIfChanged(/*queue_after_tab=*/true);
     // On the Stats page read the vitals once: level, HP, AP, XP.
@@ -197,8 +223,19 @@ void OnClose()
     g_last_subtab.clear();
 }
 
+// The card for the row the name was just said for.
+void CardTick()
+{
+    if (!g_card_due || GetTickCount() < g_card_due) return;
+    g_card_due = 0;
+    if (g_card_row != g_last_selection || !ItemsPage()) return;   // moved on
+    std::string card = game::GetItemCard();
+    if (!card.empty()) tolk::Speak(card, tolk::Priority::Ui, false);   // after the name
+}
+
 void OnTick(float)
 {
+    CardTick();
     // Switching page with F1/F2/F3 says the PAGE, full stop.
     //
     // It used to say three things at once: the page, then the sub-tab strip it

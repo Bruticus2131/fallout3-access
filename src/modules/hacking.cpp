@@ -1,5 +1,6 @@
 #include "f3a/modules.h"
 #include "f3a/game_access.h"
+#include "f3a/polling_loop.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/logger.h"
 #include "f3a/strings.h"
@@ -14,14 +15,18 @@
 namespace f3a::modules::hacking {
 namespace {
 
-// Accessible terminal hacking. The minigame is MOUSE-ONLY (hover a word, click),
-// so a blind player can't select. So we:
+// Accessible terminal hacking. With keyboard and mouse the minigame is mouse
+// only (hover a word, click), so a blind player can't select. So we:
 //   * read the candidate words; UP/DOWN browse them (+ spelled),
-//   * ENTER guesses the chosen word — we MOVE the game cursor onto it (mouse
-//     injection) and left-click, exactly like a sighted click. The click only
-//     fires once the ENGINE confirms the cursor is on that word (the grid tile's
-//     user trait, game::GetHackingHighlightedWord) — geometry alone can land a
-//     character off and waste an attempt on the wrong word.
+//   * ENTER guesses the chosen word: the GAME's cursor is put on the word's
+//     middle letter, and once the game's own highlight holds that word - the
+//     text a click enters - the click is made through the menu itself
+//     (game::ClickHackingSelection). Geometry alone can land a letter off and
+//     waste an attempt on the wrong word, so nothing is entered before the
+//     game confirms it; off by a letter, the cursor steps sideways.
+//     (It used to shove the real mouse and send the button down and up in one
+//     batch - the game never saw that click - steering by the blinking text
+//     cursor, which does not follow the mouse at all.)
 //   * LEFT/RIGHT browse every readable line of the screen (header + attempt log),
 //   * read the attempt log live (the response after a guess), entry by entry.
 std::vector<std::string> g_words;
@@ -41,21 +46,18 @@ std::vector<std::string> g_spoken_log;
 int  g_log_count   = 0;
 int  g_log_pending = 0;        // non-zero = settle in progress
 
-// Mouse-driven guess state.
+// Guess state.
 bool  g_guessing = false;
 int   g_gindex   = -1;         // word being guessed
-float g_gtx = 0, g_gty = 0;
-int   g_gbudget  = 0;
-int   g_scan     = 0;          // sideways search step (0 = not searching)
-int   g_scan_off = 0;          // current sideways offset, px
+float g_gtx = 0, g_gty = 0;    // its middle letter, UI units
+float g_gcw = 0;               // one letter's width there
+int   g_gstep    = 0;          // cursor placings so far: the middle letter, then ±1, ±2...
+int   g_gwait    = 0;          // ticks for the game to move its cursor before checking
 
-// Does this build actually fill the highlighted-word trait? Latched on the first
-// non-empty read; until then the guess falls back to pure geometry.
-bool        g_verify_ok = false;
 std::string g_hl;              // last announced highlighted word
 
-constexpr int kScanSteps = 20;   // ±60 px sideways search for the word
-constexpr int kScanPx    = 6;
+constexpr float kHackCharWidth = 17.0f;   // the grid's letter width (0x0063FF10 divides by 17)
+constexpr int   kSettleTicks   = 3;
 
 bool g_up = false, g_down = false, g_left = false, g_right = false, g_enter = false;
 
@@ -86,28 +88,16 @@ std::string Join(const std::vector<std::string>& v)
     for (auto& e : v) { if (!s.empty()) s += " "; s += e; }
     return s;
 }
-// Polish plural: 1 proba / 2-4 proby / 5+ prob. English: 1 attempt / N attempts.
+// Polish plural: 1 próba / 2-4 próby / 5+ prób. English: 1 attempt / N attempts.
 std::string Attempts(int n)
 {
     if (!strings::Polish())
         return n == 1 ? std::string("1 attempt") : std::to_string(n) + " attempts";
-    if (n == 1)             return "1 proba";
-    if (n >= 2 && n <= 4)   return std::to_string(n) + " proby";
-    return std::to_string(n) + " prob";
+    if (n == 1)             return "1 próba";
+    if (n >= 2 && n <= 4)   return std::to_string(n) + " próby";
+    return std::to_string(n) + " prób";
 }
-void MouseMoveRel(long dx, long dy)
-{
-    INPUT in{}; in.type = INPUT_MOUSE; in.mi.dx = dx; in.mi.dy = dy;
-    in.mi.dwFlags = MOUSEEVENTF_MOVE; SendInput(1, &in, sizeof(in));
-}
-void MouseClick()
-{
-    INPUT in[2] = {};
-    in[0].type = INPUT_MOUSE; in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    in[1].type = INPUT_MOUSE; in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    SendInput(2, in, sizeof(INPUT));
-}
-void EndGuess() { g_guessing = false; g_gindex = -1; g_scan = 0; g_scan_off = 0; }
+void EndGuess() { g_guessing = false; g_gindex = -1; g_gstep = 0; g_gwait = 0; }
 
 void Reset()
 {
@@ -152,55 +142,39 @@ void PollLog()
     }
 }
 
-// Drive the game cursor onto the word being guessed and click it. Returns when
-// the guess is resolved (clicked or given up).
+// Put the game's cursor on the word being guessed and enter it once the game
+// highlights it. One step per call; done when entered or given up.
 void TickGuess()
 {
-    if (--g_gbudget <= 0) {
-        EndGuess();
-        tolk::Speak(strings::T("Nie moge trafic w slowo.", "Can't reach the word."),
-                    tolk::Priority::System, true);
-        return;
-    }
     const std::string want = (g_gindex >= 0 && g_gindex < static_cast<int>(g_words.size()))
                              ? g_words[g_gindex] : std::string();
     if (want.empty()) { EndGuess(); return; }
+    if (g_gwait > 0) { --g_gwait; return; }
 
-    std::string hl = game::GetHackingHighlightedWord();
-    if (!hl.empty()) g_verify_ok = true;
-
-    // The engine says the cursor is on our word — click it.
-    if (g_verify_ok && hl == want) { MouseClick(); EndGuess(); return; }
-
-    float cx, cy;
-    if (!game::GetHackingCursor(&cx, &cy)) { EndGuess(); return; }
-    float dx = g_gtx - cx, dy = g_gty - cy;
-
-    if (std::fabs(dx) < 18.0f && std::fabs(dy) < 14.0f) {
-        // On the computed spot. Without engine verification this is as good as
-        // it gets — click (the old behaviour). With it, the cursor is on the row
-        // but on a neighbouring character, so sweep sideways until the engine
-        // reports our word.
-        if (!g_verify_ok) { MouseClick(); EndGuess(); return; }
-        if (g_scan > kScanSteps) {
+    if (g_gstep > 0) {               // the last placing has had time to land
+        const std::string sel = game::GetHackingSelection();
+        const std::string hl  = game::GetHackingHighlightedWord();
+        F3A_INFO("Hacking guess: want %s, try %d, selection '%s', highlight '%s'",
+                 want.c_str(), g_gstep, sel.c_str(), hl.c_str());
+        if (sel == want || hl == want) {
+            poll::RequestHackGuess();
+            g_hl = want;             // on it already; not read out again
             EndGuess();
-            tolk::Speak(strings::T("Nie moge trafic w slowo.", "Can't reach the word."),
-                        tolk::Priority::System, true);
             return;
         }
-        if (g_scan == 0) g_scan = 1;
-        int desired = ((g_scan + 1) / 2) * kScanPx * ((g_scan % 2) ? 1 : -1);
-        MouseMoveRel(desired - g_scan_off, 0);
-        g_scan_off = desired;
-        ++g_scan;
+    }
+    // The middle letter, then a letter to the right, to the left, two right...
+    if (g_gstep > static_cast<int>(want.size()) + 1) {
+        EndGuess();
+        tolk::Speak(strings::T("Nie mogę trafić w słowo.", "Can't reach the word."),
+                    tolk::Priority::System, true);
         return;
     }
-
-    long mx = static_cast<long>(dx); if (mx > 110) mx = 110; if (mx < -110) mx = -110;
-    long my = static_cast<long>(dy); if (my > 110) my = 110; if (my < -110) my = -110;
-    if (mx > -2 && mx < 2) mx = (dx > 0 ? 2 : -2);
-    if (my > -2 && my < 2) my = (dy > 0 ? 2 : -2);
-    MouseMoveRel(mx, my);
+    int k = (g_gstep + 1) / 2;
+    if (g_gstep % 2 == 0) k = -k;
+    poll::RequestHackCursorTo(g_gtx + k * g_gcw, g_gty);
+    ++g_gstep;
+    g_gwait = kSettleTicks;
 }
 
 } // namespace
@@ -236,10 +210,10 @@ void Tick(float)
         g_key = key; g_words = h.words; g_index = -1;
         g_attempts = h.attempts;
         int L = g_words.empty() ? 0 : static_cast<int>(g_words.front().size());
-        char buf[224];
+        char buf[256];
         std::snprintf(buf, sizeof(buf), strings::T(
-            "Hakowanie. %s. %d slow po %d liter. "
-            "Gora dol wybiera slowo, Enter zgaduje, lewo prawo czyta ekran.",
+            "Hakowanie. %s. %d słów po %d liter. "
+            "Góra, dół wybiera słowo, Enter zgaduje, lewo, prawo czyta ekran.",
             "Hacking. %s. %d words, %d letters each. "
             "Up and down choose a word, Enter guesses, left and right read the screen."),
             Attempts(h.attempts).c_str(), static_cast<int>(g_words.size()), L);
@@ -262,14 +236,13 @@ void Tick(float)
     // Attempts spent — short announce (the log carries the reason).
     if (h.attempts != g_attempts) {
         g_attempts = h.attempts;
-        tolk::Speak(Attempts(h.attempts) + strings::T(" pozostalo", " left"),
+        tolk::Speak(Attempts(h.attempts) + strings::T(" zostało", " left"),
                     tolk::Priority::Ui, false);
     }
 
     // The engine tells us which word the cursor is on, so the player can also
     // sweep the grid with their own mouse and hear what they're pointing at.
     if (!h.highlighted.empty()) {
-        g_verify_ok = true;
         if (h.highlighted != g_hl) {
             g_hl = h.highlighted;
             tolk::Speak(g_hl + ", " + Spell(g_hl), tolk::Priority::Ui, true);
@@ -304,14 +277,19 @@ void Tick(float)
         }
     }
     if (enter && g_index >= 0 && g_index < static_cast<int>(g_words.size())) {
-        float tx, ty;
-        if (game::GetHackWordTarget(g_index, &tx, &ty)) {
-            g_gtx = tx; g_gty = ty; g_gbudget = 150;
+        float tx, ty, cw = 0.0f;
+        if (game::GetHackWordTarget(g_index, &tx, &ty, &cw)) {
+            g_gtx = tx; g_gty = ty;
+            g_gcw = cw > 1.0f ? cw : kHackCharWidth;
             g_gindex = g_index; g_guessing = true;
-            g_scan = 0; g_scan_off = 0;
-            tolk::Speak(strings::T("Zgaduje: ", "Guessing: ") + g_words[g_index],
+            g_gstep = 0; g_gwait = 0;
+            tolk::Speak(strings::T("Zgaduję: ", "Guessing: ") + g_words[g_index],
                         tolk::Priority::Ui, true);
         }
+    } else if (enter) {
+        tolk::Speak(strings::T("Najpierw wybierz słowo strzałkami góra, dół.",
+                               "First choose a word with up and down."),
+                    tolk::Priority::Ui, true);
     }
 }
 

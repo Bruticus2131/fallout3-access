@@ -131,17 +131,18 @@ std::string GetCurrentLocationName()
 
 // ---- Quest target ---------------------------------------------------------
 
+UInt8* TrackedObjective();   // below, after the quest helpers
+
 QuestTarget GetCurrentQuestTarget()
 {
     QuestTarget t{};
-    auto* p = rt::Player();
-    if (!p || !p->questObjective) return t;
-    // BGSQuestObjective.displayText (String @0x08) is the current objective
-    // line, e.g. "Find the Galaxy News Radio building". The target MARKER
-    // position lives in a targets array we haven't decoded yet, so for now
-    // we report the text only (no bearing). position stays {0,0,0}.
-    const char* raw = p->questObjective->displayText.m_data;
-    if (!raw || !*raw) return t;
+    // The tracked quest's objective (see TrackedObjective). BGSQuestObjective
+    // .displayText (String @0x08) is the objective line, e.g. "Find the Galaxy
+    // News Radio building".
+    UInt8* obj = TrackedObjective();
+    if (!obj) return t;
+    const char* raw = *reinterpret_cast<const char* const*>(obj + 0x08);
+    if (!raw || IsBadReadPtr(raw, 1) || !*raw) return t;
     t.name     = GameStrToUtf8(raw);
     t.position = { 0.0f, 0.0f, 0.0f };
     t.valid    = true;
@@ -150,7 +151,6 @@ QuestTarget GetCurrentQuestTarget()
     // Target + 0x0C -> TESObjectREFR* -> world position at posX/Y/Z (0x2C).
     // The compass arrow points to this reference. Guarded; if anything looks
     // off we leave position {0,0,0} and the caller reads text only.
-    auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
     if (IsBadReadPtr(obj + 0x14, 4)) return t;
     UInt8* target = *reinterpret_cast<UInt8**>(obj + 0x14);
     if (IsBadReadPtr(target, 0x10)) return t;
@@ -193,7 +193,14 @@ bool ObjectiveMarkerPos(UInt8* obj, Vec3& out,
 const void* GetTrackedQuestPtr()
 {
     auto* p = rt::Player();
-    if (!p || !p->questObjective) return nullptr;
+    if (!p) return nullptr;
+    // PlayerCharacter::quest (+0x614) is the quest the player tracks; the
+    // Pip-Boy's quest list sets it at once (0x00770580). The objective (+0x618)
+    // follows only later, so going by the objective's quest named the OLD quest
+    // right after a new one was picked: "nieśledzone" after Enter.
+    if (auto* tq = reinterpret_cast<UInt8*>(p->quest))
+        if (!IsBadReadPtr(tq, 0x38)) return tq;
+    if (!p->questObjective) return nullptr;
     auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
     if (IsBadReadPtr(obj, 0x14)) return nullptr;
     // BGSQuestObjective+0x10 = TESQuest* (after displayText String @0x08, before
@@ -201,6 +208,49 @@ const void* GetTrackedQuestPtr()
     UInt8* q = *reinterpret_cast<UInt8**>(obj + 0x10);
     if (IsBadReadPtr(q, 0x38)) return nullptr;
     return q;
+}
+
+namespace {
+bool ObjectiveLive(const UInt8* o)
+{
+    if (!o || IsBadReadPtr(o, 0x24)) return false;
+    UInt32 f = *reinterpret_cast<const UInt32*>(o + 0x20);
+    return (f & 1) && !(f & 2);                        // displayed, not done
+}
+} // namespace
+
+// The objective the mod follows: the player's own (+0x618) when it belongs
+// to the tracked quest (+0x614) and is still live; else the tracked quest's
+// live objective (displayed, not done), one with a map marker first, the
+// newest of them. +0x618 lags the Pip-Boy and can even be another quest's
+// ("Pomóż Moirze..." while the main quest was tracked), so trusting it alone
+// left the scanner without a quest and could aim the marker at the wrong one.
+UInt8* TrackedObjective()
+{
+    auto* q = reinterpret_cast<UInt8*>(const_cast<void*>(GetTrackedQuestPtr()));
+    if (!q || IsBadReadPtr(q, 0x54)) return nullptr;
+    auto* p = rt::Player();
+    if (p && p->questObjective) {
+        auto* o = reinterpret_cast<UInt8*>(p->questObjective);
+        if (!IsBadReadPtr(o, 0x24) && *reinterpret_cast<UInt8**>(o + 0x10) == q &&
+            ObjectiveLive(o))
+            return o;
+    }
+    struct Node { UInt8* item; Node* next; };
+    Node* on = reinterpret_cast<Node*>(q + 0x4C);
+    UInt8* best = nullptr;
+    bool bestMarked = false;
+    for (int s = 0; on && s < 64; ++s) {
+        if (IsBadReadPtr(on, 8)) break;
+        UInt8* obj = on->item;
+        on = on->next;
+        if (!ObjectiveLive(obj)) continue;
+        Vec3 where{};
+        bool marked = ObjectiveMarkerPos(obj, where);
+        if (marked) { best = obj; bestMarked = true; }
+        else if (!bestMarked) best = obj;
+    }
+    return best;
 }
 
 bool AdvanceTrackedQuestStage()
@@ -315,10 +365,10 @@ std::vector<WorldEntity> GetActiveQuests(bool trackedOnly)
     UInt8* dh = *gp;
     if (IsBadReadPtr(dh, 0xD8)) return out;
 
-    // The tracked objective (PlayerCharacter+0x618) — so we can float the
-    // currently-tracked quest to the front of the list.
-    auto* p = rt::Player();
-    void* trackedObj = (p && p->questObjective) ? (void*)p->questObjective : nullptr;
+    // The tracked quest (PlayerCharacter+0x614) and the objective followed in
+    // it - the tracked quest goes first, or alone with trackedOnly.
+    const void* trackedQuest = GetTrackedQuestPtr();
+    UInt8* trackedObj = TrackedObjective();
 
     struct Node { UInt8* item; Node* next; };
     Node* node = reinterpret_cast<Node*>(dh + 0xD4);
@@ -333,22 +383,21 @@ std::vector<WorldEntity> GetActiveQuests(bool trackedOnly)
 
         // Find a live objective (displayed & not completed). Prefer the tracked
         // one if this is the tracked quest; else the last live objective.
-        Node* on = reinterpret_cast<Node*>(q + 0x4C);             // objectives @ +0x4C
+        const bool isTracked = q == trackedQuest;
+        if (trackedOnly && !isTracked) continue;
         UInt8* live = nullptr;
-        bool isTracked = false;
-        for (int s2 = 0; on && s2 < 64; ++s2) {
-            if (IsBadReadPtr(on, 8)) break;
-            UInt8* obj = on->item;
-            on = on->next;
-            if (!obj || IsBadReadPtr(obj, 0x24)) continue;
-            UInt32 flags = *reinterpret_cast<UInt32*>(obj + 0x20);
-            if ((flags & 1) && !(flags & 2)) {                    // displayed, not done
-                live = obj;
-                if (obj == trackedObj) isTracked = true;
+        if (isTracked) {
+            live = trackedObj;
+        } else {
+            Node* on = reinterpret_cast<Node*>(q + 0x4C);         // objectives @ +0x4C
+            for (int s2 = 0; on && s2 < 64; ++s2) {
+                if (IsBadReadPtr(on, 8)) break;
+                UInt8* obj = on->item;
+                on = on->next;
+                if (ObjectiveLive(obj)) live = obj;               // the last live one
             }
         }
         if (!live) continue;   // running but nothing live in the journal → skip
-        if (trackedOnly && !isTracked) continue;
 
         WorldEntity e;
         e.kind = WorldEntity::Kind::Quest;
@@ -1458,8 +1507,8 @@ std::vector<WorldEntity> GetShootingTargets(int radius)
     // cycle them. Empty if there's no marked target with a live ref.
     std::vector<WorldEntity> out;
     auto* p = rt::Player();
-    if (!p || !p->questObjective || !p->parentCell) return out;
-    auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
+    UInt8* obj = TrackedObjective();
+    if (!p || !obj || !p->parentCell) return out;
     if (IsBadReadPtr(obj + 0x14, 4)) return out;
     UInt8* target = *reinterpret_cast<UInt8**>(obj + 0x14);
     if (IsBadReadPtr(target, 0x10)) return out;
@@ -1511,11 +1560,11 @@ std::vector<std::string> DebugNearbyRefs(int radius)
     // scanner find nothing. Sorted nearest-first.
     std::vector<std::string> lines;
     auto* p = rt::Player();
-    if (!p || !p->parentCell) { lines.push_back("brak komorki"); return lines; }
+    if (!p || !p->parentCell) { lines.push_back("no cell"); return lines; }
     Vec3 pp = GetPlayerPosition();
     const float r2 = (float)radius * (float)radius;
     TESObjectCELL* cell = p->parentCell;
-    if (!Readable(cell, 0xB4)) { lines.push_back("komorka nieczytelna"); return lines; }
+    if (!Readable(cell, 0xB4)) { lines.push_back("cell unreadable"); return lines; }
 
     struct Row { float dist; std::string text; };
     std::vector<Row> rows;
@@ -1552,7 +1601,7 @@ std::vector<std::string> DebugNearbyRefs(int radius)
     std::sort(rows.begin(), rows.end(),
               [](const Row& a, const Row& b){ return a.dist < b.dist; });
     char hdr[96];
-    std::snprintf(hdr, sizeof(hdr), "%d refs w komorce, %d w promieniu %d",
+    std::snprintf(hdr, sizeof(hdr), "%d refs in the cell, %d within %d",
                   total, (int)rows.size(), radius);
     lines.push_back(hdr);
     for (size_t i = 0; i < rows.size() && i < 150; ++i)
@@ -4222,19 +4271,19 @@ bool TargetSharesPlayerSpace(const void* targetRefr)
 // the player). "(...)" placeholders on any bad read.
 std::string GetRefSpaceLabel(const void* refr)
 {
-    if (!refr || IsBadReadPtr((void*)refr, 0x40)) return "(zly ref)";
+    if (!refr || IsBadReadPtr((void*)refr, 0x40)) return "(bad ref)";
     auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
     TESObjectCELL* c = r->parentCell;
-    if (!c || IsBadReadPtr(c, 0xC4)) return "(brak komorki)";
+    if (!c || IsBadReadPtr(c, 0xC4)) return "(no cell)";
     const char* cn = c->fullName.name.m_data;
     std::string out = (cn && !IsBadReadPtr((void*)cn, 1) && *cn)
-                          ? GameStrToUtf8(cn) : "(bez nazwy)";
+                          ? GameStrToUtf8(cn) : "(unnamed)";
     TESWorldSpace* ws = c->worldSpace;
     char tail[64];
     if (ws && !IsBadReadPtr(ws, 0x24)) {
         const char* wn = ws->fullName.name.m_data;
         std::string wsn = (wn && !IsBadReadPtr((void*)wn, 1) && *wn)
-                              ? GameStrToUtf8(wn) : "(ws bez nazwy)";
+                              ? GameStrToUtf8(wn) : "(unnamed worldspace)";
         std::snprintf(tail, sizeof(tail), " ws=%p", (void*)ws);
         out += " / " + wsn + tail;
     } else {
@@ -4940,6 +4989,33 @@ std::optional<MenuSelection> GetKeyboardSelection()
     sel.container = listbox;
     sel.context   = CollectPanelStaticText(listbox);
 
+    // Its place among the rows of the same kind (same tile name) beside it;
+    // the highlight box and the scrollbar share the parent and are skipped.
+    // Only from a listindex the row really has and no other row shares - a
+    // list without one would read "1 of 5" on every row.
+    bool hasIndex = false;
+    for (UInt32 i = 0; i < best->values.size; ++i) {
+        Tile::Value* v = best->values.data[i];
+        if (v && v->id == kTileValue_listindex) { hasIndex = true; break; }
+    }
+    const float li = TileNum(best, kTileValue_listindex);
+    if (hasIndex && li >= 0.0f && best->parent && best->name.m_data) {
+        int sameIndex = 0;
+        struct Node { Tile::ChildNode* item; Node* next; };
+        auto* node = reinterpret_cast<Node*>(&best->parent->childList);
+        for (int i = 0; node && i < 512; ++i, node = node->next) {
+            Tile* c = node->item ? node->item->child : nullptr;
+            if (!c || !c->name.m_data || std::strcmp(c->name.m_data, best->name.m_data) != 0)
+                continue;
+            const float ci = TileNum(c, kTileValue_listindex);
+            if (TileHiddenExplicitly(c) || ci < 0.0f) continue;
+            ++sel.count;
+            if (ci == li) ++sameIndex;
+        }
+        sel.index = static_cast<int>(li);
+        if (sameIndex != 1 || sel.index >= sel.count) { sel.index = -1; sel.count = 0; }
+    }
+
     // In settings/controls (StartMenu) normalize confusing key names
     // ("KAPSLE" → "Caps Lock").
     if (OwningMenuType(listbox) == kMenuType_Start) {
@@ -5004,13 +5080,24 @@ bool ClickSelectedRowIn(const char* listNameSubstr)
     return true;
 }
 
-std::optional<std::string> GetKeyboardSelectionText()
+std::string SelectionPosition(const MenuSelection& sel)
+{
+    if (sel.index < 0 || sel.count < 2) return {};
+    char pos[32];
+    std::snprintf(pos, sizeof(pos), strings::T(", %d z %d", ", %d of %d"),
+                  sel.index + 1, sel.count);
+    return pos;
+}
+
+std::optional<std::string> GetKeyboardSelectionText(bool withPosition)
 {
     auto sel = GetKeyboardSelection();
     if (!sel) return std::nullopt;
-    if (sel->value.empty()) return sel->label;
-    if (sel->label.empty()) return sel->value;
-    return sel->label + ", " + sel->value;
+    std::string t = sel->value.empty() ? sel->label
+                  : sel->label.empty() ? sel->value
+                  : sel->label + ", " + sel->value;
+    if (withPosition) t += SelectionPosition(*sel);
+    return t;
 }
 
 bool ClickMenuBack()
@@ -5447,7 +5534,7 @@ bool ClickMapTravelButton() { return ClickMenuButton(kMenuType_Map, "MM_ButtonA"
 // location, so we can hand the tile straight to HandleClick.
 // Write a numeric trait on a tile through the engine's own setter, so the menu
 // re-evaluates whatever depends on it (0x00BEE190, __thiscall, ret 0xC).
-void SetTileFloat(Tile* tile, UInt32 traitId, float value)
+void SetTileFloat(Tile* tile, UInt32 traitId, float value, int propagate = 0)
 {
     if (!tile) return;
     const unsigned char* code = reinterpret_cast<const unsigned char*>(0x00BEE190);
@@ -5457,7 +5544,7 @@ void SetTileFloat(Tile* tile, UInt32 traitId, float value)
         return;
     }
     using PFN = void (__thiscall*)(Tile*, UInt32, float, int);
-    reinterpret_cast<PFN>(0x00BEE190)(tile, traitId, value, 0);
+    reinterpret_cast<PFN>(0x00BEE190)(tile, traitId, value, propagate);
 }
 
 // THE MENU CURSOR, as the engine itself keeps it.
@@ -5607,7 +5694,34 @@ bool ClickMapMarkerTile(const void* tile)
 // Click the keyboard-highlighted row of a Data-page list, with the list's own
 // selection ([menu+listOff]+0x10, the tile MapMenu::HandleClick reads it by)
 // set to it first.
-bool ClickDataListRow(const char* listName, UInt32 listOff, UInt32 clickId)
+// The list's own item for the highlighted row. A Data-page ListBox keeps its
+// rows as {Tile* tile, T* object} items in a tList at [list+4] and finds the
+// clicked one by tile (0x00632D70 compares with [list+0x10]); the row found
+// on screen is that tile or lies inside it.
+Tile* DataListItemTile(UInt8* list, Tile* row, const void** object)
+{
+    struct Item { Tile* tile; void* object; };
+    struct Node { Item* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(list + 4);
+    for (int i = 0; node && i < 1024; ++i) {
+        if (IsBadReadPtr(node, sizeof(Node))) break;
+        Item* it = node->item;
+        if (it && !IsBadReadPtr(it, sizeof(Item)) && it->tile) {
+            int d = 0;
+            for (Tile* p = row; p && d < 6; p = p->parent, ++d) {
+                if (p == it->tile) {
+                    if (object) *object = it->object;
+                    return it->tile;
+                }
+            }
+        }
+        node = node->next;
+    }
+    return nullptr;
+}
+
+bool ClickDataListRow(const char* listName, UInt32 listOff, UInt32 clickId,
+                      const void** object = nullptr)
 {
     Tile* row = FindKeyboardSelectedTile(nullptr);
     if (!row) return false;
@@ -5617,14 +5731,33 @@ bool ClickDataListRow(const char* listName, UInt32 listOff, UInt32 clickId)
     Menu* menu = FindMenuByType(kMenuType_Map);
     auto* mb = reinterpret_cast<UInt8*>(menu);
     if (!mb || IsBadReadPtr(mb, listOff + 0x14)) return false;
-    *reinterpret_cast<Tile**>(mb + listOff + 0x10) = row;
-    F3A_INFO("ClickDataListRow: %s row %p, click 0x%X", listName, row, clickId);
-    menu->HandleClick(clickId, row);
+    UInt8* list = mb + listOff;
+    const void* obj = nullptr;
+    Tile* item = DataListItemTile(list, row, &obj);
+    F3A_INFO("ClickDataListRow: %s row %p -> item %p object %p, click 0x%X",
+             listName, (void*)row, (void*)item, obj, clickId);
+    if (!item) return false;
+    *reinterpret_cast<Tile**>(list + 0x10) = item;
+    if (object) *object = obj;
+    menu->HandleClick(clickId, item);
     return true;
 }
 
-bool TrackSelectedQuest() { return ClickDataListRow("MM_QuestsList", 0x120, 0x13); }
-bool OpenSelectedNote()   { return ClickDataListRow("MM_NotesList", 0x150, 0x14); }
+int TrackSelectedQuest()
+{
+    const void* quest = nullptr;
+    if (!ClickDataListRow("MM_QuestsList", 0x120, 0x13, &quest) || !quest) return 0;
+    auto* q = reinterpret_cast<const UInt8*>(quest);
+    // The click's own test: a quest with the completed flag (+0x3C bit 1)
+    // is not tracked.
+    if (!IsBadReadPtr(q, 0x40) && (q[0x3C] & 0x02)) return -1;
+    auto* p = reinterpret_cast<UInt8*>(rt::Player());
+    const void* now = (p && !IsBadReadPtr(p + 0x614, 4))
+                    ? *reinterpret_cast<void* const*>(p + 0x614) : nullptr;
+    F3A_INFO("TrackSelectedQuest: quest %p, the player tracks %p", quest, now);
+    return now == quest ? 1 : -2;
+}
+bool OpenSelectedNote() { return ClickDataListRow("MM_NotesList", 0x150, 0x14); }
 
 std::string GetDataPageText()
 {
@@ -5895,8 +6028,77 @@ std::string GetPipBoyVitals()
 
 std::optional<InventoryItem> GetSelectedInventoryItem() { return std::nullopt; }
 
+std::string GetItemCard()
+{
+    Tile* inv = FindVisibleMenuTile(kMenuType_Inventory);
+    Tile* box = inv ? FindChildByName(inv, "IM_ItemInfoRect", 6) : nullptr;
+    if (!box || !TileVisible(box)) return {};
+    // The card's panels, top row then bottom row as on screen. Each is shown
+    // (visible = 1) only for items it applies to: damage for weapons, damage
+    // resistance for apparel, condition for both, effects for what has them.
+    struct Panel { const char* name; const char* pl; const char* en; };
+    static const Panel kPanels[] = {
+        { "DPSInfo",          "obrażenia",              "damage" },
+        { "DamageResistInfo", "odporność na obrażenia", "damage resistance" },
+        { "WeightInfo",       "waga",                   "weight" },
+        { "ValueInfo",        "wartość",                "value" },
+        { "ConditionInfo",    "stan",                   "condition" },
+        { "AmmoInfo",         "amunicja",               "ammo" },
+        { "EffectsInfo",      "efekty",                 "effects" },
+    };
+    auto text = [](Tile* panel, const char* part) -> std::string {
+        Tile* t = FindChildByName(panel, part, 0);
+        const char* s = t ? TileStringTrait(t) : nullptr;
+        std::string r = s ? GameStrToUtf8(s) : std::string();
+        size_t b = r.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return {};
+        size_t e = r.find_last_not_of(" \t\r\n");
+        return r.substr(b, e - b + 1);
+    };
+    std::string out;
+    for (const auto& p : kPanels) {
+        Tile* panel = FindChildByName(box, p.name, 0);
+        if (!panel || !TileVisible(panel)) continue;
+        std::string value = text(panel, "CI_ValueText");
+        std::string part;
+        if (std::strcmp(p.name, "ConditionInfo") == 0) {
+            // A bar with no number: the filled image's width out of the
+            // background's.
+            Tile* meter = FindChildByName(panel, "ConditionMeter", 0);
+            Tile* img = meter ? FindChildByName(meter, "MeterImage", 0) : nullptr;
+            Tile* bg  = meter ? FindChildByName(meter, "MeterBackground", 0) : nullptr;
+            float full = bg ? TileNum(bg, kTileValue_width) : 0.0f;
+            if (value.empty() && img && full > 0.0f) {
+                int pct = static_cast<int>(TileNum(img, kTileValue_width) / full * 100.0f + 0.5f);
+                if (pct < 0) pct = 0;
+                if (pct > 100) pct = 100;
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), strings::T("%d procent", "%d percent"), pct);
+                value = buf;
+            }
+            if (!value.empty()) part = std::string(strings::T(p.pl, p.en)) + " " + value;
+        } else if (std::strcmp(p.name, "AmmoInfo") == 0) {
+            // Its title is the ammo's own name, the value how many you have.
+            std::string ammo = text(panel, "CI_TitleText");
+            if (!ammo.empty())
+                part = std::string(strings::T(p.pl, p.en)) + ": " + ammo +
+                       (value.empty() ? std::string() : ", " + value);
+        } else if (std::strcmp(p.name, "EffectsInfo") == 0) {
+            if (!value.empty()) part = std::string(strings::T(p.pl, p.en)) + ": " + value;
+        } else if (!value.empty()) {
+            part = std::string(strings::T(p.pl, p.en)) + " " + value;
+        }
+        if (part.empty()) continue;
+        if (!out.empty()) out += ", ";
+        out += part;
+    }
+    return out;
+}
+
 std::string GetSelectedItemInfo()
 {
+    // The Pip-Boy's own card first: only its shown panels, in words.
+    if (std::string card = GetItemCard(); !card.empty()) return card;
     // The selected item's stat card is an "*ItemInfoRect" box (Pip-Boy
     // inventory IM_ItemInfoRect) holding CI_TitleText+CI_ValueText sub-panels:
     // weight, value, damage/DR, condition, effects, ammo. Find the visible one
@@ -6290,9 +6492,40 @@ bool GetLockpickCue(float* offset, float* tol)
     return true;
 }
 
+// LockPickMenu (vtable 0x00E0658C) moves the pin in 0x0065AEF0, each frame of
+// the picking state ([menu+0x28] == 2; 3 is the lock turning): it adds the
+// mouse's x movement, scaled to UI units, to the "_x" trait of the pin tile
+// [menu+0x68] and clamps it to [0, width of [menu+0x64]]. The trait id is
+// registered by the menu's constructor into 0x01076AE0. Writing the trait the
+// same way is the same as moving the mouse.
+bool NudgeLockpick(float delta, bool* atEdge)
+{
+    if (atEdge) *atEdge = false;
+    if (!std::isfinite(delta)) return false;
+    Menu* menu = FindMenuByType(kMenuType_LockPick);
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    if (!mb || IsBadReadPtr(mb, 0x80)) return false;
+    if (*reinterpret_cast<UInt32*>(mb + 0x28) != 2) return false;
+    const auto* pTrait = reinterpret_cast<const UInt32*>(0x01076AE0);
+    if (IsBadReadPtr(pTrait, 4)) return false;
+    const UInt32 traitX = *pTrait;
+    if (traitX < 10000 || traitX > 0xFFFF) return false;     // not a named trait
+    Tile* pin = *reinterpret_cast<Tile**>(mb + 0x68);
+    Tile* bar = *reinterpret_cast<Tile**>(mb + 0x64);
+    if (!pin || !bar || IsBadReadPtr(pin, 0x40) || IsBadReadPtr(bar, 0x40)) return false;
+    const float w = TileNum(bar, kTileValue_width);
+    if (!(w > 0.0f)) return false;
+    const float x = TileNum(pin, traitX);
+    float nx = x + delta;
+    if (nx <= 0.0f) { nx = 0.0f; if (atEdge) *atEdge = x > 0.0f; }
+    if (nx >= w)    { nx = w;    if (atEdge) *atEdge = x < w; }
+    if (nx != x) SetTileFloat(pin, traitX, nx, 1);
+    return true;
+}
+
 namespace {
 struct HackRow { unsigned long addr; std::string chars; Tile* row; int prefix; };
-struct HackWord { std::string text; float tx; float ty; };   // UI pos of middle letter
+struct HackWord { std::string text; float tx; float ty; float cw; };   // middle letter
 
 void CollectHackRows(Tile* t, int depth, std::vector<HackRow>& rows)
 {
@@ -6351,11 +6584,12 @@ void BuildHackWords(Tile* m, std::vector<HackWord>& out)
     auto flush = [&](size_t end) {
         if (run.size() >= 4) {
             size_t s = end - run.size(), mid = s + run.size() / 2;
-            HackWord w{ run, 0.0f, 0.0f };
+            HackWord w{ run, 0.0f, 0.0f, 0.0f };
             if (mid < loc.size()) {
                 Loc& l = loc[mid];
                 w.tx = TileAbsX(l.row) + l.ci * l.cw + l.cw * 0.5f;
                 w.ty = TileAbsY(l.row) + TileNum(l.row, kTileValue_height) * 0.5f;
+                w.cw = l.cw;
             }
             out.push_back(w);
         }
@@ -6402,6 +6636,8 @@ std::string HighlightedWordOf(Tile* m)
 }
 } // namespace
 
+std::string GetHackingSelection();   // below, with the click
+
 // Read the hacking (terminal password) minigame: candidate words + attempts.
 HackingInfo GetHackingInfo()
 {
@@ -6413,6 +6649,10 @@ HackingInfo GetHackingInfo()
     for (auto& w : words) h.words.push_back(w.text);
     h.attempts = CountTilesNamed(m, 0, "hacking_guess_block");
     h.highlighted = HighlightedWordOf(m);
+    if (h.highlighted.empty()) {
+        std::string sel = GetHackingSelection();
+        if (LooksLikeGridWord(sel.c_str())) h.highlighted = sel;
+    }
     // Locked out: the grid is gone and the lock-out message is showing.
     Tile* lk = FindChildByName(m, "hacking_locked_message_text_1", 10);
     h.locked = lk && TileShown(lk) && TileStringTrait(lk) != nullptr;
@@ -6422,7 +6662,52 @@ HackingInfo GetHackingInfo()
 
 std::string GetHackingHighlightedWord()
 {
-    return HighlightedWordOf(FindVisibleMenuTile(kMenuType_Hacking));
+    std::string w = HighlightedWordOf(FindVisibleMenuTile(kMenuType_Hacking));
+    if (w.empty()) {
+        std::string sel = GetHackingSelection();
+        if (LooksLikeGridWord(sel.c_str())) w = sel;
+    }
+    return w;
+}
+
+// HackingMenu::HandleClick (vtable 0x00E05354 slot 3, 0x00643780), while the
+// grid takes guesses (stage [menu+0x1C4] == 2), enters the text of the
+// highlight object at menu+0xE0 - the word, bracket pair or symbol under the
+// game's cursor, worked out each frame from the tile under it
+// (InterfaceManager::activeTile) and the cursor's x. It does so only for a tile
+// of the grid (parent == [menu+0x114], hacking_password_file_rect) and reads
+// that tile's row for a bracket pair - so the click goes to the tile under the
+// cursor, as the mouse's does.
+std::string GetHackingSelection()
+{
+    Menu* menu = FindMenuByType(kMenuType_Hacking);
+    auto* mb = reinterpret_cast<const UInt8*>(menu);
+    if (!mb || IsBadReadPtr(mb, 0xE4)) return {};
+    const char* s = *reinterpret_cast<const char* const*>(mb + 0xE0);
+    std::string out;
+    for (int i = 0; s && i < 48 && !IsBadReadPtr(s + i, 1) && s[i]; ++i) out += s[i];
+    return out;
+}
+
+bool ClickHackingSelection()
+{
+    Menu* menu = FindMenuByType(kMenuType_Hacking);
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    if (!mb || IsBadReadPtr(mb, 0x1C8)) return false;
+    const UInt32 stage = *reinterpret_cast<UInt32*>(mb + 0x1C4);
+    Tile* grid = *reinterpret_cast<Tile**>(mb + 0x114);
+    auto* ifm = rt::IFM();
+    Tile* hit = ifm ? ifm->activeTile : nullptr;
+    if (stage != 2 || !grid || !hit || IsBadReadPtr(hit, 0x40) || hit->parent != grid) {
+        F3A_INFO("ClickHackingSelection: not on the grid (stage %u, tile %p, grid %p)",
+                 stage, (void*)hit, (void*)grid);
+        return false;
+    }
+    const UInt32 id = static_cast<UInt32>(TileNum(hit, kTileValue_id));
+    F3A_INFO("ClickHackingSelection: '%s' (tile %p, id %u)",
+             GetHackingSelection().c_str(), (void*)hit, id);
+    menu->HandleClick(id, hit);
+    return true;
 }
 
 namespace {
@@ -7000,7 +7285,7 @@ std::vector<std::string> GetHackingTextLines()
 
 // UI screen position of the idx-th candidate word's middle letter (for the
 // mouse-driven guess). Returns false if not open / index invalid.
-bool GetHackWordTarget(int idx, float* x, float* y)
+bool GetHackWordTarget(int idx, float* x, float* y, float* charWidth)
 {
     Tile* m = FindVisibleMenuTile(kMenuType_Hacking);
     if (!m || idx < 0) return false;
@@ -7009,18 +7294,7 @@ bool GetHackWordTarget(int idx, float* x, float* y)
     if (idx >= (int)words.size()) return false;
     if (x) *x = words[idx].tx;
     if (y) *y = words[idx].ty;
-    return true;
-}
-
-// The hacking cursor's current UI position (feedback for driving the mouse).
-bool GetHackingCursor(float* x, float* y)
-{
-    Tile* m = FindVisibleMenuTile(kMenuType_Hacking);
-    if (!m) return false;
-    Tile* c = FindChildByName(m, "hacking_cursor", 10);
-    if (!c) return false;
-    if (x) *x = TileAbsX(c) + TileNum(c, kTileValue_width) * 0.5f;
-    if (y) *y = TileAbsY(c) + TileNum(c, kTileValue_height) * 0.5f;
+    if (charWidth) *charWidth = words[idx].cw;
     return true;
 }
 

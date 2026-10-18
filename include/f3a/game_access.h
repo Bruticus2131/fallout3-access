@@ -770,6 +770,11 @@ struct MenuSelection {
     // Opaque identity of the panel (its listbox tile) so the caller can
     // detect "focus moved into a different panel".
     const void* container = nullptr;
+    // The row's place in its list (its listindex, from 0) and how many rows
+    // like it the list has; -1 / 0 when unknown. Tells apart rows that read
+    // the same - the G.O.A.T.'s question 10 answers "The Overseer." four times.
+    int index = -1;
+    int count = 0;
 };
 std::optional<MenuSelection> GetKeyboardSelection();
 
@@ -805,9 +810,13 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side = nullptr);
 // 2 = already at that end, 0 = nothing to select there, -1 = no menu.
 int StepContainerSelection(bool container_side, int delta);
 
-// Convenience: the focused row as one string ("label" or "label, value").
-// Used by the diagnostic dump.
-std::optional<std::string> GetKeyboardSelectionText();
+// The row's place as said after it, ", 2 z 5" / ", 2 of 5"; empty when the
+// list has one row or the place is not known.
+std::string SelectionPosition(const MenuSelection& sel);
+
+// Convenience: the focused row as one string ("label" or "label, value"),
+// with its place in the list when `withPosition`.
+std::optional<std::string> GetKeyboardSelectionText(bool withPosition = false);
 
 // "Go back one menu level": find the visible Back button in the open menu
 // and click it through the game's own Menu::HandleClick — so the engine's
@@ -841,6 +850,12 @@ std::optional<InventoryItem> GetSelectedInventoryItem();
 // ammo) read from the Pip-Boy's IM_ItemInfoRect. "" if no card is visible
 // (e.g. the container menu, which only lists names).
 std::string GetSelectedItemInfo();
+
+// The Pip-Boy inventory's item card as it is on screen: only the panels the
+// game shows for this item, in their screen order, named in words (the card
+// says "DAM", "WG", "CND"), the condition bar as a percentage. "" when the
+// Items page shows no card.
+std::string GetItemCard();
 
 // ---- Dialog ----
 
@@ -932,8 +947,11 @@ int MapMenuTab();
 // The Data page's quest list: make the highlighted quest the tracked one, as a
 // click does. MapMenu::HandleClick's quest case (id 0x13) takes the quest from
 // the list's own selection ([menu+0x120]+0x10), which the arrows do not move -
-// so it is set to the highlighted row first. MAIN THREAD.
-bool TrackSelectedQuest();
+// so it is set to the highlighted row's list item first. Returns 1 when the
+// game now tracks it, 0 when no quest row is highlighted, -1 for a finished
+// quest (the game tracks only running ones), -2 when the click changed
+// nothing. MAIN THREAD.
+int TrackSelectedQuest();
 // The Data page's notes: open (a note) or play (a holotape) the highlighted
 // one, as a click does (id 0x14). MAIN THREAD.
 bool OpenSelectedNote();
@@ -1028,6 +1046,12 @@ bool ArePlayerControlsDisabled();
 // menu isn't open. For an audio "you're on the sweet spot" beep.
 bool GetLockpickCue(float* offset, float* tol);
 
+// Move the bobby pin by `delta` UI units, as moving the mouse does (the pin
+// has no keys with keyboard and mouse). Only while picking - not while the
+// lock is being turned. *atEdge: the pin stopped at an end of its range.
+// False when the lockpick menu is not up or not picking. MAIN THREAD.
+bool NudgeLockpick(float delta, bool* atEdge);
+
 // Terminal hacking minigame: the candidate password words + attempts remaining.
 // `active` is false when the hacking menu isn't open (or the grid is empty and
 // the terminal isn't locked out). `locked` = out of attempts (lock-out screen).
@@ -1057,12 +1081,18 @@ std::vector<std::string> GetHackingLogEntries();
 // misses it. One line per trait.
 std::vector<std::string> DebugHackingTraits();
 
-// Mouse-driven guess helpers (the minigame is mouse-only): the UI position of a
-// candidate word's letter, the cursor's current position, and whether the pause
-// menu is up (to stop hacking input). Used by the hacking module to drive the
-// cursor onto a word and click it.
-bool GetHackWordTarget(int idx, float* x, float* y);
-bool GetHackingCursor(float* x, float* y);
+// Guessing a word as a click does (with keyboard and mouse the minigame has
+// no keys; the gamepad's are off then):
+//   GetHackWordTarget     - the UI point of a candidate's middle letter, and
+//                           the width of one letter there (to step sideways);
+//   GetHackingSelection   - the text the game's cursor highlight holds now,
+//                           what a click would enter (a word, a bracket pair,
+//                           a symbol); plain data read;
+//   ClickHackingSelection - enter it, as the mouse button does. MAIN THREAD.
+// IsPauseMenuOpen: the pause menu is up (hacking input stops).
+bool GetHackWordTarget(int idx, float* x, float* y, float* charWidth = nullptr);
+std::string GetHackingSelection();
+bool ClickHackingSelection();
 bool IsPauseMenuOpen();
 
 // The hacking attempt log joined (guesses + likeness / denied / granted).

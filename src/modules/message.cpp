@@ -38,7 +38,7 @@ void TryAnnounce()
     tolk::Speak(game::ExpandControlTokens(text), tolk::Priority::System, true);
     // Then the button the selection is on, after the message (the keyboard
     // reader holds it back until now).
-    if (auto sel = game::GetKeyboardSelectionText())
+    if (auto sel = game::GetKeyboardSelectionText(/*withPosition*/ true))
         if (!sel->empty()) tolk::Speak(*sel, tolk::Priority::System, false);
 }
 

@@ -1,22 +1,20 @@
 #pragma once
 
-// Low-level engine hooks. Patches Fallout3.exe (1.7.0.3) call sites so we get
-// notified when:
-//   - the MenuManager opens or closes a menu
-//   - the main loop ticks one frame
-//   - a subtitle / dialog line is queued
+// Patches to Fallout3.exe (1.7.0.3) call sites, for engine bugs the mod has to
+// work round. Each site is checked byte for byte first; a different build is
+// left untouched. Implementation and the reasoning per patch: engine_hooks.cpp.
 //
-// Implementation lives in src/engine_hooks.cpp. Offsets and call-site patterns
-// for 1.7.0.3 are documented inline next to each hook.
+//   - Dropping a stack from the inventory: the "Ile?" prompt's Ok crashed the
+//     game when played with keyboard and mouse (the selected item was cleared
+//     behind the prompt).
 
 namespace f3a::engine {
 
-// Install all hooks. Returns false if any single hook failed; callers should
-// continue (the mod degrades gracefully — menus may still announce via
-// FOSE messaging fallback).
+// Install every patch. Returns false if any one was not installed; the mod
+// carries on either way.
 bool InstallHooks();
 
-// Roll back all hooks (best-effort) — called on game shutdown.
+// Nothing to roll back: the patched code lives as long as the process.
 void RemoveHooks();
 
 } // namespace f3a::engine

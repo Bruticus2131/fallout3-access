@@ -141,6 +141,15 @@ void RequestMapMarkerClick(const void* markerTile);
 // Drop the item selected in the inventory (clicks the menu's own Drop button).
 void RequestDropItem();
 
+// Hacking: put the game's cursor on a UI point, and enter what its highlight
+// holds (game::ClickHackingSelection). Both run on the main thread.
+void RequestHackCursorTo(float x, float y);
+void RequestHackGuess();
+
+// Lockpicking: move the bobby pin by `units` (accumulated, applied on the main
+// thread through game::NudgeLockpick).
+void RequestLockpickNudge(int units);
+
 // The quantity prompt's amount and maximum, sampled on the main thread each
 // frame. False when that prompt isn't up. Modules MUST use this instead of
 // reading the menu themselves: the prompt closes on the main thread under the

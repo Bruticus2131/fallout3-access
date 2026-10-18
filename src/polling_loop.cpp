@@ -27,6 +27,14 @@ namespace {
 
 std::thread             g_thread;
 std::atomic<bool>       g_running{ false };
+// The game can end without FOSE's ExitGame message (Alt+F4, the window's close
+// button): Stop() never runs, Windows has already ended the thread, and a
+// std::thread still joinable when the statics are destroyed calls
+// std::terminate - the c0000409 crashes in this DLL on quitting. Declared after
+// g_thread, so it is destroyed first.
+struct DetachAtExit {
+    ~DetachAtExit() { if (g_thread.joinable()) g_thread.detach(); }
+} g_detach_at_exit;
 
 // Visibility state per cache slot (0..0x3B).
 //   confirmed: what we've reported as the current state to menu_dispatch.
@@ -218,6 +226,7 @@ const Tile* g_last_tile_ptr = nullptr;
 std::string g_last_kbd_label;
 std::string g_last_kbd_value;
 const void* g_last_kbd_container = nullptr;
+int         g_last_kbd_index = -1;
 
 // Filter applied to the active-menu set before dispatch. While Start (main
 // menu) is up F3 paints Map / Stats / Inventory as backdrop tiles; we don't
@@ -704,7 +713,15 @@ void PollKeyboardSelection()
     const bool container_changed = sel->container != g_last_kbd_container;
     const bool label_changed     = sel->label != g_last_kbd_label;
     const bool value_changed     = sel->value != g_last_kbd_value;
-    if (!container_changed && !label_changed && !value_changed) return;
+    const bool index_changed     = sel->index != g_last_kbd_index;
+    if (!container_changed && !label_changed && !value_changed && !index_changed) return;
+
+    // Dialogue topics and message-box buttons say their place in the list
+    // ("Tak, 1 z 2", "Goodbye, 5 of 5"): how many answers there are is part of
+    // the choice.
+    const auto am = menu::ActiveMenu();
+    const bool sayPosition = am == menu::Id::Dialog || am == menu::Id::Message;
+    std::string position;
 
     std::string utterance;
     if (label_changed || container_changed) {
@@ -720,6 +737,14 @@ void PollKeyboardSelection()
             if (!utterance.empty()) utterance += ", ";
             utterance += sel->value;
         }
+        if (sayPosition) position = game::SelectionPosition(*sel);
+    } else if (index_changed && !value_changed) {
+        // Another row that reads the same: the G.O.A.T.'s question 10 has four
+        // answers, all "The Overseer.", and moving between them said nothing.
+        // Said with its place in the list, so the move is heard - in any menu.
+        utterance = sel->label;
+        if (!sel->value.empty()) utterance += ", " + sel->value;
+        position = game::SelectionPosition(*sel);
     } else {
         // Same row, value tweaked (left/right on a slider) → just the value.
         utterance = sel->value;
@@ -728,10 +753,13 @@ void PollKeyboardSelection()
     g_last_kbd_label     = sel->label;
     g_last_kbd_value     = sel->value;
     g_last_kbd_container = sel->container;
+    g_last_kbd_index     = sel->index;
     if (utterance.empty() || msgWaiting) return;
 
-    // Avoid doubling with what the mouse poller just said.
-    if (utterance == g_last_tile_name) return;
+    // Avoid doubling with what the mouse poller just said - unless the place
+    // in the list is the news (rows that read the same).
+    if (utterance == g_last_tile_name && !(index_changed && !label_changed)) return;
+    utterance += position;
 
     F3A_DEBUG("kbd selection -> '%s'", utterance.c_str());
     tolk::Speak(utterance, tolk::Priority::Ui, true);
@@ -1361,6 +1389,10 @@ std::atomic<bool> g_engine_aim_want{ false };
 
 // Press the inventory's "Upuść" button (HandleClick → main thread only).
 std::atomic<bool> g_drop_pending{ false };
+std::atomic<bool>  g_hack_cursor_pending{ false };
+std::atomic<float> g_hack_cursor_x{ 0.0f }, g_hack_cursor_y{ 0.0f };
+std::atomic<bool>  g_hack_guess_pending{ false };
+std::atomic<int>   g_lockpick_nudge{ 0 };
 // Track the quest highlighted in the Pip-Boy (clicks its row; main thread only).
 std::atomic<bool> g_track_quest_pending{ false };
 std::atomic<bool> g_open_note_pending{ false };
@@ -1675,16 +1707,48 @@ void MainThreadWork()
         }
     }
     if (g_track_quest_pending.exchange(false)) {
-        if (game::TrackSelectedQuest())
+        switch (game::TrackSelectedQuest()) {
+        case 1:
             tolk::Speak(strings::T("Śledzę to zadanie.", "Tracking this quest."), tolk::Priority::Ui, true);
-        else
+            break;
+        case -1:
+            tolk::Speak(strings::T("To zadanie jest ukończone, nie można go śledzić.",
+                                   "That quest is completed; it can't be tracked."),
+                        tolk::Priority::System, true);
+            break;
+        case -2:
+            tolk::Speak(strings::T("Gra nie zmieniła śledzonego zadania.",
+                                   "The game did not change the tracked quest."),
+                        tolk::Priority::System, true);
+            break;
+        default:
             tolk::Speak(strings::T("Najpierw wybierz zadanie na liście.", "First select a quest in the list."),
                         tolk::Priority::System, true);
+        }
     }
     if (g_open_note_pending.exchange(false)) {
         if (!game::OpenSelectedNote())
             tolk::Speak(strings::T("Najpierw wybierz notatkę na liście.", "First select a note in the list."),
                         tolk::Priority::System, true);
+    }
+    // Hacking: the game's cursor onto a word, then the guess through the
+    // menu's own click (modules/hacking.cpp says when).
+    if (g_hack_cursor_pending.exchange(false)) {
+        float x = g_hack_cursor_x.load(), y = g_hack_cursor_y.load();
+        if (!game::MoveEngineCursorTo(x, y))
+            F3A_INFO("Hacking: could not move the cursor to (%.0f,%.0f)", x, y);
+    }
+    if (g_hack_guess_pending.exchange(false)) {
+        if (!game::ClickHackingSelection())
+            tolk::Speak(strings::T("Nie udało się wpisać słowa.", "Could not enter the word."),
+                        tolk::Priority::System, true);
+    }
+    // Lockpicking: the bobby pin, moved by the arrow keys.
+    if (int units = g_lockpick_nudge.exchange(0)) {
+        bool edge = false;
+        if (game::NudgeLockpick(static_cast<float>(units), &edge) && edge)
+            tolk::Speak(strings::T("Koniec zakresu.", "End of the range."),
+                        tolk::Priority::Ui, true);
     }
     if (g_drop_pending.exchange(false)) {
         // The inventory menu has a real Drop button; clicking it through the
@@ -2121,6 +2185,7 @@ void Start()
     g_last_kbd_label.clear();
     g_last_kbd_value.clear();
     g_last_kbd_container = nullptr;
+    g_last_kbd_index = -1;
     for (auto& c : g_state) c = {};
     // Run SPECIAL/status reads (which call game functions) on the main thread.
     game::SetMainThreadCallback(&MainThreadWork);
@@ -2232,6 +2297,14 @@ void RequestFacePoint(const game::Vec3& p)
 void RequestMapTravel() { g_map_travel_pending.store(true); }
 
 void RequestDropItem() { g_drop_pending.store(true); }
+void RequestHackCursorTo(float x, float y)
+{
+    g_hack_cursor_x.store(x);
+    g_hack_cursor_y.store(y);
+    g_hack_cursor_pending.store(true);
+}
+void RequestHackGuess() { g_hack_guess_pending.store(true); }
+void RequestLockpickNudge(int units) { g_lockpick_nudge.fetch_add(units); }
 
 bool QuantityState(int* amount, int* maximum)
 {

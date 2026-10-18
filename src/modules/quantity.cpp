@@ -15,12 +15,10 @@ namespace {
 // items. Blind it used to be a dead end: you could start dropping seven suits
 // with no idea which number was selected.
 //
-// We do NOT drive this menu, on purpose — every attempt made things worse:
-// clicking the stepper tiles fought the game's own handling of Left/Right (the
-// cursor jumped around), and pressing Ok ourselves CRASHED the game in both
-// forms of the call, with the log ending on our click each time. The reason is
-// simple in hindsight: the player's key press is already closing this menu, so
-// our click lands in a menu that is being torn down.
+// We do NOT drive this menu, on purpose: clicking the stepper tiles fought the
+// game's own handling of Left/Right (the cursor jumped around). Ok - ours or
+// the player's A - used to crash the game on a drop; that was the engine
+// losing the selected item behind the prompt, fixed in engine_hooks.cpp.
 //
 // The menu carries its own shortcut hints — `A)` on Ok and `E)` on Cancel — so
 // the accessible answer is to READ those out and let the player press them. That

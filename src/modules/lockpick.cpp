@@ -1,6 +1,7 @@
 #include "f3a/modules.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/game_access.h"
+#include "f3a/polling_loop.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/strings.h"
 #include "f3a/logger.h"
@@ -23,6 +24,23 @@ bool  g_announced_sweet = false;
 int   g_last_picks = -1;
 bool  g_announced_brokensoon = false;
 
+// The bobby pin follows only the mouse with keyboard and mouse; Left/Right move
+// it here (game::NudgeLockpick, on the main thread), Shift for fine steps.
+// Per tick while held, so holding sweeps it and a tap nudges it.
+constexpr int kPinStep     = 3;    // UI units per tick (~120 a second)
+constexpr int kPinFineStep = 1;
+bool g_said_help = false;
+
+void PinKeys()
+{
+    const bool left  = (GetAsyncKeyState(VK_LEFT)  & 0x8000) != 0;
+    const bool right = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+    if (left == right) return;                     // neither, or both
+    const bool fine = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const int step = fine ? kPinFineStep : kPinStep;
+    poll::RequestLockpickNudge(left ? -step : step);
+}
+
 void Tone(int freq, int ms)
 {
     Beep(freq, ms);
@@ -30,6 +48,16 @@ void Tone(int freq, int ms)
 
 void OnTick(float)
 {
+    if (!g_said_help) {
+        g_said_help = true;
+        tolk::Speak(strings::T("Wytrych: strzałki lewo, prawo przesuwają wytrych, z Shiftem powoli. "
+                               "Dźwięk mówi, jak blisko jest właściwe miejsce.",
+                               "Lockpick: left and right arrows move the pin, slowly with Shift. "
+                               "The tone tells how close the right spot is."),
+                    tolk::Priority::Ui, false);
+    }
+    PinKeys();
+
     auto s = game::GetLockpickState();
     // No real reading yet: an all-zero state announced "sweet spot" and beeped
     // (blocking this thread) every time a lock was opened. The lockpick cue
@@ -77,7 +105,11 @@ void OnTick(float)
     }
 }
 
-void OnOpen()  { g_last_delta = 9999.0f; g_announced_sweet = false; g_announced_brokensoon = false; }
+void OnOpen()
+{
+    g_last_delta = 9999.0f; g_announced_sweet = false; g_announced_brokensoon = false;
+    g_said_help = false;
+}
 void OnClose() {}
 
 } // namespace

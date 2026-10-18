@@ -124,7 +124,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 
     f3a::menu::Init();
     f3a::hotkeys::Init();
-    f3a::engine::InstallHooks();   // (placeholder — disabled until needed)
+    f3a::engine::InstallHooks();   // engine bug fixes (the inventory drop prompt)
 
     f3a::OnPluginLoad();
 
