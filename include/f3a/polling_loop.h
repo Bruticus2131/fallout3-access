@@ -162,6 +162,8 @@ bool LootMenuState(game::LootMenuInfo* out);
 
 // Make the quest highlighted in the Pip-Boy's quest list the tracked one.
 void RequestTrackQuest();
+// Open (or play) the note highlighted in the Data page's notes list.
+void RequestOpenNote();
 
 // Press the row the keyboard highlight is on, in whatever menu is open. This is
 // how key rebinding becomes possible without sight: the controls page enters its

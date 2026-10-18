@@ -306,7 +306,9 @@ void Refilter()
     if (g_category == Cat_Quest) {
         // Quests come from the quest list, not the physical scan, and are
         // sorted by distance like everything else.
-        g_scan_list = game::GetActiveQuests();
+        // The quest the player tracks, not every quest running: the Pip-Boy is
+        // where quests are chosen, the scanner walks to the chosen one.
+        g_scan_list = game::GetActiveQuests(/*trackedOnly*/true);
         auto pp = game::GetPlayerPosition();
         std::sort(g_scan_list.begin(), g_scan_list.end(),
                   [&pp](const game::WorldEntity& a, const game::WorldEntity& b){
@@ -402,7 +404,7 @@ void CategoryStep(int dir)
     for (int i = 1; i <= Cat_COUNT; ++i) {
         int c = ((from + dir * i) % Cat_COUNT + Cat_COUNT) % Cat_COUNT;
         int n = 0;
-        if (c == Cat_Quest)         n = (int)game::GetActiveQuests().size();
+        if (c == Cat_Quest)         n = (int)game::GetActiveQuests(/*trackedOnly*/true).size();
         else if (c == Cat_Location || c == Cat_QuestObj) n = (int)CategoryView(c).size();
         else for (const auto& e : g_scan_full) if (PassesCategory(e, c)) ++n;   // all, not the view's cap
         if (n <= 0) continue;

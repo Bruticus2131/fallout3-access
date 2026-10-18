@@ -32,12 +32,11 @@ bool        g_open  = false;
 std::string g_last_objectives;
 std::string g_confirm_pending;    // name awaiting a second Enter (undiscovered)
 
-// Fast travel runs entirely through the game's own two-step path: select the
-// marker, then press the map's travel button. Both are HandleClick calls on the
-// main thread — no mouse steering (that depended on the map's scroll, zoom and
-// on which tab was open, and failed silently) and no MoveTo teleport (it crashed
-// the game and skipped every rule the real travel enforces).
-int         g_confirm_travel = 0;    // ticks until we press the travel button
+// Fast travel runs through the game's own path: a click on the marker (on the
+// main thread, game::ClickMapMarkerTile), after which the game asks "Travel to
+// <place>?" itself - no mouse steering (that depended on the map's scroll, zoom
+// and on which tab was open, and failed silently) and no MoveTo teleport (it
+// crashed the game and skipped every rule the real travel enforces).
 std::string g_travel_name;
 
 // "Walk there" (Home) waits for the map to close: the walk stops itself under
@@ -170,12 +169,11 @@ void TravelToSelected()
         return;
     }
     g_travel_name = m.name;
-    F3A_INFO("mapnav: selecting marker '%s' (disc=%d)",
+    F3A_INFO("mapnav: clicking marker '%s' (disc=%d)",
              m.name.c_str(), (int)m.discovered);
+    // The game then asks "Travel to <place>?" itself (the message box reader
+    // reads it; Enter on "Tak" travels) - or says why it cannot.
     poll::RequestMapMarkerClick(m.tile);
-    g_confirm_travel = 4;                // ~0.3 s, then press the travel button
-    tolk::Speak(strings::T("Podróż do: ", "Fast travel to: ") + m.name,
-                tolk::Priority::System, true);
 }
 
 void WalkToSelected()
@@ -201,11 +199,16 @@ void WalkToSelected()
 void Tick(float)
 {
     bool open = menu::ActiveMenu() == menu::Id::Map;
+    // The Data page has five tabs; the keys here (Page Up/Down, Enter, Home,
+    // End) belong to the two maps. On notes and radio Enter is the game's
+    // ("Najpierw wybierz lokację" on a note was this module taking it), on
+    // quests it tracks the quest.
+    const int tab = open ? game::MapMenuTab() : -1;
+    const bool mapTab = tab == game::kMapTabWorld || tab == game::kMapTabLocal;
     if (!open) {
         if (g_open) {
             g_open = false; g_index = -1;
             g_confirm_pending.clear(); g_last_objectives.clear();
-            g_confirm_travel = 0;        // a travel press must not wait for the next map
         }
         if (g_walk.on) {
             auto a = menu::ActiveMenu();
@@ -238,6 +241,34 @@ void Tick(float)
             tolk::Speak(obj, tolk::Priority::Ui, false);
         }
     }
+    // The key edges are tracked on every tab, so a key held while switching
+    // tabs does not fire on the map.
+    static int s_tab = -2;
+    if (tab != s_tab) {
+        s_tab = tab;
+        SeedKeys();
+        if (!mapTab) g_open = false;     // the map's help is said again on the map
+    }
+    if (!mapTab) {
+        if (KeyEdge(VK_RETURN, &g_enter)) {
+            if (tab == game::kMapTabQuests && game::IsKeyboardSelectionIn("MM_QuestsList"))
+                poll::RequestTrackQuest();       // Enter tracks the highlighted quest
+            else if (tab == game::kMapTabNotes && game::IsKeyboardSelectionIn("MM_NotesList"))
+                poll::RequestOpenNote();         // ...opens the note / plays the holotape
+        }
+        // An open note's text, when it changes (a holotape plays aloud instead).
+        if (tab == game::kMapTabNotes) {
+            static std::string s_note;
+            std::string t = game::GetDataPageText();
+            if (t != s_note) {
+                s_note = t;
+                if (!t.empty()) tolk::Speak(t, tolk::Priority::Ui, false);
+            }
+        }
+        KeyEdge(VK_NEXT, &g_pgdn); KeyEdge(VK_PRIOR, &g_pgup);
+        KeyEdge(VK_HOME, &g_home); KeyEdge(VK_END, &g_end);
+        return;
+    }
     if (!g_open) {
         g_open = true;
         g_index = -1;
@@ -256,22 +287,17 @@ void Tick(float)
 
     if (g_markers.empty()) Refresh();    // the list fills in a beat after opening
 
-    if (g_confirm_travel > 0 && --g_confirm_travel == 0) {
-        poll::RequestMapTravel();              // press "Podróżować do <miejsce>"
-        return;
-    }
 
     if (KeyEdge(VK_NEXT,  &g_pgdn))  Step(+1);
     if (KeyEdge(VK_PRIOR, &g_pgup))  Step(-1);
     if (KeyEdge(VK_RETURN, &g_enter)) {
-        // On the Quests tab, Enter makes the highlighted quest the TRACKED one —
-        // moving the highlight alone does not; the game starts tracking when the
-        // row is clicked. The request is refused when the highlight is not in the
-        // quest list, so on the map tabs it falls through to travelling.
-        if (game::IsKeyboardSelectionIn("MM_QuestsList"))
-            poll::RequestTrackQuest();
-        else
+        if (tab == game::kMapTabWorld) {
             TravelToSelected();
+        } else {
+            tolk::Speak(strings::T("Szybka podróż działa z mapy świata.",
+                                   "Fast travel works from the world map."),
+                        tolk::Priority::System, true);
+        }
     }
     if (KeyEdge(VK_HOME,   &g_home))  WalkToSelected();
     if (KeyEdge(VK_END,    &g_end)) {

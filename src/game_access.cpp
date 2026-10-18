@@ -254,7 +254,50 @@ std::string GetTrackedQuestName()
     return GameStrToUtf8(nm);
 }
 
-std::vector<WorldEntity> GetActiveQuests()
+// TESQuest+0x3C is a FLAGS byte (FOSE calls it "running"): bit 0 running,
+// bit 1 completed, bit 5 shown in the Pip-Boy. The values a save shows: 0x25
+// the main quest under way, 0x26 the finished prologue quests, 0x11/0x15 quests
+// running in the background that nobody has given the player yet (the
+// Wasteland Survival Guide until Moira is asked about her book). "!= 0" counted
+// all of them as running - finished ones included.
+static bool QuestRunning(const UInt8* q) { return (q[0x3C] & 0x01) != 0; }
+
+// Has the player got this quest - is any of its objectives on the list (done
+// or not)? A quest running in the background has none shown.
+static bool QuestKnown(const UInt8* q)
+{
+    struct Node { UInt8* item; Node* next; };
+    const Node* on = reinterpret_cast<const Node*>(q + 0x4C);
+    for (int s2 = 0; on && s2 < 64; ++s2) {
+        if (IsBadReadPtr(on, 8)) break;
+        const UInt8* obj = on->item;
+        on = on->next;
+        if (obj && !IsBadReadPtr(obj, 0x24) && (*reinterpret_cast<const UInt32*>(obj + 0x20) & 1))
+            return true;
+    }
+    return false;
+}
+
+std::vector<std::string> RunningQuestNames()
+{
+    std::vector<std::string> out;
+    UInt8* dh = rt::g_addrs ? rt::DataHandlerBase() : nullptr;
+    if (IsBadReadPtr(dh, 0xD8)) return out;
+    struct Node { UInt8* item; Node* next; };
+    Node* node = reinterpret_cast<Node*>(dh + 0xD4);
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        if (IsBadReadPtr(node, 8)) break;
+        UInt8* q = node->item;
+        node = node->next;
+        if (!q || IsBadReadPtr(q, 0x54) || !QuestRunning(q) || !QuestKnown(q)) continue;
+        const char* nm = *reinterpret_cast<char**>(q + 0x34);
+        if (IsBadReadPtr(nm, 1) || !*nm) continue;
+        out.push_back(GameStrToUtf8(nm));
+    }
+    return out;
+}
+
+std::vector<WorldEntity> GetActiveQuests(bool trackedOnly)
 {
     // List EVERY quest the player currently has, not just the tracked one.
     // (DLC auto-starts quests and steals the tracked slot, spamming the compass
@@ -284,7 +327,7 @@ std::vector<WorldEntity> GetActiveQuests()
         UInt8* q = node->item;
         node = node->next;
         if (!q || IsBadReadPtr(q, 0x54)) continue;
-        if (*reinterpret_cast<UInt8*>(q + 0x3C) == 0) continue;   // not running
+        if (!QuestRunning(q)) continue;                           // not running
         const char* qnm = *reinterpret_cast<char**>(q + 0x34);    // fullName
         if (IsBadReadPtr(qnm, 1) || !*qnm) continue;
 
@@ -305,6 +348,7 @@ std::vector<WorldEntity> GetActiveQuests()
             }
         }
         if (!live) continue;   // running but nothing live in the journal → skip
+        if (trackedOnly && !isTracked) continue;
 
         WorldEntity e;
         e.kind = WorldEntity::Kind::Quest;
@@ -699,6 +743,7 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         e.form_id  = r->refID;
         e.refr     = r;            // for crosshair-forced activation
         e.form_type = (uint8_t)base->typeID;
+        e.base_id  = base->refID;
         if (kind == WorldEntity::Kind::Container) e.items = cont_state;
         if (kind == WorldEntity::Kind::Door) {
             e.load_door  = ReadIsLoadDoor(r);
@@ -888,6 +933,8 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
         std::vector<std::pair<UInt32, UInt32>> objectives;   // id, flags
     };
     std::unordered_map<uint32_t, QState> quests;
+    const UInt8* tracked = reinterpret_cast<const UInt8*>(GetTrackedQuestPtr());
+    if (!tracked) return out;                       // nothing tracked: nothing to show
     UInt8* dh = rt::DataHandlerBase();
     if (!Readable(dh, 0xDC)) return out;
     struct Node { UInt8* item; Node* next; };
@@ -898,8 +945,14 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
         node = node->next;
         if (!q || !Readable(q, 0x64)) continue;
         QState s;
-        s.running = q[0x3C] != 0;
-        if (!s.running) continue;                   // only running quests matter
+        s.running = QuestRunning(q);
+        // Only quests the player has: running, and on the Pip-Boy's list. One
+        // running in the background (not given yet) must not name its things
+        // after a quest the Pip-Boy does not show.
+        if (!s.running || !QuestKnown(q)) continue;
+        // Only the quest the player tracks: the category is for the quest being
+        // worked on, not every quest's buttons and spots at once.
+        if (q != tracked) continue;
         s.stage = q[0x60];
         const char* nm = *reinterpret_cast<char**>(q + 0x34);
         if (Readable(nm, 1) && *nm) s.name = GameStrToUtf8(nm);
@@ -1110,7 +1163,7 @@ int GetQuestStage(uint32_t questId, bool* running)
     TESForm* f = reinterpret_cast<LookupFn>(0x00455190)(questId);
     if (!Readable(f, 0x64) || f->typeID != 0x47) return -1;          // kFormType_Quest
     auto* q = reinterpret_cast<const UInt8*>(f);
-    if (running) *running = q[0x3C] != 0;
+    if (running) *running = QuestRunning(q);
     return q[0x60];
 }
 
@@ -1215,7 +1268,7 @@ bool ReadQuestState(uint32_t questId, int* stage, bool* running)
         s_found[questId] = q;
     }
     if (stage) *stage = q[0x60];
-    if (running) *running = q[0x3C] != 0;
+    if (running) *running = QuestRunning(q);
     return true;
 }
 
@@ -4687,11 +4740,18 @@ void ScanHighlights(Tile* root, int depth,
         float target_y = TileAbsY(root);
         float dy = 28.0f;               // tolerance ~ half a row height
         Tile* tile = nullptr;
-        // The game's own mark first: the row with mouseover. Matching the
-        // highlight by height alone read the wrong row whenever rows of
-        // another tab sat at the same height, or rows had uneven heights.
-        if (Tile* mo = FindMouseoverRow(listbox, 0)) { tile = mo; dy = -1.0f; }
-        else FindRowAtY(listbox, target_y, 0, dy, tile);
+        // The game's own mark first: the row with mouseover - but only when
+        // it sits where the highlight is. Matching by height alone read the
+        // wrong row whenever rows of another tab sat at the same height; the
+        // mouseover alone stuck to the row under the hidden mouse pointer
+        // while the arrows moved the highlight (after switching the item
+        // category the list shifts under the pointer): up/down read nothing.
+        if (Tile* mo = FindMouseoverRow(listbox, 0)) {
+            float d = TileAbsY(mo) - target_y;
+            if (d < 0) d = -d;
+            if (d < 28.0f) { tile = mo; dy = -1.0f; }
+        }
+        if (!tile) FindRowAtY(listbox, target_y, 0, dy, tile);
         if (tile && dy < best_dy) {
             best_dy = dy;
             best_tile = tile;
@@ -5514,17 +5574,79 @@ bool ClickMapMarkerTile(const void* tile)
         }
     }
 
-    // The engine accepts a marker click only while the map's action button is a
-    // live target — the FNV mod sets exactly this before clicking, and without it
-    // the click merely selects the marker instead of travelling.
+    // FO3's MapMenu::HandleClick (0x00667730), case 0x16 - a world-map
+    // marker - is what asks "Travel to <place>?". It goes ahead only when
+    //   * the open tab is the world map ([menu+0x70] == 0x1D),
+    //   * the click was not a drag: the map tile's x/y ([menu+0x74]) still
+    //     equal where the click started ([menu+0x110]/[menu+0x114]),
+    //   * the action button ([menu+0x54], MM_ButtonA) is a live target.
+    // The FNV mod's id 0x1A lands on the switch's empty default in FO3 - the
+    // marker was "selected", nothing happened - and the second step, a click on
+    // MM_ButtonA (id 11), is no case at all here.
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    if (IsBadReadPtr(mb, 0x118) || *reinterpret_cast<int*>(mb + 0x70) != kMapTabWorld) {
+        F3A_INFO("ClickMapMarkerTile: not on the world map tab");
+        return false;
+    }
+    if (Tile* buttonA = *reinterpret_cast<Tile**>(mb + 0x54))
+        if (!IsBadReadPtr(buttonA, 0x40)) SetTileFloat(buttonA, kTileValue_target, 1.0f);
     if (Tile* buttonA = FindChildByName(menuTile, "MM_ButtonA", 8))
         SetTileFloat(buttonA, kTileValue_target, 1.0f);
-
-    // Marker clicks use a FIXED id (0x1A), not the tile's own id.
-    constexpr UInt32 kTileID_LocationMarker = 0x1A;
+    if (Tile* mapTile = *reinterpret_cast<Tile**>(mb + 0x74)) {
+        if (!IsBadReadPtr(mapTile, 0x40)) {
+            *reinterpret_cast<float*>(mb + 0x110) = TileNum(mapTile, kTileValue_x);
+            *reinterpret_cast<float*>(mb + 0x114) = TileNum(mapTile, kTileValue_y);
+        }
+    }
+    constexpr UInt32 kTileID_WorldMarker = 0x16;
     F3A_INFO("ClickMapMarkerTile: %p vis=%d", marker, (int)TileVisible(marker));
-    menu->HandleClick(kTileID_LocationMarker, marker);
+    menu->HandleClick(kTileID_WorldMarker, marker);
     return true;
+}
+
+// Click the keyboard-highlighted row of a Data-page list, with the list's own
+// selection ([menu+listOff]+0x10, the tile MapMenu::HandleClick reads it by)
+// set to it first.
+bool ClickDataListRow(const char* listName, UInt32 listOff, UInt32 clickId)
+{
+    Tile* row = FindKeyboardSelectedTile(nullptr);
+    if (!row) return false;
+    bool inList = false;
+    for (Tile* p = row; p && !inList; p = p->parent) inList = TileNameHas(p, listName);
+    if (!inList) return false;
+    Menu* menu = FindMenuByType(kMenuType_Map);
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    if (!mb || IsBadReadPtr(mb, listOff + 0x14)) return false;
+    *reinterpret_cast<Tile**>(mb + listOff + 0x10) = row;
+    F3A_INFO("ClickDataListRow: %s row %p, click 0x%X", listName, row, clickId);
+    menu->HandleClick(clickId, row);
+    return true;
+}
+
+bool TrackSelectedQuest() { return ClickDataListRow("MM_QuestsList", 0x120, 0x13); }
+bool OpenSelectedNote()   { return ClickDataListRow("MM_NotesList", 0x150, 0x14); }
+
+std::string GetDataPageText()
+{
+    Tile* m = FindVisibleMenuTile(kMenuType_Map);
+    if (!m) return {};
+    Tile* t = FindChildByName(m, "MM_DataText", 8);
+    if (!t || !TileVisible(t)) return {};
+    for (UInt32 i = 0; i < t->values.size; ++i) {          // faded out = not shown
+        Tile::Value* v = t->values.data[i];
+        if (v && v->id == kTileValue_alpha && v->num <= 0.0f) return {};
+    }
+    const char* s = TileStringTrait(t);
+    return s && *s ? GameStrToUtf8(s) : std::string();
+}
+
+int MapMenuTab()
+{
+    Menu* menu = FindMenuByType(kMenuType_Map);
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    if (!mb || IsBadReadPtr(mb, 0x74)) return -1;
+    int tab = *reinterpret_cast<int*>(mb + 0x70);
+    return (tab >= kMapTabLocal && tab <= kMapTabRadio) ? tab : -1;
 }
 
 namespace {
@@ -6469,6 +6591,21 @@ Tile* FindMenuTileAny(UInt32 menuType)
 // holds them back to front, and read in list order the quest "Kroki dziecka"
 // came out as "AKCEIZD IKORK". A space goes wherever a blank tile, a new line
 // or a gap wider than a letter separates them.
+// A tile faded out: its alpha trait is there and 0 (the quest reminder's
+// letters stay in the tree after a popup, visible flag and alpha at 0).
+bool TileFadedOut(const Tile* t)
+{
+    if (!t) return false;
+    for (UInt32 i = 0; i < t->values.size; ++i) {
+        Tile::Value* v = t->values.data[i];
+        if (v && v->id == kTileValue_alpha) return v->num <= 0.0f;
+    }
+    return false;
+}
+
+// The children's strings - only those on screen: an old popup's text stays in
+// the tiles, hidden, and was read again after every menu ("Dodano zadanie..."
+// four times for one quest).
 std::string JoinChildStrings(Tile* parent, const char* sep, bool letters)
 {
     std::string out;
@@ -6481,6 +6618,7 @@ std::string JoinChildStrings(Tile* parent, const char* sep, bool letters)
         Tile::ChildNode* cn = node->item;
         node = node->next;
         if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+        if (TileHiddenExplicitly(cn->child) || TileFadedOut(cn->child)) continue;
         const char* s = TileStringTrait(cn->child);
         if (!s || !*s) continue;
         std::string part = GameStrToUtf8(s);

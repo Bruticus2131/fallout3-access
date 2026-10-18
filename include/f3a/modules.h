@@ -15,7 +15,9 @@ namespace barter   { void Init(); void Shutdown(); }
 namespace lockpick { void Init(); void Shutdown(); }
 namespace vats     { void Init(); void Shutdown(); }
 namespace container{ void Init(); void Shutdown(); }
-namespace message  { void Init(); void Shutdown(); }
+namespace message  { void Init(); void Shutdown();
+                     // Has the open message box's text been said yet?
+                     bool Announced(); }
 namespace nav      { void Init(); void Shutdown(); void Tick(float dt); }
 namespace worldscan{ void Init(); void Shutdown(); void Tick(float dt); void ResetSession();
                      // Let go of every key/button the module holds (F12 off).

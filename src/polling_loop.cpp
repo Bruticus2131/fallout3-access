@@ -71,6 +71,21 @@ constexpr int kPostLoadCooldownTicks = 40;
 // system_ready (which is just "did we see anything yet") and is used by
 // hotkeys and the dispatch filter to behave correctly per state.
 bool g_in_main_menu = false;
+// A save was loaded or a game started (FOSE's LoadGame/NewGame), consumed when
+// the Loading menu closes - a door's loading screen has none. Meanwhile the
+// HUD still shows the OLD game's popups: "Dodano zadanie..." read then was a
+// quest of the game being left, not of the one being loaded.
+std::atomic<bool> g_game_load_pending{ false };
+std::atomic<DWORD> g_game_load_at{ 0 };
+// Should a load ever end without a Loading menu we see close, the readers must
+// not stay silent for good: a minute at most.
+bool LoadPending()
+{
+    if (!g_game_load_pending.load()) return false;
+    if (GetTickCount() - g_game_load_at.load() < 60000) return true;
+    g_game_load_pending.store(false);
+    return false;
+}
 bool g_in_gameplay  = false;
 // "Some menu is up" — ANY menu, including ones this mod has no handler for.
 //
@@ -241,6 +256,15 @@ void PollActiveTile()
     // The level-up screen too: its module reads the row with its value and
     // description, and this reader would say the row a second time.
     if (menu::ActiveMenu() == menu::Id::LevelUp) return;
+    // The Pip-Boy's pages: the Pip-Boy module reads the row (the arrows' highlight
+    // and the mouse's), so this reader would say it a second time.
+    {
+        auto am = menu::ActiveMenu();
+        // (The main menu is a MapMenu too: that one stays with this reader.)
+        if (am == menu::Id::Inventory || am == menu::Id::Stats ||
+            (am == menu::Id::Map && !g_in_main_menu))
+            return;
+    }
 
     InterfaceManager* ifm = fose_rt::IFM();
     if (!ifm) return;
@@ -427,7 +451,10 @@ bool HintShouldSpeak(const std::string& raw)
 
 void PollHudMessages()
 {
-    if (!g_system_ready || !IsGameplayActive()) { g_hud_msg.clear(); return; }
+    if (!g_system_ready || !IsGameplayActive() || LoadPending()) {
+        g_hud_msg.clear();
+        return;
+    }
     menu::Id m = menu::ActiveMenu();
     if (m != menu::Id::None && m != menu::Id::HUDMain) return;   // free gameplay only
     std::string msg = game::GetHudMessage();
@@ -469,9 +496,6 @@ std::vector<HudSaid> g_hud_said;
 // second.
 std::atomic<DWORD> g_voice_quiet_at{ 0 };
 
-// A save was loaded or a game started (FOSE's LoadGame/NewGame), consumed when
-// the Loading menu closes - a door's loading screen has none.
-std::atomic<bool> g_game_load_pending{ false };
 
 // The game's thread runs our work (MainThreadWork) only when it dispatches a
 // window message, and with the player's hands off nothing is sent: the SPECIAL
@@ -566,7 +590,8 @@ DWORD       g_qr_last_objective_at = 0;
 
 void PollQuestReminder()
 {
-    if (!g_system_ready || !IsGameplayActive() || g_postload_cooldown > 0) {
+    if (!g_system_ready || !IsGameplayActive() || g_postload_cooldown > 0 ||
+        LoadPending()) {
         g_qr_head_seen.clear(); g_qr_head_said.clear(); g_qr_head_stable = 0;
         g_qr_stage_seen.clear(); g_qr_stage_said.clear(); g_qr_stage_stable = 0;
         return;
@@ -654,6 +679,20 @@ void PollKeyboardSelection()
     if (menu::ActiveMenu() == menu::Id::TextEdit) return;   // TextEdit reader owns it
     if (menu::ActiveMenu() == menu::Id::Container) return;  // the container module owns it
     if (menu::ActiveMenu() == menu::Id::LevelUp) return;    // the level-up module owns it
+    // A message box: its text first (the message module says it, then the
+    // button the selection is on). Read now, the button cut the question off -
+    // "Tak" with no idea what the question was.
+    const bool msgWaiting = menu::ActiveMenu() == menu::Id::Message &&
+                            !modules::message::Announced();
+    {
+        // The Pip-Boy's pages: the Pip-Boy module reads the row (this
+        // highlight and the mouse's) and adds what it knows (a quest tracked
+        // or not); two readers said every row twice.
+        auto am = menu::ActiveMenu();
+        if (am == menu::Id::Inventory || am == menu::Id::Stats ||
+            (am == menu::Id::Map && !g_in_main_menu))
+            return;
+    }
 
     auto sel = game::GetKeyboardSelection();
     if (!sel || (sel->label.empty() && sel->value.empty())) {
@@ -689,7 +728,7 @@ void PollKeyboardSelection()
     g_last_kbd_label     = sel->label;
     g_last_kbd_value     = sel->value;
     g_last_kbd_container = sel->container;
-    if (utterance.empty()) return;
+    if (utterance.empty() || msgWaiting) return;
 
     // Avoid doubling with what the mouse poller just said.
     if (utterance == g_last_tile_name) return;
@@ -720,7 +759,10 @@ bool        g_quest_seen = false;
 
 void PollQuestChange()
 {
-    if (!IsGameplayActive() || g_postload_cooldown > 0) { g_quest_seen = false; return; }
+    if (!IsGameplayActive() || g_postload_cooldown > 0 || LoadPending()) {
+        g_quest_seen = false;
+        return;
+    }
     auto m = menu::ActiveMenu();
     if (m != menu::Id::None && m != menu::Id::HUDMain) return;  // menu up: hold
     const void* q = game::GetTrackedQuestPtr();
@@ -1321,6 +1363,7 @@ std::atomic<bool> g_engine_aim_want{ false };
 std::atomic<bool> g_drop_pending{ false };
 // Track the quest highlighted in the Pip-Boy (clicks its row; main thread only).
 std::atomic<bool> g_track_quest_pending{ false };
+std::atomic<bool> g_open_note_pending{ false };
 // Press whatever row the keyboard highlight is on, in any menu. The game's
 // controls page only enters its "press a new key" mode on a MOUSE CLICK, so
 // without this a blind player simply cannot rebind anything.
@@ -1389,6 +1432,31 @@ void ClipToGameWindow(bool on)
 // value has held still for a moment. The level-up banner is the game's own
 // text, read off the meter while it shows. The baseline is taken silently
 // after every load, the same way the SPECIAL poller does it.
+// XP gained and not yet said. "+10 PD" used to be spoken at once as a menu
+// line, and was dropped whenever something weightier was being said - an NPC's
+// line after a speech check, a hostile in combat - or when the same "+10 PD"
+// had been said in the last two seconds (two kills): heard only sometimes.
+std::atomic<int>   g_xp_gain{ 0 };
+std::atomic<DWORD> g_xp_gain_at{ 0 };
+
+// Poll thread: say the gained XP once the voice is free (gains made meanwhile
+// are added up), or after four seconds whatever is being said - queued
+// behind it, never dropped.
+void SpeakXpGain()
+{
+    if (g_xp_gain.load() <= 0) return;
+    bool busy = tolk::IsSpeaking();
+    if (busy && GetTickCount() - g_xp_gain_at.load() < 4000) return;
+    int gain = g_xp_gain.exchange(0);
+    if (gain <= 0) return;
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), strings::T("+%d PD", "+%d XP"), gain);
+    // Nothing to cut off when the voice is free: an interrupting line is never
+    // dropped as a repeat. Busy: queued after the current line, at a priority
+    // nothing in flight outranks.
+    tolk::Speak(buf, busy ? tolk::Priority::System : tolk::Priority::Ui, !busy);
+}
+
 void PollXpChange()
 {
     static int   s_settle  = 0;
@@ -1412,7 +1480,8 @@ void PollXpChange()
     if (!lvl.empty() && !s_lvl_on && now - s_lvl_said > 5000) {
         s_lvl_said = now;
         F3A_INFO("Level up banner: %s", lvl.c_str());
-        tolk::Speak(lvl + "!", tolk::Priority::Ui, false);
+        // Queued, never dropped behind a weightier line in flight.
+        tolk::Speak(lvl + "!", tolk::Priority::System, false);
     }
     s_lvl_on = !lvl.empty();
 
@@ -1430,9 +1499,8 @@ void PollXpChange()
     int gain = xp - s_xp;
     s_xp = xp; s_pending = -1;
     F3A_INFO("XP +%d (now %d)", gain, xp);
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), strings::T("+%d PD", "+%d XP"), gain);
-    tolk::Speak(buf, tolk::Priority::Ui, false);
+    // Said by the poll thread (SpeakXpGain) when the voice is free.
+    if (g_xp_gain.fetch_add(gain) == 0) g_xp_gain_at.store(now);
 }
 
 void MainThreadWork()
@@ -1607,10 +1675,15 @@ void MainThreadWork()
         }
     }
     if (g_track_quest_pending.exchange(false)) {
-        if (game::ClickSelectedRowIn("MM_QuestsList"))
+        if (game::TrackSelectedQuest())
             tolk::Speak(strings::T("Śledzę to zadanie.", "Tracking this quest."), tolk::Priority::Ui, true);
         else
             tolk::Speak(strings::T("Najpierw wybierz zadanie na liście.", "First select a quest in the list."),
+                        tolk::Priority::System, true);
+    }
+    if (g_open_note_pending.exchange(false)) {
+        if (!game::OpenSelectedNote())
+            tolk::Speak(strings::T("Najpierw wybierz notatkę na liście.", "First select a note in the list."),
                         tolk::Priority::System, true);
     }
     if (g_drop_pending.exchange(false)) {
@@ -1987,6 +2060,7 @@ void Tick(float dt)
     hotkeys::Poll();
 
     PumpGameThread();
+    if (config::IsEnabled()) SpeakXpGain();
     if (config::IsEnabled()) {
         modules::autowalk::Tick(dt);
         modules::guide::Tick(dt);
@@ -2168,6 +2242,7 @@ bool QuantityState(int* amount, int* maximum)
 }
 
 void RequestTrackQuest() { g_track_quest_pending.store(true); }
+void RequestOpenNote()   { g_open_note_pending.store(true); }
 
 void RequestPressRow() { g_press_row_pending.store(true); }
 
@@ -2988,7 +3063,11 @@ void NoteVoiceLine(size_t chars)
 
 DWORD VoiceQuietAt() { return g_voice_quiet_at.load(); }
 
-void NoteGameLoad() { g_game_load_pending.store(true); }
+void NoteGameLoad()
+{
+    g_game_load_at.store(GetTickCount());
+    g_game_load_pending.store(true);
+}
 
 void WatchQuestStages(const std::vector<uint32_t>& ids)
 {

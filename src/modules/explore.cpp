@@ -7,6 +7,7 @@
 #include "f3a/hotkeys.h"
 #include "f3a/config.h"
 #include "f3a/logger.h"
+#include "f3a/itemvalue.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +37,7 @@ namespace {
 // discovered.
 
 constexpr float kTickEvery   = 1.2f;    // s between scans while walking
+constexpr DWORD kSayEvery    = 8000;    // ms at least between two "on the way" lines
 constexpr float kPlaceReach  = 2500.0f; // undiscovered places this near count on a walk
 constexpr float kSweepPlaces = 4000.0f; // ...and this near for a sweep
 constexpr int   kScanMax     = 3000;
@@ -80,12 +82,23 @@ bool Pickable(uint8_t t)
     }
 }
 
+// The cheap kinds (armour, clothing, ingredient, misc, aid): a vault is full
+// of coffee mugs and tin plates, so only the ones worth 10 caps or with a
+// script (bobbleheads) count (itemvalue, items.dat). Weapons, ammo, keys,
+// books and notes always do.
+bool CheapKind(uint8_t t)
+{
+    return t == 0x18 || t == 0x1A || t == 0x1D || t == 0x1F || t == 0x2F;
+}
+
 bool IsFind(const game::WorldEntity& e)
 {
     using K = game::WorldEntity::Kind;
     switch (e.kind) {
     case K::Item:
-    case K::Note:      return Pickable(e.form_type);
+    case K::Note:
+        if (!Pickable(e.form_type)) return false;
+        return !CheapKind(e.form_type) || itemvalue::Worthwhile(e.base_id);
     case K::Container: return e.items != 0;              // 1 = full, -1 = cannot tell
     case K::Actor:     return e.dead && e.items != 0;
     case K::Location:  return !e.discovered;
@@ -255,6 +268,10 @@ void Tick(float dt)
     g_timer += dt;
     if (g_timer < kTickEvery) return;
     g_timer = 0.0f;
+    // Not one line after another: what is found meanwhile is said with the
+    // next line (or not at all, if it is behind by then).
+    static DWORD s_said_at = 0;
+    if (s_said_at && GetTickCount() - s_said_at < kSayEvery) return;
 
     auto finds = CollectFinds((float)config::Get().explore_radius, kPlaceReach);
     std::vector<const game::WorldEntity*> fresh;
@@ -275,6 +292,7 @@ void Tick(float dt)
     }
     F3A_INFO("Explore: on the way - '%s' and %u more", e.name.c_str(),
              (unsigned)(fresh.size() - 1));
+    s_said_at = GetTickCount();
     tolk::Speak(say, tolk::Priority::Background, false);
 }
 

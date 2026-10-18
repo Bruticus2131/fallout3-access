@@ -250,6 +250,7 @@ cmake --build build --config Release
   (likewise for Anchorage.esm, BrokenSteel.esm, PointLookout.esm)
   python tools/generate_world_doors.py --data "<FO3>/Data"
   python tools/generate_quest_objects.py --data "<FO3>/Data"
+  python tools/generate_item_values.py --data "<FO3>/Data"
   ```
   (`TestQAWorld.dat`, a developer test worldspace, is not shipped.)
 

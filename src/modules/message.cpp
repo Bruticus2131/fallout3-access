@@ -36,6 +36,10 @@ void TryAnnounce()
     g_spoken = true;
     // Same control markers as the HUD hints — expand them to real key names.
     tolk::Speak(game::ExpandControlTokens(text), tolk::Priority::System, true);
+    // Then the button the selection is on, after the message (the keyboard
+    // reader holds it back until now).
+    if (auto sel = game::GetKeyboardSelectionText())
+        if (!sel->empty()) tolk::Speak(*sel, tolk::Priority::System, false);
 }
 
 void OnOpen()
@@ -138,6 +142,8 @@ void OnTextEditTick(float)
 }
 
 } // namespace
+
+bool Announced() { return g_spoken; }
 
 void Init()
 {

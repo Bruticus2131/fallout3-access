@@ -7,6 +7,7 @@
 #include "f3a/logger.h"
 
 #include <cstdio>
+#include <optional>
 #include <string>
 
 namespace f3a::modules::pipboy {
@@ -15,20 +16,59 @@ namespace {
 std::string g_last_selection;
 std::string g_last_tab;
 std::string g_last_subtab;
+std::string g_last_kbd;      // the keyboard highlight's row, as last seen
+std::string g_last_act;      // the mouse's (activeTile) row, as last seen
+
+// The row the player is on. The arrows move the list's highlight box, and in
+// the Pip-Boy they often leave activeTile empty - or on the row the hidden
+// mouse pointer happens to rest on - so reading activeTile alone went silent
+// "sometimes" (on the item categories especially). Whichever of the two moved
+// since the last look wins; `force` takes the keyboard's row, else the mouse's.
+std::optional<std::string> CurrentRow(bool force)
+{
+    auto kbd = game::GetKeyboardSelectionText();
+    auto act = game::GetActiveMenuSelectionText();
+    std::string k = kbd ? *kbd : std::string();
+    std::string a = act ? *act : std::string();
+    bool kMoved = !k.empty() && k != g_last_kbd;
+    bool aMoved = !a.empty() && a != g_last_act;
+    g_last_kbd = k;
+    g_last_act = a;
+    if (force) {
+        if (!k.empty()) return k;
+        if (!a.empty()) return a;
+        return std::nullopt;
+    }
+    if (kMoved) return k;
+    if (aMoved) return a;
+    return std::nullopt;
+}
+
+// A quest in the Data page's quest list: whether it is the tracked one, as a
+// screen reader says a check box's state.
+std::string QuestState(const std::string& row)
+{
+    if (!menu::IsOpen(menu::Id::Map)) return {};
+    std::string tracked = game::GetTrackedQuestName();
+    if (!tracked.empty() && row == tracked) return strings::T(", śledzone", ", tracked");
+    for (const auto& n : game::RunningQuestNames())
+        if (n == row) return strings::T(", nieśledzone", ", not tracked");
+    return {};
+}
 
 // mute = work out what WOULD be said and remember it, without saying it. Used
 // right after a page switch so the page's first row does not get read on top
 // of the page name, while still counting as "already announced" so the next
 // real move of the selection speaks normally.
-void AnnounceSelection(bool force, bool mute = false)
+void AnnounceSelection(bool force, bool mute = false, bool interrupt = true)
 {
     auto item = game::GetSelectedInventoryItem();
     if (!item) {
-        auto text = game::GetActiveMenuSelectionText();
+        auto text = CurrentRow(force);
         if (!text || text->empty()) return;
         if (!force && *text == g_last_selection) return;
         g_last_selection = *text;
-        if (!mute) tolk::Speak(*text, tolk::Priority::Ui, true);
+        if (!mute) tolk::Speak(*text + QuestState(*text), tolk::Priority::Ui, interrupt);
         return;
     }
 
@@ -80,10 +120,10 @@ bool AnnounceTabIfChanged()
 // A page has several tab strips at once (tailline + the KND/RAD/SKT view
 // switch), so on change we voice ONLY the parts that weren't active before —
 // e.g. switching the view says just "RAD", not "Status, RAD" again.
-void AnnounceSubTabIfChanged(bool queue_after_tab)
+bool AnnounceSubTabIfChanged(bool queue_after_tab)
 {
     std::string sub = game::GetActivePipBoySubTabName();
-    if (sub.empty() || sub == g_last_subtab) return;
+    if (sub.empty() || sub == g_last_subtab) return false;
 
     std::string fresh;
     size_t start = 0;
@@ -101,9 +141,10 @@ void AnnounceSubTabIfChanged(bool queue_after_tab)
         start = end + 2;
     }
     g_last_subtab = sub;
-    if (fresh.empty()) return;
+    if (fresh.empty()) return false;
     // Don't interrupt the page announcement when both change at once.
     tolk::Speak(fresh, tolk::Priority::Ui, !queue_after_tab);
+    return true;
 }
 
 // How many Pip-Boy pages are up right now. Switching page OPENS the new page
@@ -136,6 +177,8 @@ void OnOpen()
     g_last_selection.clear();
     g_last_tab.clear();
     g_last_subtab.clear();
+    g_last_kbd.clear();
+    g_last_act.clear();
     AnnounceTabIfChanged();
     AnnounceSubTabIfChanged(/*queue_after_tab=*/true);
     // On the Stats page read the vitals once: level, HP, AP, XP.
@@ -169,7 +212,12 @@ void OnTick(float)
         AnnounceSelection(/*force*/true, /*mute*/true);
         return;
     }
-    AnnounceSubTabIfChanged(false);
+    // A new tab (Status, General, Chems, Weapons...): its name, and the row
+    // it lands on after it - queued, so the name is not cut off by the row.
+    if (AnnounceSubTabIfChanged(false)) {
+        AnnounceSelection(/*force*/true, /*mute*/false, /*interrupt*/false);
+        return;
+    }
     AnnounceSelection(false);
 }
 

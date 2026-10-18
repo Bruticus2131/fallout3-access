@@ -89,6 +89,7 @@ struct WorldEntity {
     // not tell.
     int         items    = -1;
     uint8_t     form_type = 0;        // the base form's type (FOSE kFormType_*)
+    uint32_t    base_id  = 0;         // the base form's id (what it is, not which one)
     bool        discovered = true;    // places: visited (can fast travel there)
     bool        owned    = false;
     bool        locked   = false;
@@ -215,10 +216,15 @@ bool AdvanceTrackedQuestStage();
 // (Kind::Quest, name = quest name, position = marker). Lets the player browse
 // active quests and pick which to navigate to — instead of the game's
 // auto-selected "latest" objective (which DLCs hijack).
-std::vector<WorldEntity> GetActiveQuests();
+// trackedOnly: just the quest the player tracks (the scanner's quest
+// category); empty when none is tracked.
+std::vector<WorldEntity> GetActiveQuests(bool trackedOnly = false);
+// The names of the running quests (as the Pip-Boy's quest list shows them).
+std::vector<std::string> RunningQuestNames();
 
 // Quest objects near the player (questobjs.dat): buttons, terminals, doors,
-// items, trigger spots and free seats that still move a RUNNING quest on - the
+// items, trigger spots and free seats that still move the TRACKED quest on
+// (none when no quest is tracked) - the
 // stage their script sets not reached yet, or the objective they are the
 // target of on the list and not done. Named after the thing and the quest.
 // Seats an actor is sitting at are left out. Nearest first. Plain data reads.
@@ -915,6 +921,25 @@ bool ClickMapTravelButton();
 // MapMarker::tile rather than a name — see the note there about code pages.
 // MUST run on the main thread.
 bool ClickMapMarkerTile(const void* tile);
+
+// The Pip-Boy Data page's open tab (MapMenu+0x70, as MapMenu::HandleClick
+// 0x00667730 reads it): 0x1C local map, 0x1D world map, 0x1E quests, 0x1F
+// notes, 0x20 radio. -1 when the page is not open. Plain data read.
+constexpr int kMapTabLocal = 0x1C, kMapTabWorld = 0x1D, kMapTabQuests = 0x1E,
+              kMapTabNotes = 0x1F, kMapTabRadio = 0x20;
+int MapMenuTab();
+
+// The Data page's quest list: make the highlighted quest the tracked one, as a
+// click does. MapMenu::HandleClick's quest case (id 0x13) takes the quest from
+// the list's own selection ([menu+0x120]+0x10), which the arrows do not move -
+// so it is set to the highlighted row first. MAIN THREAD.
+bool TrackSelectedQuest();
+// The Data page's notes: open (a note) or play (a holotape) the highlighted
+// one, as a click does (id 0x14). MAIN THREAD.
+bool OpenSelectedNote();
+// The text the Data page shows for the open note (MM_DataText), empty when
+// none. Plain data read.
+std::string GetDataPageText();
 
 // Full text of an open Message popup (title + body + button labels), e.g.
 // an OK notification or the character-creation gender prompt. Empty if no
