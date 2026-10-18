@@ -9,7 +9,7 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.5.4"
+#define AppVersion   "0.5.5"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
 ; Nexus Mods SSO application id ("slug"), issued by Nexus staff. While it is
@@ -367,6 +367,17 @@ end;
 // Sign in through Nexus Mods SSO: the helper script talks to the SSO server,
 // opens the authorise page in the browser and writes the key it receives to a
 // temporary file. Returns the key, or '' when the sign-in did not complete.
+// The 64-bit PowerShell on 64-bit Windows. Plain 'powershell.exe' from this
+// 32-bit installer is redirected to the 32-bit one, which sees "Program Files
+// (x86)" as Program Files and only the 32-bit half of the registry - and so
+// never found a 64-bit WinRAR to unpack FOSE with.
+function PowerShellExe(): String;
+begin
+  Result := ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(Result) then
+    Result := 'powershell.exe';
+end;
+
 function NexusSsoLogin(): String;
 var
   Params, KeyFile, LogFile: String;
@@ -383,7 +394,7 @@ begin
             ' -NexusSsoLogin -NexusAppSlug "{#NexusAppSlug}" -AppVersion "{#AppVersion}"' +
             ' -KeyOutFile "' + KeyFile + '" -LogPath "' + LogFile + '"' +
             ' -Language "' + ActiveLanguage() + '"';
-  if not Exec('powershell.exe', Params, '', SW_SHOWMINNOACTIVE, ewWaitUntilTerminated, ResultCode) then
+  if not Exec(PowerShellExe(), Params, '', SW_SHOWMINNOACTIVE, ewWaitUntilTerminated, ResultCode) then
     Exit;
   if (ResultCode = 0) and LoadStringFromFile(KeyFile, Key) then
     Result := Trim(String(Key));
@@ -483,7 +494,7 @@ begin
 
   WizardForm.StatusLabel.Caption := CustomMessage('Working');
 
-  if not Exec('powershell.exe', Params, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+  if not Exec(PowerShellExe(), Params, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
   begin
     MsgBox(CustomMessage('NoPowerShell'), mbError, MB_OK);
     Exit;

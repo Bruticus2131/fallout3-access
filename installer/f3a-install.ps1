@@ -320,47 +320,80 @@ function Test-NexusKey {
 
 # --- unpacking ---------------------------------------------------------------
 
-# Find 7-Zip wherever it is: the two fixed Program Files paths miss a portable
+# Both Program Files folders. A 32-bit PowerShell - which is what a 32-bit
+# installer starts - reads $env:ProgramFiles as "Program Files (x86)", so the
+# real one comes from ProgramW6432 (absent on 32-bit Windows).
+function Get-ProgramFilesRoots {
+    return @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+           Where-Object { $_ } | Select-Object -Unique
+}
+
+# Registry values from BOTH views of a key. A 32-bit process is shown only the
+# 32-bit half of HKLM\SOFTWARE, and 64-bit WinRAR and 7-Zip record themselves
+# in the other half - so a 32-bit run never found a 64-bit WinRAR at all.
+function Get-RegValues([string] $Hive, [string] $SubKey, [string[]] $Names) {
+    $out = @()
+    $base = if ($Hive -eq "HKCU") { [Microsoft.Win32.RegistryHive]::CurrentUser }
+            else { [Microsoft.Win32.RegistryHive]::LocalMachine }
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64,
+                        [Microsoft.Win32.RegistryView]::Registry32)) {
+        try {
+            $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey($base, $view)
+            $key = $root.OpenSubKey($SubKey)
+            if ($key) {
+                foreach ($n in $Names) {
+                    $v = $key.GetValue($n)
+                    if ($v) { $out += [string]$v }
+                }
+                $key.Close()
+            }
+            $root.Close()
+        } catch { }
+    }
+    return $out
+}
+
+# Find 7-Zip wherever it is: the fixed Program Files paths miss a portable
 # copy, a per-user install, or anything on PATH, and the registry is where the
 # installer records itself.
 function Find-SevenZip {
-    $candidates = @(
-        "$env:ProgramFiles\7-Zip\7z.exe",
-        "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
-        "$env:LOCALAPPDATA\Programs\7-Zip\7z.exe"
-    )
-    foreach ($key in @("HKLM:\SOFTWARE\7-Zip", "HKLM:\SOFTWARE\WOW6432Node\7-Zip",
-                       "HKCU:\SOFTWARE\7-Zip")) {
-        try {
-            $p = (Get-ItemProperty -Path $key -ErrorAction Stop).Path
-            if ($p) { $candidates += (Join-Path $p "7z.exe") }
-        } catch { }
+    $candidates = @()
+    foreach ($root in Get-ProgramFilesRoots) { $candidates += (Join-Path $root "7-Zip\7z.exe") }
+    $candidates += "$env:LOCALAPPDATA\Programs\7-Zip\7z.exe"
+    foreach ($hive in @("HKLM", "HKCU")) {
+        foreach ($p in (Get-RegValues $hive "SOFTWARE\7-Zip" @("Path", "Path64", "Path32"))) {
+            $candidates += (Join-Path $p "7z.exe")
+        }
+    }
+    # The file manager's App Paths entry: 7z.exe sits next to it.
+    foreach ($p in (Get-RegValues "HKLM" "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\7zFM.exe" @(""))) {
+        $candidates += (Join-Path (Split-Path $p.Trim('"') -Parent) "7z.exe")
     }
     $onPath = Get-Command 7z.exe -ErrorAction SilentlyContinue
     if ($onPath) { $candidates += $onPath.Source }
-    return ($candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1)
+    return ($candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1)
 }
 
 # WinRAR opens .7z too, and plenty of people have it instead of 7-Zip. Without
 # this the installer simply stopped dead on anyone who had one but not the other
 # - which is exactly what happened to a tester.
 function Find-WinRar {
-    $candidates = @(
-        "$env:ProgramFiles\WinRAR\WinRAR.exe",
-        "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe"
-    )
-    foreach ($key in @("HKLM:\SOFTWARE\WinRAR", "HKLM:\SOFTWARE\WOW6432Node\WinRAR",
-                       "HKCU:\SOFTWARE\WinRAR")) {
-        foreach ($name in @("exe64", "exe32")) {
-            try {
-                $p = (Get-ItemProperty -Path $key -ErrorAction Stop).$name
-                if ($p) { $candidates += $p }
-            } catch { }
-        }
+    $candidates = @()
+    foreach ($root in Get-ProgramFilesRoots) { $candidates += (Join-Path $root "WinRAR\WinRAR.exe") }
+    foreach ($hive in @("HKLM", "HKCU")) {
+        $candidates += (Get-RegValues $hive "SOFTWARE\WinRAR" @("exe64", "exe32"))
+    }
+    # WinRAR installed somewhere else: its App Paths entry and its uninstall
+    # entry still say where.
+    foreach ($p in (Get-RegValues "HKLM" "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WinRAR.exe" @(""))) {
+        $candidates += $p.Trim('"')
+    }
+    foreach ($p in (Get-RegValues "HKLM" "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\WinRAR archiver" @("InstallLocation"))) {
+        $candidates += (Join-Path $p "WinRAR.exe")
     }
     $onPath = Get-Command WinRAR.exe -ErrorAction SilentlyContinue
     if ($onPath) { $candidates += $onPath.Source }
-    return ($candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1)
+    return ($candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1)
 }
 
 function Expand-Any([string] $Archive, [string] $Destination) {
