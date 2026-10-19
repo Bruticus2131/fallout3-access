@@ -8,7 +8,7 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 
 **Working today**
 
-- **Menu reading with full keyboard navigation** — main menu, pause, save & load,
+- **Menu reading with full keyboard navigation** — main menu, pause, save & load, the character creation.
   settings (sliders read their value, toggles and steppers read their choice),
   confirmation dialogs (question first, then the focused button).
 - **Pip-Boy** — stats, items, data; quest list with objectives.
@@ -46,7 +46,6 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 
 **Rough edges / in progress**
 
-- Character creation (the RaceSex menu) is not yet guided.
 - DLC support is built from the game data and tested offline; in-game reports
   are welcome.
 - Auto-walk can still get wedged on difficult terrain; it tells you when it
@@ -71,9 +70,9 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
    - `Tolk.dll`, `nvdaControllerClient32.dll`, `dolapi32.dll`, `SAAPI32.dll` → land next to `Fallout3.exe`,
    - `Data\FOSE\Plugins\fallout3_access.dll` and `Fallout3Access.ini` → the plugin itself,
    - `Data\FOSE\Plugins\Fallout3Access\` → the walk graphs and the door table (`*.dat`, ready made for Fallout 3 and all five DLCs) and the audio descriptions. **Copy all of it**: without this folder, long walks and walks to other places stay off. Nothing has to be generated and no Python is needed.
-5. **Start the game with `fose_loader.exe`** (not `Fallout3.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
+5. **Start the game with `fallout3.exe`** (not `fose_loader.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
 
-## Keyboard reference
+## Keyboard reference  
 
 The game is navigated with its own keys (arrows, Enter); the mod speaks what happens. All mod hotkeys below can be remapped in `Data\FOSE\Plugins\Fallout3Access.ini` (DirectInput scancodes).
 
