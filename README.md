@@ -8,7 +8,7 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 
 **Working today**
 
-- **Menu reading with full keyboard navigation** — main menu, pause, save & load, the character creation.
+- **Menu reading with full keyboard navigation** — main menu, pause, save & load, character creation,
   settings (sliders read their value, toggles and steppers read their choice),
   confirmation dialogs (question first, then the focused button).
 - **Pip-Boy** — every tab named; after an item's name its card is read as the
