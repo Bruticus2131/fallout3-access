@@ -3,70 +3,52 @@
 #include "f3a/game_access.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/strings.h"
-#include "f3a/config.h"
 #include "f3a/logger.h"
 
-#include <cstdio>
 #include <string>
 
 namespace f3a::modules::dialog {
 namespace {
 
-int         g_last_highlight = -2;
-std::string g_last_line;
-
-void AnnounceCurrentLine()
-{
-    std::string line = game::GetCurrentDialogLine();
-    std::string who  = game::GetCurrentDialogSpeaker();
-    if (line.empty() || line == g_last_line) return;
-    g_last_line = line;
-    tolk::Speak(
-        strings::RenderArgs(strings::Key::NpcSpeechFmt,
-                            who.empty() ? "?" : who.c_str(),
-                            line.c_str()),
-        tolk::Priority::Dialog, true);
-}
-
-void AnnounceHighlight()
-{
-    int idx = game::GetHighlightedDialogOption();
-    if (idx == g_last_highlight) return;
-    g_last_highlight = idx;
-
-    // Empty also means "not read": GetDialogOptions is not implemented yet
-    // (the generic menu readers speak the topics), and "no options" on every
-    // conversation was simply untrue.
-    auto opts = game::GetDialogOptions();
-    if (opts.empty()) return;
-    if (idx < 0 || idx >= (int)opts.size()) return;
-
-    const auto& o = opts[idx];
-    char idx_buf[8]; std::snprintf(idx_buf, sizeof(idx_buf), "%d", o.index);
-    tolk::Speak(
-        strings::RenderArgs(strings::Key::DialogOptionFmt,
-                            idx_buf,
-                            o.text.c_str(),
-                            o.skill_req.c_str()),
-        tolk::Priority::Ui, true);
-}
+// A conversation, as FNV's mod has it: who it is with when it opens, and the
+// new speaker's name when someone else takes over (the Megaton sheriff and
+// his son, a group in the vault). The topics are read by the keyboard
+// selection reader with their place in the list and "already said"; the
+// NPC's line is voiced by the game, so it is not read over the voice - D
+// repeats it (world_scan's item-info key, see DialogLine).
+std::string g_speaker;      // the name last said
+bool        g_opened = false;
+bool        g_hint_said = false;   // once per session: what D does here
 
 void OnOpen()
 {
-    g_last_line.clear();
-    g_last_highlight = -2;
+    g_speaker.clear();
+    g_opened = false;
 }
 
 void OnClose()
 {
-    g_last_line.clear();
-    g_last_highlight = -2;
+    g_speaker.clear();
+    g_opened = false;
 }
 
 void OnTick(float)
 {
-    AnnounceCurrentLine();
-    AnnounceHighlight();
+    std::string who = game::GetCurrentDialogSpeaker();
+    if (who.empty() || who == g_speaker) return;
+    g_speaker = who;
+    if (!g_opened) {
+        g_opened = true;
+        std::string line = strings::T("Rozmowa z ", "Talking to ") + who;
+        if (!g_hint_said) {
+            g_hint_said = true;
+            line += strings::T(". D powtarza ostatnią kwestię.", ". D repeats the last line.");
+        }
+        F3A_INFO("Dialog with '%s'", who.c_str());
+        tolk::Speak(line, tolk::Priority::Ui, true);
+        return;
+    }
+    tolk::Speak(who, tolk::Priority::Ui, false);   // someone else speaks now
 }
 
 } // namespace

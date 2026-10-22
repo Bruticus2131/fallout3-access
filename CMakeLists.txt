@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 #     issues when the game loads us.
 
 project(Fallout3Access
-    VERSION 0.5.5
+    VERSION 0.5.6
     DESCRIPTION "Fallout 3 accessibility mod (screen reader integration)"
     LANGUAGES CXX
 )
@@ -98,6 +98,9 @@ set(F3A_SOURCES
     src/modules/explore.cpp
     src/modules/audiodesc.cpp
     src/modules/levelup.cpp
+    src/modules/sleepwait.cpp
+    src/modules/repair.cpp
+    src/modules/devconsole.cpp
     src/modules/nav_assist.cpp
     src/modules/world_scan.cpp
     src/modules/autowalk.cpp
@@ -163,6 +166,7 @@ set_target_properties(Fallout3Access PROPERTIES
 
 if(GAME_PATH AND EXISTS "${GAME_PATH}/Fallout3.exe")
     set(PLUGIN_DIR "${GAME_PATH}/Data/FOSE/Plugins")
+    file(GLOB F3A_LANG_FILES "${CMAKE_SOURCE_DIR}/data/lang_*.txt")
     add_custom_target(deploy
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PLUGIN_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -180,6 +184,11 @@ if(GAME_PATH AND EXISTS "${GAME_PATH}/Fallout3.exe")
                 "${PLUGIN_DIR}/Fallout3Access"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CMAKE_SOURCE_DIR}/data/audiodesc"
+                "${PLUGIN_DIR}/Fallout3Access"
+        # The translation files (Language = ru: lang_ru.txt), read from the
+        # same folder; without them that language silently speaks English.
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${F3A_LANG_FILES}
                 "${PLUGIN_DIR}/Fallout3Access"
         DEPENDS Fallout3Access
         COMMENT "Deploying fallout3_access.dll to ${PLUGIN_DIR}"

@@ -1,0 +1,1426 @@
+# Fallout 3 Access - Russian texts of the mod (Language = ru).
+# Pairs of lines: "en:" the English text the mod speaks, "ru:" what to say instead.
+# Keep %s, %d and the other % codes in the same order; the quotes keep spaces at the ends.
+# A text missing here is spoken in English, and logged as "no translation for".
+
+en: "Door"
+ru: "Дверь"
+
+en: "Container"
+ru: "Контейнер"
+
+en: ", to "
+ru: ", ведёт в "
+
+en: "Door to "
+ru: "Дверь в "
+
+en: ", empty"
+ru: ", пусто"
+
+en: "Quest spot"
+ru: "Место задания"
+
+en: "Seat"
+ru: "Сиденье"
+
+en: "Quest object"
+ru: "Объект задания"
+
+en: ", free seat"
+ru: ", свободное место"
+
+en: "Target"
+ru: "Цель"
+
+en: ", undiscovered"
+ru: ", не открыто"
+
+en: "Undiscovered place"
+ru: "Неоткрытое место"
+
+en: " (done)"
+ru: " (выполнено)"
+
+en: "object"
+ru: "объект"
+
+en: "door"
+ru: "дверь"
+
+en: "container"
+ru: "контейнер"
+
+en: "character"
+ru: "персонаж"
+
+en: ", price "
+ru: ", цена "
+
+en: ", equipped"
+ru: ", надето"
+
+en: ", in the deal"
+ru: ", в сделке"
+
+en: ", already said"
+ru: ", уже сказано"
+
+en: ", %d of %d"
+ru: ", %d из %d"
+
+en: "Stats"
+ru: "Статистика"
+
+en: "Items"
+ru: "Предметы"
+
+en: "Data"
+ru: "Данные"
+
+en: "%d percent"
+ru: "%d процентов"
+
+en: " crippled"
+ru: " покалечена"
+
+en: "rads "
+ru: "радиация "
+
+en: "rad resistance "
+ru: "сопротивление радиации "
+
+en: "No effects."
+ru: "Нет эффектов."
+
+en: "now: "
+ru: "сейчас: "
+
+en: "after repair: "
+ru: "после ремонта: "
+
+en: "gain "
+ru: "прирост "
+
+en: "left mouse button"
+ru: "левая кнопка мыши"
+
+en: "right mouse button"
+ru: "правая кнопка мыши"
+
+en: "middle mouse button"
+ru: "средняя кнопка мыши"
+
+en: "damage"
+ru: "урон"
+
+en: "damage resistance"
+ru: "сопротивление урону"
+
+en: "weight"
+ru: "вес"
+
+en: "value"
+ru: "стоимость"
+
+en: "condition"
+ru: "состояние"
+
+en: "ammo"
+ru: "боеприпасы"
+
+en: "effects"
+ru: "эффекты"
+
+en: "head"
+ru: "голова"
+
+en: "torso"
+ru: "торс"
+
+en: "left arm"
+ru: "левая рука"
+
+en: "right arm"
+ru: "правая рука"
+
+en: "left leg"
+ru: "левая нога"
+
+en: "right leg"
+ru: "правая нога"
+
+en: "Console unavailable."
+ru: "Консоль недоступна."
+
+en: "Starting the game through the console."
+ru: "Запускаю игру через консоль."
+
+en: "Message"
+ru: "Сообщение"
+
+en: "Inventory"
+ru: "Инвентарь"
+
+en: "Loading"
+ru: "Загрузка"
+
+en: "Dialogue"
+ru: "Диалог"
+
+en: "Sleep and wait"
+ru: "Сон и ожидание"
+
+en: "Main menu"
+ru: "Главное меню"
+
+en: "Lockpick"
+ru: "Взлом замка"
+
+en: "Quantity"
+ru: "Количество"
+
+en: "Map"
+ru: "Карта"
+
+en: "Note"
+ru: "Запись"
+
+en: "Level up"
+ru: "Новый уровень"
+
+en: "Repair"
+ru: "Ремонт"
+
+en: "Character creation"
+ru: "Создание персонажа"
+
+en: "Text edit"
+ru: "Ввод текста"
+
+en: "Barter"
+ru: "Торговля"
+
+en: "Surgery"
+ru: "Хирургия"
+
+en: "Hacking"
+ru: "Взлом терминала"
+
+en: "Repair services"
+ru: "Услуги ремонта"
+
+en: "Tutorial"
+ru: "Обучение"
+
+en: "S.P.E.C.I.A.L. book"
+ru: "Книга S.P.E.C.I.A.L."
+
+en: "Audio description on."
+ru: "Тифлокомментарий включён."
+
+en: "Audio description off."
+ru: "Тифлокомментарий выключен."
+
+en: "No description yet."
+ru: "Описания пока нет."
+
+en: "Film audio description on."
+ru: "Тифлокомментарий к роликам включён."
+
+en: "Film audio description off."
+ru: "Тифлокомментарий к роликам выключен."
+
+en: "requires a key"
+ru: "нужен ключ"
+
+en: "Auto-walk is not available on this game version. Set NativeWalk to 0 in the INI file to walk with keys."
+ru: "Автоходьба недоступна в этой версии игры. Чтобы ходить клавишами, установите NativeWalk = 0 в INI-файле."
+
+en: "Going round the locked door: "
+ru: "Обхожу запертую дверь: "
+
+en: "No direct way. Going round, "
+ru: "Прямого пути нет. Иду в обход, "
+
+en: "the handcart"
+ru: "дрезина"
+
+en: "the bunk on the boat"
+ru: "койка на корабле"
+
+en: "the metro console"
+ru: "пульт метро"
+
+en: "the transport"
+ru: "транспорт"
+
+en: "You're at the handcart. Activate it to ride towards: "
+ru: "Вы у дрезины. Активируйте её, чтобы поехать в сторону: "
+
+en: ". The first ride is with Wernher."
+ru: ". Первая поездка — вместе с Вернером."
+
+en: "You're at the bunk on the Duchess Gambit. Activate it to sail towards: "
+ru: "Вы у койки на корабле «Герцогиня Гамбит». Активируйте её, чтобы плыть в сторону: "
+
+en: ". The first trip needs a ticket from Tobar."
+ru: ". Для первой поездки нужен билет от Тобара."
+
+en: "You're at the metro console. Activate it to ride towards: "
+ru: "Вы у пульта метро. Активируйте его, чтобы поехать в сторону: "
+
+en: "You're at the transport towards: "
+ru: "Вы у транспорта в сторону: "
+
+en: ". Activate it."
+ru: ". Активируйте его."
+
+en: "Leading you to "
+ru: "Веду вас: "
+
+en: " towards: "
+ru: ", в сторону: "
+
+en: "Leading you to the entrance: "
+ru: "Веду вас ко входу: "
+
+en: "a doorway"
+ru: "проход"
+
+en: ", by road."
+ru: ", по дороге."
+
+en: "That entrance isn't here. Looking for another."
+ru: "Этого входа здесь нет. Ищу другой."
+
+en: "Can't find the entrance: "
+ru: "Не могу найти вход: "
+
+en: "The door is locked. Looking for another way."
+ru: "Дверь заперта. Ищу другой путь."
+
+en: "Locked door on the way: "
+ru: "Запертая дверь на пути: "
+
+en: "Opening the door."
+ru: "Открываю дверь."
+
+en: "The door didn't open: "
+ru: "Дверь не открылась: "
+
+en: "Terrain in the way — a wall or rock. Going round."
+ru: "Препятствие — стена или скала. Обхожу."
+
+en: "Enemy in the way: "
+ru: "Враг на пути: "
+
+en: "Someone in the way: "
+ru: "Кто-то на пути: "
+
+en: ". Going round."
+ru: ". Обхожу."
+
+en: "Something in the way by the open door: "
+ru: "Препятствие у открытой двери: "
+
+en: "Door blocked or locked: "
+ru: "Дверь заблокирована или заперта: "
+
+en: "A container is in the way: "
+ru: "Мешает контейнер: "
+
+en: "Obstacle: "
+ru: "Препятствие: "
+
+en: "I can't get there on foot. The target is in another part of this location — find a door with the X key and go through it."
+ru: "Туда не дойти пешком. Цель в другой части этой локации — найдите дверь клавишей X и пройдите через неё."
+
+en: "I can't get there on foot. Open the world map and use fast travel."
+ru: "Туда не дойти пешком. Откройте карту мира и используйте быстрое перемещение."
+
+en: "Leading you to the door: "
+ru: "Веду вас к двери: "
+
+en: "Couldn't reach the target. Try on your own."
+ru: "Не удалось дойти до цели. Попробуйте сами."
+
+en: "You're in the same location as the target. Walking on."
+ru: "Вы в той же локации, что и цель. Иду дальше."
+
+en: "Next door: "
+ru: "Следующая дверь: "
+
+en: "Going through: "
+ru: "Прохожу через: "
+
+en: "This is as close as I can get: %s."
+ru: "Ближе не подойти: %s."
+
+en: "Target in another location: "
+ru: "Цель в другой локации: "
+
+en: ". Leading you through the doors."
+ru: ". Веду вас через двери."
+
+en: "Walking to: "
+ru: "Иду к цели: "
+
+en: "Fast travel to: "
+ru: "Быстрое перемещение: "
+
+en: ", then on foot."
+ru: ", дальше пешком."
+
+en: "Stopped."
+ru: "Остановлено."
+
+en: "Quest objective changed."
+ru: "Цель задания изменилась."
+
+en: "Arrived: %s"
+ru: "На месте: %s"
+
+en: "You're in the target area: %s"
+ru: "Вы в районе цели: %s"
+
+en: "You're at the target: %s"
+ru: "Вы у цели: %s"
+
+en: "Route found."
+ru: "Маршрут найден."
+
+en: "Target is above — looking for stairs."
+ru: "Цель выше — ищу лестницу."
+
+en: "Target is below — looking for stairs."
+ru: "Цель ниже — ищу лестницу."
+
+en: "I can't go any further towards: "
+ru: "Дальше пройти не могу, цель: "
+
+en: "Lost the route, recalculating."
+ru: "Маршрут потерян, пересчитываю."
+
+en: "I'm stuck. Try walking with the guide beacon."
+ru: "Не могу пройти. Попробуйте идти по маяку."
+
+en: "Recalculating the route."
+ru: "Пересчитываю маршрут."
+
+en: "You're standing on the photo spot, facing Jonas."
+ru: "Вы стоите на месте для фото, лицом к Джонасу."
+
+en: "very easy lock"
+ru: "очень простой замок"
+
+en: "easy lock"
+ru: "простой замок"
+
+en: "average lock"
+ru: "средний замок"
+
+en: "hard lock"
+ru: "сложный замок"
+
+en: "very hard lock"
+ru: "очень сложный замок"
+
+en: "You get "
+ru: "Вы получаете "
+
+en: "You pay "
+ru: "Вы платите "
+
+en: " caps"
+ru: " крышек"
+
+en: "Barter: "
+ru: "Торговля: "
+
+en: ". Your caps: "
+ru: ". Ваши крышки: "
+
+en: ", the vendor's: "
+ru: ", у торговца: "
+
+en: ". Left and right change the category, Shift with an arrow or [ switches sides, Enter adds to the deal."
+ru: ". Влево и вправо — смена категории, Shift со стрелкой или [ — смена стороны, Enter добавляет в сделку."
+
+en: "No deal."
+ru: "Сделки нет."
+
+en: "Your caps: "
+ru: "Ваши крышки: "
+
+en: "No deal"
+ru: "Сделки нет"
+
+en: "Vendor"
+ru: "Торговец"
+
+en: "Your items"
+ru: "Ваши вещи"
+
+en: ", no items"
+ru: ", нет предметов"
+
+en: "space"
+ru: "пробел"
+
+en: "dot"
+ru: "точка"
+
+en: "comma"
+ru: "запятая"
+
+en: "semicolon"
+ru: "точка с запятой"
+
+en: "colon"
+ru: "двоеточие"
+
+en: "quote"
+ru: "кавычка"
+
+en: "apostrophe"
+ru: "апостроф"
+
+en: "left paren"
+ru: "левая скобка"
+
+en: "right paren"
+ru: "правая скобка"
+
+en: "left bracket"
+ru: "левая квадратная скобка"
+
+en: "right bracket"
+ru: "правая квадратная скобка"
+
+en: "left brace"
+ru: "левая фигурная скобка"
+
+en: "right brace"
+ru: "правая фигурная скобка"
+
+en: "underscore"
+ru: "подчёркивание"
+
+en: "dash"
+ru: "минус"
+
+en: "equals"
+ru: "равно"
+
+en: "star"
+ru: "звёздочка"
+
+en: "slash"
+ru: "косая черта"
+
+en: "backslash"
+ru: "обратная косая черта"
+
+en: "exclamation"
+ru: "восклицательный знак"
+
+en: "question"
+ru: "вопросительный знак"
+
+en: "hash"
+ru: "решётка"
+
+en: "percent"
+ru: "процент"
+
+en: "less"
+ru: "меньше"
+
+en: "greater"
+ru: "больше"
+
+en: "tilde"
+ru: "тильда"
+
+en: "grave"
+ru: "обратный апостроф"
+
+en: "at"
+ru: "собака"
+
+en: "dollar"
+ru: "доллар"
+
+en: "caret"
+ru: "крышка"
+
+en: "bar"
+ru: "вертикальная черта"
+
+en: "plus"
+ru: "плюс"
+
+en: "ampersand"
+ru: "амперсанд"
+
+en: "end"
+ru: "конец"
+
+en: "blank"
+ru: "пусто"
+
+en: "Console."
+ru: "Консоль."
+
+en: " Type a command and press Enter. Up and Down: earlier commands, PageUp and PageDown: scroll the output."
+ru: " Введите команду и нажмите Enter. Вверх и вниз — прежние команды, PageUp и PageDown — прокрутка вывода."
+
+en: "Console closed."
+ru: "Консоль закрыта."
+
+en: "Done."
+ru: "Выполнено."
+
+en: "Lines %d to %d of %d. "
+ru: "Строки с %d по %d из %d. "
+
+en: "Top."
+ru: "Начало."
+
+en: "Bottom."
+ru: "Конец."
+
+en: "Talking to "
+ru: "Разговор: "
+
+en: ". D repeats the last line."
+ru: ". D повторяет последнюю реплику."
+
+en: ", body"
+ru: ", тело"
+
+en: "Exploration mode on."
+ru: "Режим исследования включён."
+
+en: "Exploration mode off."
+ru: "Режим исследования выключен."
+
+en: "Nothing new on the way."
+ru: "По пути ничего нового."
+
+en: "Then O goes back to the route."
+ru: "Затем O возвращает на маршрут."
+
+en: "Area searched."
+ru: "Местность обыскана."
+
+en: "Around here:"
+ru: "Поблизости:"
+
+en: "containers"
+ru: "контейнеры"
+
+en: "bodies"
+ru: "тела"
+
+en: "items"
+ru: "предметы"
+
+en: "notes"
+ru: "записи"
+
+en: "undiscovered places"
+ru: "неоткрытые места"
+
+en: " Nearest: "
+ru: " Ближайшее: "
+
+en: "O goes back to the route."
+ru: "O возвращает на маршрут."
+
+en: "Remaining: %d."
+ru: "Осталось: %d."
+
+en: "On the way: "
+ru: "По пути: "
+
+en: ", and %d more"
+ru: ", и ещё %d"
+
+en: " O leads you to the find."
+ru: " O ведёт к находке."
+
+en: "Guiding to: "
+ru: "Наведение на: "
+
+en: ", route found"
+ru: ", маршрут найден"
+
+en: "Guidance off."
+ru: "Наведение выключено."
+
+en: "Quest target changed."
+ru: "Цель задания изменилась."
+
+en: "Arrived: "
+ru: "На месте: "
+
+en: "straight"
+ru: "прямо"
+
+en: "right"
+ru: "вправо"
+
+en: "left"
+ru: "влево"
+
+en: "turn around"
+ru: "развернитесь"
+
+en: ", target above"
+ru: ", цель выше"
+
+en: ", target below"
+ru: ", цель ниже"
+
+en: ", target above — look for stairs"
+ru: ", цель выше — ищите лестницу"
+
+en: ", target below — look for stairs"
+ru: ", цель ниже — ищите лестницу"
+
+en: "No progress — something is in the way. Use the scanner to find a way around, for example a door."
+ru: "Нет продвижения — что-то мешает. Найдите обход сканером, например дверь."
+
+en: ". The password is "
+ru: ". Пароль: "
+
+en: ". Still possible: "
+ru: ". Ещё подходят: "
+
+en: "Can't reach the word."
+ru: "Не удаётся выбрать слово."
+
+en: "Terminal locked."
+ru: "Терминал заблокирован."
+
+en: "Removed: "
+ru: "Удалено: "
+
+en: "Hacking. %s. %d words, %d letters each, bracket pairs: %d. Up and down choose a word, Enter guesses, left and right read the screen."
+ru: "Взлом. %s. Слов: %d, по %d букв, пар скобок: %d. Вверх и вниз — выбор слова, Enter — попытка, влево и вправо — чтение экрана."
+
+en: " left"
+ru: " осталось"
+
+en: "Bracket pair: "
+ru: "Пара скобок: "
+
+en: ", ruled out"
+ru: ", отпадает"
+
+en: "Brackets: "
+ru: "Скобки: "
+
+en: "Guessing: "
+ru: "Пробую: "
+
+en: "First choose a word with up and down."
+ru: "Сначала выберите слово стрелками вверх и вниз."
+
+en: ", chosen"
+ru: ", выбрано"
+
+en: ", unavailable"
+ru: ", недоступно"
+
+en: "Lockpick: left and right arrows move the pin, slowly with Shift. The tone tells how close the right spot is."
+ru: "Взлом замка: стрелки влево и вправо двигают шпильку, с Shift — медленно. Тон показывает, насколько близко нужное место."
+
+en: "discovered only"
+ru: "только открытые"
+
+en: "undiscovered only"
+ru: "только неоткрытые"
+
+en: "all"
+ru: "все"
+
+en: "No locations on the map."
+ru: "На карте нет локаций."
+
+en: "No locations in filter: "
+ru: "Нет локаций в фильтре: "
+
+en: "Select a location first."
+ru: "Сначала выберите локацию."
+
+en: "I can't see this marker on the world map. Switch to the world map."
+ru: "Не вижу этот маркер на карте мира. Переключитесь на карту мира."
+
+en: "Undiscovered location — the game won't let you fast travel there. Press Enter again to try."
+ru: "Неоткрытая локация — игра не даст туда переместиться. Нажмите Enter ещё раз, чтобы попробовать."
+
+en: "Close the Pip-Boy and pick the destination again."
+ru: "Закройте Пип-Бой и выберите цель снова."
+
+en: "Map: %d locations. Page Up and Page Down browse, Enter fast travels, Home walks there, End filters."
+ru: "Карта, локаций: %d. Page Up и Page Down — просмотр, Enter — быстрое перемещение, Home — идти туда, End — фильтр."
+
+en: "Fast travel works from the world map."
+ru: "Быстрое перемещение работает с карты мира."
+
+en: "Filter: "
+ru: "Фильтр: "
+
+en: "Capital Wasteland"
+ru: "Столичная Пустошь"
+
+en: "Quest: "
+ru: "Задание: "
+
+en: ", in another place"
+ru: ", в другом месте"
+
+en: "Quest objective with no map marker: "
+ru: "Цель задания без маркера на карте: "
+
+en: "The quest objective is in another location — the beacon can't lead you there. Use auto-walk: it goes through the doors on the way."
+ru: "Цель задания в другой локации — маяк туда не доведёт. Используйте автоходьбу: она проходит через двери по пути."
+
+en: ", tracked"
+ru: ", отслеживается"
+
+en: ", not tracked"
+ru: ", не отслеживается"
+
+en: ", completed"
+ru: ", выполнено"
+
+en: "Hotkeys. "
+ru: "Быстрые клавиши. "
+
+en: "Key "
+ru: "Клавиша "
+
+en: "%d of %d"
+ru: "%d из %d"
+
+en: "How many? "
+ru: "Сколько? "
+
+en: ". Arrows set the amount, A confirms, E cancels."
+ru: ". Стрелки задают количество, A — подтвердить, E — отмена."
+
+en: ". The arrows change the hours, W waits, E cancels."
+ru: ". Стрелки меняют часы, W — ждать, E — отмена."
+
+en: "Enemies"
+ru: "Враги"
+
+en: "Containers"
+ru: "Контейнеры"
+
+en: "Doors"
+ru: "Двери"
+
+en: "People"
+ru: "Люди"
+
+en: "Sonar: nothing nearby."
+ru: "Сонар: поблизости ничего."
+
+en: ", points left: "
+ru: ", осталось очков: "
+
+en: "Cover: You're Special!"
+ru: "Обложка: «Ты особенный!»"
+
+en: "Let's Review! In the corner: All Done! "
+ru: "Давай повторим! В углу: «Всё готово!» "
+
+en: "S is for strength, and that means I am strong! I can carry more toys and swing stuff all day long!"
+ru: "S — это сила, и значит, я сильный! Я могу носить больше игрушек и размахивать вещами весь день!"
+
+en: "P is for Perception, a long funny word! It means what I tasted, smelled, saw and heard!"
+ru: "P — это восприятие, длинное смешное слово! Это всё, что я попробовал, понюхал, увидел и услышал!"
+
+en: "E is for Endurance, and that's how long I can play! I'm always really healthy, and have energy all day!"
+ru: "E — это выносливость: вот сколько я могу играть! Я всегда здоров, и сил мне хватает на весь день!"
+
+en: "C is for Charisma, it's why people think I'm great! I make my friends all laugh and smile, and never want to hate!"
+ru: "C — это обаяние, вот почему меня все любят! С друзьями мы смеёмся и улыбаемся и никогда не злимся!"
+
+en: "I is for Intelligence, it means I'm really smart! I use my brain for lots of stuff, like science, math and art!"
+ru: "I — это интеллект, значит, я очень умный! Я думаю головой о многом: о науке, математике и искусстве!"
+
+en: "A is for Agility, that's how I get around! I move real fast and easy, and I never make a sound!"
+ru: "A — это ловкость, так я и передвигаюсь! Я двигаюсь быстро и легко и никогда не шумлю!"
+
+en: "L is for luck, and it's simple, you see! It means that good things always happen to me!"
+ru: "L — это удача, всё очень просто! Это значит, что со мной всегда случается хорошее!"
+
+en: "%d of %d Action Points"
+ru: "%d из %d очков действия"
+
+en: "No V.A.T.S. data."
+ru: "Нет данных V.A.T.S."
+
+en: "Nothing to select."
+ru: "Нечего выбрать."
+
+en: "V.A.T.S. mode. A and D change the target, W and S change the body part. I read the selection: body part and hit chance. Space queues a shot, E fires the queued shots and leaves V.A.T.S."
+ru: "Режим V.A.T.S. A и D меняют цель, W и S — часть тела. Я читаю выбор: часть тела и шанс попадания. Пробел ставит выстрел в очередь, E стреляет и выходит из V.A.T.S."
+
+en: "%d queued"
+ru: "в очереди: %d"
+
+en: ", locked, requires a key"
+ru: ", заперто, нужен ключ"
+
+en: ", locked, "
+ru: ", заперто, "
+
+en: ", dead, can be searched"
+ru: ", мёртв, можно обыскать"
+
+en: ", dead, empty"
+ru: ", мёртв, пусто"
+
+en: ", dead"
+ru: ", мёртв"
+
+en: ", above"
+ru: ", выше"
+
+en: ", below"
+ru: ", ниже"
+
+en: ", open"
+ru: ", открыто"
+
+en: "Scanner not available here."
+ru: "Сканер здесь недоступен."
+
+en: "people"
+ru: "люди"
+
+en: "doors"
+ru: "двери"
+
+en: "places"
+ru: "места"
+
+en: "quest objects"
+ru: "объекты заданий"
+
+en: "quests"
+ru: "задания"
+
+en: "Nothing in category: "
+ru: "Ничего в категории: "
+
+en: ", no marker, "
+ru: ", без маркера, "
+
+en: "Nothing nearby."
+ru: "Поблизости ничего."
+
+en: "No target nearby."
+ru: "Поблизости нет цели."
+
+en: "Turning to: "
+ru: "Поворачиваюсь к: "
+
+en: "Select a target with the scanner first."
+ru: "Сначала выберите цель сканером."
+
+en: "This quest has no map marker."
+ru: "У этого задания нет маркера на карте."
+
+en: "The target is in another location — the beacon can't lead there. Use auto-walk: it goes through doors."
+ru: "Цель в другой локации — маяк туда не доведёт. Используйте автоходьбу: она проходит через двери."
+
+en: "Open your inventory first."
+ru: "Сначала откройте инвентарь."
+
+en: "Select a target with the aim key first."
+ru: "Сначала выберите цель клавишей прицеливания."
+
+en: "%s, correction %+.0f"
+ru: "%s, поправка %+.0f"
+
+en: "Higher"
+ru: "Выше"
+
+en: "Lower"
+ru: "Ниже"
+
+en: "This objective is only a marker — it can't be activated."
+ru: "Эта цель — только маркер, её нельзя активировать."
+
+en: "Using: "
+ru: "Использую: "
+
+en: "No line to repeat."
+ru: "Нечего повторить."
+
+en: "No description."
+ru: "Нет описания."
+
+en: "Nothing under the crosshair."
+ru: "В прицеле ничего."
+
+en: "Under the crosshair: "
+ru: "В прицеле: "
+
+en: ", the selected target"
+ru: ", выбранная цель"
+
+en: ", a different object"
+ru: ", другой объект"
+
+en: ", type %u"
+ru: ", тип %u"
+
+en: "No one nearby."
+ru: "Поблизости никого."
+
+en: "Turned to: "
+ru: "Поворот к: "
+
+en: ", not fighting"
+ru: ", не сражается"
+
+en: "No enemy nearby."
+ru: "Поблизости нет врагов."
+
+en: " is not an enemy. Not aiming."
+ru: " — не враг. Не прицеливаюсь."
+
+en: "Target: "
+ru: "Цель: "
+
+en: "Target %d of %d"
+ru: "Цель %d из %d"
+
+en: "Aiming at: "
+ru: "Прицеливаюсь в: "
+
+en: "No target. Select one with the scanner (C or X)."
+ru: "Нет цели. Выберите её сканером (C или X)."
+
+en: ". Fire."
+ru: ". Огонь."
+
+en: "Target lost. Tracking stopped."
+ru: "Цель потеряна. Слежение остановлено."
+
+en: "Teleporting to: "
+ru: "Телепортация к: "
+
+en: "Select an object with the scanner first to teleport."
+ru: "Чтобы телепортироваться, сначала выберите объект сканером."
+
+en: "Tracking stopped."
+ru: "Слежение остановлено."
+
+en: "Nothing to track. Select a target with the scanner."
+ru: "Не за чем следить. Выберите цель сканером."
+
+en: "Tracking: "
+ru: "Слежу за: "
+
+en: ". Shift Home stops."
+ru: ". Shift Home — остановить."
+
+en: "Leveling the view. No target nearby."
+ru: "Выравниваю взгляд. Поблизости нет цели."
+
+en: "Warning, in the line of fire: "
+ru: "Внимание, на линии огня: "
+
+en: ", now "
+ru: ", сейчас "
+
+en: "View leveled."
+ru: "Взгляд выровнен."
+
+en: "No line of fire. Obstacle %.0f units ahead of you, %.0f above the floor. Move closer or go around."
+ru: "Нет линии огня. Препятствие в %.0f единицах перед вами, на %.0f над полом. Подойдите ближе или обойдите."
+
+en: ", can't lock on. Face the targets, in first person."
+ru: ", не удаётся навестись. Повернитесь к мишеням, в виде от первого лица."
+
+en: ", firing."
+ru: ", стреляю."
+
+en: ", burst fired. Check the quest."
+ru: ", очередь выпущена. Проверьте задание."
+
+en: ", selected"
+ru: ", выбрано"
+
+en: "New objective: "
+ru: "Новая цель: "
+
+en: "Third person"
+ru: "Вид от третьего лица"
+
+en: "First person"
+ru: "Вид от первого лица"
+
+en: "Health %d of %d, action points %d of %d"
+ru: "Здоровье %d из %d, очки действия %d из %d"
+
+en: ", rads %d"
+ru: ", радиация %d"
+
+en: ", crippled: "
+ru: ", покалечено: "
+
+en: ", weapon: "
+ru: ", оружие: "
+
+en: ", condition %d percent"
+ru: ", состояние %d процентов"
+
+en: ", ammo: "
+ru: ", боеприпасы: "
+
+en: ", no weapon"
+ru: ", без оружия"
+
+en: ", caps %d"
+ru: ", крышки: %d"
+
+en: ", carry weight %d of %d"
+ru: ", вес %d из %d"
+
+en: ", time %d:%02d"
+ru: ", время %d:%02d"
+
+en: "On target, fire."
+ru: "Цель в прицеле, огонь."
+
+en: "Aiming roughly, fire."
+ru: "Прицел примерный, огонь."
+
+en: "+%d XP"
+ru: "+%d опыта"
+
+en: "Target down."
+ru: "Цель поражена."
+
+en: " is down."
+ru: " повержен."
+
+en: "Restoring default controls. Confirm your choice."
+ru: "Восстанавливаю стандартное управление. Подтвердите выбор."
+
+en: "Quest stage skipped. Check the new objective."
+ru: "Этап задания пропущен. Проверьте новую цель."
+
+en: "Could not skip the stage: no active quest."
+ru: "Не удалось пропустить этап: нет активного задания."
+
+en: "Press the new key."
+ru: "Нажмите новую клавишу."
+
+en: "Nothing is selected."
+ru: "Ничего не выбрано."
+
+en: "Tracking this quest."
+ru: "Это задание отслеживается."
+
+en: "That quest is completed; it can't be tracked."
+ru: "Это задание выполнено, его нельзя отслеживать."
+
+en: "The game did not change the tracked quest."
+ru: "Игра не сменила отслеживаемое задание."
+
+en: "First select a quest in the list."
+ru: "Сначала выберите задание в списке."
+
+en: "First select a note in the list."
+ru: "Сначала выберите запись в списке."
+
+en: "Could not enter the word."
+ru: "Не удалось ввести слово."
+
+en: "End of the range."
+ru: "Конец диапазона."
+
+en: "Open the inventory and select an item, then press Delete."
+ru: "Откройте инвентарь, выберите предмет и нажмите Delete."
+
+en: "Could not find this location on the world map."
+ru: "Не удалось найти эту локацию на карте мира."
+
+en: "Could not find the travel button on the map."
+ru: "Не удалось найти на карте кнопку перемещения."
+
+en: "Could not find the category switch."
+ru: "Не удалось найти переключатель категорий."
+
+en: "The container is empty."
+ru: "Контейнер пуст."
+
+en: "You are carrying nothing."
+ru: "У вас ничего нет."
+
+en: "Cannot switch columns in this version of the game."
+ru: "В этой версии игры нельзя переключать колонки."
+
+en: "On target."
+ru: "Цель в прицеле."
+
+en: "Aiming roughly."
+ru: "Прицел примерный."
+
+en: "someone"
+ru: "кто-то"
+
+en: "%s, %.0f units, %.0f degrees %s. "
+ru: "%s, %.0f единиц, %.0f градусов %s. "
+
+en: "ahead"
+ru: "впереди"
+
+en: "Aiming at the nearest object: %.0f units, %.0f degrees %s."
+ru: "Прицеливаюсь в ближайший объект: %.0f единиц, %.0f градусов %s."
+
+en: "Nothing that could be hit."
+ru: "Нечего поразить."
+
+en: "Dump not available on this screen."
+ru: "Дамп недоступен на этом экране."
+
+en: "Dump saved to the dump file."
+ru: "Дамп сохранён в файл."
+
+en: "Strength"
+ru: "Сила"
+
+en: "Perception"
+ru: "Восприятие"
+
+en: "Endurance"
+ru: "Выносливость"
+
+en: "Charisma"
+ru: "Обаяние"
+
+en: "Intelligence"
+ru: "Интеллект"
+
+en: "Agility"
+ru: "Ловкость"
+
+en: "Luck"
+ru: "Удача"
+
+en: "%d o'clock"
+ru: "на %d часов"
+
+en: "right next to you"
+ru: "совсем рядом"
+
+en: "%d units"
+ru: "%d единиц"
+
+en: "Accessibility mod enabled."
+ru: "Мод доступности включён."
+
+en: "Accessibility mod disabled."
+ru: "Мод доступности выключен."
+
+en: "Fallout 3 Access loaded."
+ru: "Fallout 3 Access загружен."
+
+en: "No screen reader detected. Using SAPI."
+ru: "Экранный диктор не найден. Использую SAPI."
+
+en: "Active reader: %s."
+ru: "Активный диктор: %s."
+
+en: "%s opened."
+ru: "%s: открыто."
+
+en: "Menu closed."
+ru: "Меню закрыто."
+
+en: "List empty."
+ru: "Список пуст."
+
+en: "Loading."
+ru: "Загрузка."
+
+en: "Warning, low health."
+ru: "Внимание, мало здоровья."
+
+en: "Crippled limb: %s."
+ru: "Покалечена конечность: %s."
+
+en: "In combat."
+ru: "Бой."
+
+en: "Combat ended."
+ru: "Бой окончен."
+
+en: "Quest target: %s. %s, %s."
+ru: "Цель задания: %s. %s, %s."
+
+en: "No active quest target."
+ru: "Нет активной цели задания."
+
+en: "Facing %s."
+ru: "Направление: %s."
+
+en: "Health %s, Action Points %s, radiation %s, caps %s."
+ru: "Здоровье %s, очки действия %s, радиация %s, крышки %s."
+
+en: "Hostile: %s, %s, %s."
+ru: "Враг: %s, %s, %s."
+
+en: "Container: %s, %s, %s."
+ru: "Контейнер: %s, %s, %s."
+
+en: "Door: %s, %s, %s."
+ru: "Дверь: %s, %s, %s."
+
+en: "Item: %s, %s, %s."
+ru: "Предмет: %s, %s, %s."
+
+en: "You give %s, vendor gives %s. Net: %s."
+ru: "Вы отдаёте %s, торговец отдаёт %s. Итог: %s."
+
+en: "Warning, losing %s caps."
+ru: "Внимание, вы теряете крышек: %s."
+
+en: "The You're Special! book. %s. Enter reads everything."
+ru: "Книга «Ты особенный!». %s. Enter читает всё."
+
+en: "A measure of raw physical strength. Affects melee damage and how much you can carry."
+ru: "Мера физической силы. Влияет на урон в ближнем бою и на то, сколько вы можете нести."
+
+en: "How keen your senses are. Affects energy weapons, explosives and lockpicking."
+ru: "Острота чувств. Влияет на энергетическое оружие, взрывчатку и взлом замков."
+
+en: "Health and physical fitness. Affects hit points, radiation resistance and unarmed combat."
+ru: "Здоровье и физическая форма. Влияет на очки здоровья, сопротивление радиации и рукопашный бой."
+
+en: "Likeability and persuasiveness. Affects barter and speech."
+ru: "Привлекательность и убедительность. Влияет на торговлю и красноречие."
+
+en: "Intellect and reasoning. Affects medicine, repair and science."
+ru: "Ум и способность рассуждать. Влияет на медицину, ремонт и науку."
+
+en: "Speed and nimbleness. Affects small guns, sneaking and action points."
+ru: "Скорость и проворство. Влияет на лёгкое оружие, скрытность и очки действия."
+
+en: "How often chance favours you. Affects everything a little, critical hits most of all."
+ru: "Как часто вам везёт. Понемногу влияет на всё, а больше всего — на критические попадания."
+
+en: "Page %d"
+ru: "Страница %d"
+
+en: "Sweet spot found."
+ru: "Нужная точка найдена."
+
+en: "Bobby pin is about to break."
+ru: "Шпилька вот-вот сломается."
+
+en: "Bobby pin broke."
+ru: "Шпилька сломалась."
+
+en: "Unlocked."
+ru: "Открыто."
+
+en: "%s, %s percent, cost %s."
+ru: "%s, %s процентов, стоимость %s."
+
+en: "Target switched."
+ru: "Цель сменена."
+
+en: "Queue full."
+ru: "Очередь заполнена."
+
+en: "No targets."
+ru: "Нет целей."
+
+en: "Option %s: %s. %s"
+ru: "Вариант %s: %s. %s"
+
+en: "No response options."
+ru: "Нет вариантов ответа."
+
+en: "weight %s"
+ru: "вес %s"
+
+en: "value %s"
+ru: "стоимость %s"
+
+en: "Level up."
+ru: "Новый уровень."
+
+en: "equipped"
+ru: "надето"
+
+en: "stealing"
+ru: "кража"
+
+en: "Carry weight %s."
+ru: "Вес груза %s."
+
+en: "%s of %s"
+ru: "%s из %s"
+
+en: "List closed."
+ru: "Список закрыт."
+
+en: "Taken: %s."
+ru: "Взято: %s."
+
+en: "north"
+ru: "север"
+
+en: "northeast"
+ru: "северо-восток"
+
+en: "east"
+ru: "восток"
+
+en: "southeast"
+ru: "юго-восток"
+
+en: "south"
+ru: "юг"
+
+en: "southwest"
+ru: "юго-запад"
+
+en: "west"
+ru: "запад"
+
+en: "northwest"
+ru: "северо-запад"
+
+en: "Cannot read the level."
+ru: "Не удаётся прочитать уровень."
+
+en: "Level %d, the highest. Experience %d."
+ru: "Уровень %d, максимальный. Опыт %d."
+
+en: "Level %d. Experience %d, a new level is waiting."
+ru: "Уровень %d. Опыт %d, ждёт новый уровень."
+
+en: "Level %d. Experience %d of %d, %d to the next level."
+ru: "Уровень %d. Опыт %d из %d, до следующего уровня осталось %d."
+
+en: "Audio"
+ru: "Запись"
+
+en: "Image"
+ru: "Изображение"

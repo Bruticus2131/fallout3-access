@@ -30,6 +30,8 @@ bool MenuModeActive();
 // Request an HP/AP/radiation readout (the H hotkey). The actual actor-value
 // reads run on the main thread; safe to call from the poll/hotkey thread.
 void RequestStatus();
+// Shift+H: the player's level and the experience to the next one (main thread).
+void RequestLevelStatus();
 
 // Request a menu back/close (Backspace). Menu::HandleClick runs on the main
 // thread; safe to call from the poll/hotkey thread.
@@ -216,14 +218,6 @@ float AimCorrection();
 // see, and without it we were both guessing whether the aim was wrong or the
 // feedback was missing.
 bool ConsumeAimTargetReacted();
-
-// True once, when the held target's health has just gone DOWN — that is, when
-// a shot landed. The engine gives us no hit event, so this is the evidence.
-bool ConsumeTargetHit();
-
-// The watched target's health reached zero. Read from the game, not inferred
-// from our own shooting.
-bool ConsumeTargetDown();
 
 // True once, when the engine's ray says there is NO line of fire to the held
 // target: `outDist` is how far the obstacle is, `outHeight` how high it sits

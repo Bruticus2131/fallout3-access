@@ -24,6 +24,7 @@
 #include "f3a/menu_dispatch.h"
 #include "f3a/engine_hooks.h"
 #include "f3a/polling_loop.h"
+#include "f3a/player_mover.h"
 #include "f3a/modules.h"
 #include "f3a/game_access.h"
 #include "f3a/console.h"
@@ -190,7 +191,17 @@ static void OnFoseMessage(FOSEMessagingInterface::Message* msg)
         break;
 
     case FOSEMessagingInterface::kMessage_ExitToMainMenu:
+        // Sent before the world is torn down (the FNV mod learned this with a
+        // crash: a walk left running across it wrote into freed navmesh
+        // memory). A path the engine is still working out is called off and
+        // the mover let go while the world still exists; the aim and the
+        // hostile list are of the world being left. The walk itself ends on
+        // the poll thread, which cancels it the moment gameplay stops.
         F3A_INFO("Returned to main menu.");
+        f3a::mover::CancelEnginePath();
+        f3a::mover::Clear();
+        f3a::poll::StopAimTrack();
+        f3a::game::ForgetHostiles();
         break;
 
     default:

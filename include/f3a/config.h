@@ -81,9 +81,7 @@ struct Settings {
 
     // Voice behavior
     bool   speak_on_menu_open = true;
-    bool   verbose_pipboy     = false;
-    bool   read_item_weight   = true;
-    bool   read_item_value    = true;
+    bool   item_card          = true;   // read the item card / stat description after a row
     bool   vats_tutorial      = true;  // speak the VATS how-to on first open
     bool   intro_audio_desc   = true;  // auto-play the opening-cinematic audio description
     // Line-of-sight aim cue: a synth blip when the crosshair is on an enemy
@@ -145,8 +143,10 @@ struct Settings {
     // restores the game's real footstep sounds, which ride on that animation;
     // the synthesized clicks above are only used when this is off.
     bool   walk_animation     = true;
-    int    barter_warn_loss_caps = 10; // warn when transaction loses player >=N caps
     int    nearby_scan_radius   = 1200; // game units (~ 1 meter = 64 units)
+    // How far the object scanner (PgUp/PgDn) reaches outdoors; indoors it
+    // takes the whole cell. Game units.
+    int    scanner_radius       = 8000;
     int    nearby_scan_max_items = 8;
     // Leave containers with nothing in them out of the object scanner.
     bool   hide_empty_containers = true;
@@ -187,6 +187,8 @@ struct Settings {
     // The game's language as read from Fallout3.esm ("pl", "en", "de"...),
     // empty when it could not be told.
     std::string game_language;
+    // The INI leaves the mod's language to the game (Language = auto).
+    bool language_auto = true;
     // Code page of the GAME's own text (tile labels, item names). Polish FO3
     // stores text in Windows-1250; English/Western in 1252. 0 = auto: from
     // the game's language (pl -> 1250, otherwise the system ANSI code page).
@@ -199,6 +201,16 @@ struct Settings {
 };
 
 bool Load(const wchar_t* ini_path);
+
+// The code page the game's own text is in, for converting it: the INI's
+// GameTextCodepage, or worked out from the game's language. Any thread.
+unsigned GameTextCodepage();
+
+// Once the game has read its data: its own "Yes" (the sYes setting as loaded,
+// a translation plugin included), raw bytes. When that is another language
+// than Fallout3.esm said, its code page is used from now on, and the mod
+// speaks it too if the INI leaves the language to the game.
+void ConfirmGameLanguage(const std::string& yes);
 
 // The mod's data folder beside the INI: Data\FOSE\Plugins\Fallout3Access
 // (road graphs, the world-door table). Empty before Load().

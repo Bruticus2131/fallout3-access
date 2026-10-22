@@ -9,6 +9,7 @@
 #include "f3a/config.h"
 #include "f3a/polling_loop.h"
 
+#include <mutex>
 #include <windows.h>
 #include <string>
 #include <cstring>
@@ -39,8 +40,24 @@ bool g_side_target = false;
 // that wandered back is taken back.
 bool g_want_container = false;
 bool g_kUp = false, g_kDown = false;
+// Barter, your column: the game moves it itself, but not reliably - its keys
+// roam the whole screen, so a press sometimes lands nowhere, or a moment
+// late, or on a row of the other column. Each press is checked a moment
+// later; if the selection did not move, the mod moves it.
+int  g_own_step_dir  = 0;
+int  g_own_step_from = -1;
+int  g_own_step_wait = 0;
 int  g_restore_wait = 0;      // ticks before another focus restore may be asked
 int  g_restore_tries = 0;     // restores asked since the focus was last seen right
+
+// The container screen and barter are built alike - two columns, the same
+// keys (game::FindColumnMenu has the details) - so this module drives both.
+bool InColumnMenu()
+{
+    auto m = menu::ActiveMenu();
+    return m == menu::Id::Container || m == menu::Id::Barter;
+}
+bool InBarter() { return menu::ActiveMenu() == menu::Id::Barter; }
 
 int         SideOf(const void* box);     // defined below
 const char* SideLabel(bool container);   // defined below
@@ -50,7 +67,19 @@ void        AnnounceFilter();            // defined below
 
 void OnTick(float)
 {
+    // Not while Backspace is closing the screen on the game's thread.
+    std::lock_guard<std::mutex> lk(game::ColumnReadLock());
+    if (InBarter()) barter::Tick();
     PollFilterKeys();
+    if (g_own_step_wait > 0 && --g_own_step_wait == 0 && InBarter()) {
+        const int now = game::ContainerSelectedIndex(false);
+        const int focus = game::ContainerFocusSide();
+        if (focus != 0 || now == g_own_step_from) {
+            F3A_INFO("Barter: the game's own %s did not move your column (row %d, focus %d) - stepping",
+                     g_own_step_dir > 0 ? "Down" : "Up", now, focus);
+            poll::RequestContainerStep(false, g_own_step_dir);
+        }
+    }
     if (g_side_wait > 0 && --g_side_wait == 0 &&
         game::ContainerFocusSide() == (g_side_target ? 1 : 0)) {
         g_on_container = g_side_target;
@@ -76,7 +105,7 @@ void OnTick(float)
     // scan matched your column's highlight just as well as the container's,
     // so after switching right nothing was read but the word "Pojemnik".
     int focusSide = -1;
-    const bool inContainer = menu::ActiveMenu() == menu::Id::Container;
+    const bool inContainer = InColumnMenu();
     auto sel = inContainer ? game::GetContainerSelection(&focusSide)
                            : std::optional<game::MenuSelection>{};
     if (inContainer && g_want_container && focusSide == 0) {
@@ -156,8 +185,8 @@ int SideOf(const void* box)
     const char* nm = fose_rt::TileName(
         reinterpret_cast<Tile*>(const_cast<void*>(box)));
     if (!nm) return -1;
-    if (std::strstr(nm, "CM_Container_")) return 1;
-    if (std::strstr(nm, "CM_Items_"))     return 0;
+    if (std::strstr(nm, "CM_Container_") || std::strstr(nm, "BM_Container_")) return 1;
+    if (std::strstr(nm, "CM_Items_")     || std::strstr(nm, "BM_Items_"))     return 0;
     return -1;
 }
 
@@ -165,6 +194,7 @@ int SideOf(const void* box)
 // works on the side itself (SideOf / bool), not on this text.
 const char* SideLabel(bool container)
 {
+    if (container && InBarter()) return strings::T("Handlarz", "Vendor");
     return container ? strings::T("Pojemnik", "Container")
                      : strings::T("Twoje przedmioty", "Your items");
 }
@@ -179,17 +209,10 @@ const char* SideLabel(bool container)
 std::string CountSuffix(int rows)
 {
     if (rows <= 0) return strings::T(", brak przedmiotów", ", no items");
-    if (!strings::Polish())
-        return rows == 1 ? std::string(", 1 item")
-                         : ", " + std::to_string(rows) + " items";
-    // Polish counts: 1 przedmiot, 2-4 przedmioty, 5+ przedmiotow.
-    int n10 = rows % 10, n100 = rows % 100;
-    const char* word = (rows == 1) ? "przedmiot"
-                     : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14))
-                       ? "przedmioty" : "przedmiotów";
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), ", %d %s", rows, word);
-    return buf;
+    // 1 przedmiot, 2-4 przedmioty, 5+ przedmiotów (Russian alike).
+    static const char* const kPl[] = { "przedmiot", "przedmioty", "przedmiotów" };
+    static const char* const kRu[] = { "предмет", "предмета", "предметов" };
+    return ", " + strings::Counted(rows, kPl, kRu, "item", "items");
 }
 
 // Shift+Left / Shift+Right: step the category filter on the focused side.
@@ -236,7 +259,7 @@ void PollFilterKeys()
     bool stepD = down && !g_kDown;
     g_kUp   = up;
     g_kDown = down;
-    if (menu::ActiveMenu() != menu::Id::Container) return;
+    if (!InColumnMenu()) return;
 
     // Up/Down in the CONTAINER's column are done by us — the game's own only
     // ever move your column. In your column the game's own keys work.
@@ -245,7 +268,32 @@ void PollFilterKeys()
         g_restore_wait = 3;       // the step takes the focus back itself
         return;
     }
+    if ((stepU || stepD) && InBarter() && game::ContainerFocusSide() == 0) {
+        g_own_step_dir  = stepD ? +1 : -1;
+        g_own_step_from = game::ContainerSelectedIndex(false);
+        g_own_step_wait = 4;      // ~0.3 s for the game's own step to land
+    }
 
+    // Barter: the bare arrows are the GAME's - its key handler (0x006337C0:
+    // codes 3/4 press the focused column's filter arrows, ids 2/4 or 7/9)
+    // steps the category, weapons -> apparel -> aid -> misc -> ammo -> all.
+    // Taking them for a side switch said "Vendor" on every press while the
+    // list changed under it. Here they only wait for the new category and
+    // say it; the side is Shift+arrow, or [.
+    if ((sideL || sideR) && InBarter()) {
+        int focus = game::ContainerFocusSide();
+        if (focus >= 0) { g_on_container = (focus == 1); g_want_container = (focus == 1); }
+        g_filter_say = 10;        // ~0.25 s for the game to rebuild the column
+        return;
+    }
+    if ((edgeL || edgeR) && InBarter()) {
+        g_want_container = edgeR;
+        g_restore_tries = 0;
+        poll::RequestContainerSide(edgeR);
+        g_side_target = edgeR;
+        g_side_wait   = 6;
+        return;
+    }
     if (sideL || sideR) {
         g_want_container = sideR;
         g_restore_tries = 0;
@@ -298,6 +346,7 @@ void AnnounceContents()
 {
     game::ContainerSide mine{}, theirs{};
     if (!game::GetContainerSides(&mine, &theirs)) return;
+    if (InBarter()) return;        // the barter module says who and what
     std::string say = theirs.title.empty() ? std::string(SideLabel(true)) : theirs.title;
     say += CountSuffix(theirs.rows);
     F3A_INFO("Container: '%s' rows=%d | yours '%s' rows=%d",
@@ -309,7 +358,7 @@ void AnnounceContents()
 // Left/Right, for a player who prefers one key.
 void SwitchSide()
 {
-    if (menu::ActiveMenu() != menu::Id::Container) return;
+    if (!InColumnMenu()) return;
     int focus = game::ContainerFocusSide();
     bool onContainer = focus >= 0 ? (focus == 1) : g_on_container;
     poll::RequestContainerSide(!onContainer);
@@ -327,8 +376,18 @@ void OnOpen()  { g_last.clear(); g_last_box = nullptr; g_on_container = false;
                  // Keys already down when the menu opens must not fire.
                  g_kLeft  = (GetAsyncKeyState(VK_LEFT)  & 0x8000) != 0;
                  g_kRight = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+                 // Barter opens with who and the caps; the first row queues
+                 // behind that instead of cutting it off. It opens on the
+                 // vendor's column: our Up/Down drive that one from the start.
+                 if (InBarter()) {
+                     barter::Open();
+                     g_filter_queue = true;
+                     g_want_container = game::ContainerFocusSide() == 1;
+                     g_on_container = g_want_container;
+                 }
                  AnnounceContents(); OnTick(0); }
-void OnClose() { g_last.clear(); g_last_box = nullptr;
+void OnClose() { if (InBarter()) barter::Close();
+                 g_last.clear(); g_last_box = nullptr;
                  g_filter_say = 0; g_filter_queue = false; g_side_wait = 0; }
 
 } // namespace
@@ -337,7 +396,8 @@ void Init()
 {
     hotkeys::Bind(config::Get().hotkeys.container_side, &SwitchSide);
     menu::RegisterMenu(menu::Id::Container, &OnOpen, &OnClose, &OnTick);
-    menu::RegisterMenu(menu::Id::SleepWait, &OnOpen, &OnClose, &OnTick);
+    // Barter's columns, keys and rows; barter.cpp adds the deal and the caps.
+    menu::RegisterMenu(menu::Id::Barter, &OnOpen, &OnClose, &OnTick);
     F3A_INFO("Container module ready.");
 }
 void Shutdown() {}

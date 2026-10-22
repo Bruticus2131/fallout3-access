@@ -46,9 +46,31 @@ std::string BodyDesc(const game::WorldEntity& e)
     return strings::T(", nie żyje", ", dead");
 }
 
+// How far, as the crow flies, and whether it is a floor up or down - in a
+// vault the thing "two metres away" may be on the level below. The plain
+// bearing is flat (autowalk wants it so); the spoken distance is not.
+constexpr float kFloorDz = 160.0f;
+
+std::string DistanceText(const game::WorldEntity& e, const game::Bearing& b)
+{
+    const float dz = e.position.z - game::GetPlayerPosition().z;
+    std::string s = strings::FormatDistance(std::sqrt(b.distance * b.distance + dz * dz));
+    if (dz > kFloorDz)       s += strings::T(", wyżej", ", above");
+    else if (dz < -kFloorDz) s += strings::T(", niżej", ", below");
+    return s;
+}
+
+// A door that stands open says so; closed is how doors are.
+std::string DoorDesc(const game::WorldEntity& e)
+{
+    if (e.kind == game::WorldEntity::Kind::Door && e.open_state == 1)
+        return strings::T(", otwarte", ", open");
+    return {};
+}
+
 void Announce(const game::WorldEntity& e, const game::Bearing& b)
 {
-    std::string dist = strings::FormatDistance(b.distance);
+    std::string dist = DistanceText(e, b);
     std::string dir  = strings::ClockDirection(b.relative_yaw);
 
     strings::Key key;
@@ -62,10 +84,13 @@ void Announce(const game::WorldEntity& e, const game::Bearing& b)
     case game::WorldEntity::Kind::Door:
         key = strings::Key::NearbyDoorFmt; break;
     default:
-        key = strings::Key::NearbyItemFmt; break;
+        // Terminals, buttons, furniture: their own name says what they are.
+        key = game::IsFixture(e) ? strings::Key::NearbyFriendlyFmt
+                                 : strings::Key::NearbyItemFmt;
+        break;
     }
 
-    std::string name = e.name + LockDesc(e) + BodyDesc(e);   // lock state / body
+    std::string name = e.name + LockDesc(e) + BodyDesc(e) + DoorDesc(e);
     tolk::Speak(
         strings::RenderArgs(key, name.c_str(), dist.c_str(), dir.c_str()),
         tolk::Priority::Background, false);
@@ -274,6 +299,16 @@ bool GameplayAndHud()
 constexpr int kViewMax  = 80;
 constexpr int kScanMax  = 3000;     // the scan itself: in practice everything in range
 
+// How far the scanner reaches: as far as the loaded world, as the FNV mod's
+// does - a whole interior, and outside [Voice] ScannerRadius. It used to be
+// twice NearbyScanRadius, 2400: from Megaton's gate the town's doors are 2000
+// to 7000 units away (Craterside Supply 4800), and the scan found three.
+constexpr int kWholeCell = 1000000;
+int ScannerReach()
+{
+    return game::PlayerIsInInterior() ? kWholeCell : config::Get().scanner_radius;
+}
+
 // The list a category shows, from the current scan. Shared by the browse view
 // and by the question "is anything in it at all", so the two can never differ.
 std::vector<game::WorldEntity> CategoryView(int cat)
@@ -290,7 +325,7 @@ std::vector<game::WorldEntity> CategoryView(int cat)
         // terminal, the door, the item, the spot to walk into, the free seat
         // (questobjs.dat, worked out from the quests' own scripts). A little
         // further than the plain scan - a whole vault level.
-        return game::GetQuestObjects(config::Get().nearby_scan_radius * 3, kViewMax);
+        return game::GetQuestObjects(ScannerReach(), kViewMax);
     }
     for (const auto& e : g_scan_full) {
         if (!PassesCategory(e, cat)) continue;
@@ -330,10 +365,25 @@ void Refilter()
 
 void Rescan()
 {
-    const auto& cfg = config::Get();
     // A wider net than the X-key scan: cycling is how the player explores.
-    g_scan_full = game::ScanNearby(cfg.nearby_scan_radius * 2, kScanMax,
-                                   false, false);
+    g_scan_full = game::ScanNearby(ScannerReach(), kScanMax, false, false);
+    // Nearest first in three dimensions - and indoors the floor you stand on
+    // before the ones above and below, however close they are in plan (the
+    // FNV mod's order). The scan itself sorts flat.
+    {
+        const auto pp = game::GetPlayerPosition();
+        const bool indoors = game::PlayerIsInInterior();
+        auto key = [&](const game::WorldEntity& e) {
+            const float dx = e.position.x - pp.x, dy = e.position.y - pp.y,
+                        dz = e.position.z - pp.z;
+            const bool otherFloor = indoors && std::fabs(dz) > kFloorDz;
+            return std::make_pair(otherFloor, dx * dx + dy * dy + dz * dz);
+        };
+        std::stable_sort(g_scan_full.begin(), g_scan_full.end(),
+                         [&](const game::WorldEntity& a, const game::WorldEntity& b) {
+                             return key(a) < key(b);
+                         });
+    }
     g_scan_cell = game::GetPlayerCell();
     F3A_INFO("Scanner rescan: %d objects found.", (int)g_scan_full.size());
     Refilter();
@@ -369,11 +419,23 @@ void AnnounceCurrent()
         return;
     }
 
+    // A target in another place (a quest marker in Megaton while you are in
+    // the Wasteland): its coordinates belong to that place, and a distance and
+    // a clock bearing to them meant nothing. Where it is, instead; the
+    // auto-walk finds the way through the doors.
+    if (e.refr && !game::TargetSharesPlayerSpace(e.refr)) {
+        std::string where = game::GetRefPlaceName(e.refr);
+        tolk::Speak(e.name + strings::T(", w innym miejscu", ", in another place") +
+                        (where.empty() ? std::string() : ": " + where) + ", " + idx,
+                    tolk::Priority::Ui, true);
+        return;
+    }
+
     auto pos  = game::GetPlayerPosition();
     float yaw = game::GetPlayerYaw();
     auto b    = game::ComputeBearing(pos, yaw, e.position);
-    std::string line = e.name + LockDesc(e) + BodyDesc(e) + ", " +
-                       strings::FormatDistance(b.distance) + ", " +
+    std::string line = e.name + LockDesc(e) + BodyDesc(e) + DoorDesc(e) + ", " +
+                       DistanceText(e, b) + ", " +
                        strings::ClockDirection(b.relative_yaw) + ", " + idx;
     tolk::Speak(line, tolk::Priority::Ui, true);
 }
@@ -845,9 +907,22 @@ void ItemInfo()
     // creation…) D is a normal key, so do NOTHING — don't hijack it and blurt
     // "Brak opisu" when the player is just typing a "d".
     auto m = menu::ActiveMenu();
+    // In a conversation D repeats the other side's last line - voiced by the
+    // game and gone once spoken, the text stays in the menu.
+    if (m == menu::Id::Dialog) {
+        std::string who  = game::GetCurrentDialogSpeaker();
+        std::string line = game::GetCurrentDialogLine();
+        if (line.empty())
+            tolk::Speak(strings::T("Brak kwestii do powtórzenia.", "No line to repeat."),
+                        tolk::Priority::Ui, true);
+        else
+            tolk::Speak(who.empty() ? line : who + ": " + line, tolk::Priority::Ui, true);
+        return;
+    }
     bool item_menu = (m == menu::Id::Inventory || m == menu::Id::Container ||
                       m == menu::Id::Barter     || m == menu::Id::Repair    ||
-                      m == menu::Id::PipBoy);
+                      m == menu::Id::PipBoy     || m == menu::Id::Stats     ||
+                      m == menu::Id::RepairServices);
     if (!item_menu) return;
     std::string info = game::GetSelectedItemInfo();
     if (!info.empty()) { tolk::Speak(info, tolk::Priority::Ui, true); return; }
@@ -874,6 +949,10 @@ void ItemInfo()
 // off the main thread crashes), see polling_loop AnnounceStatus().
 void PlayerStatus()
 {
+    // Shift+H: the level and the experience to the next one, anywhere.
+    if (hotkeys::ShiftHeldNow()) { poll::RequestLevelStatus(); return; }
+    if (modules::barter::SpeakSummary()) return;   // in barter: the caps and the deal
+    if (modules::sleepwait::SpeakSummary()) return; // sleep / wait: the time and the hours
     if (!GameplayAndHud()) return;   // the world only: silent in VATS and menus
     poll::RequestStatus();
 }
@@ -1176,9 +1255,11 @@ void LockNearestEnemy()
     F3A_INFO("LockEnemy: '%s' %s at %.0f units", host[0].name.c_str(),
              real_enemy ? "(fighting us)" : "(nearest actor, nobody in combat)",
              dist);
-    tolk::Speak(host[0].name + ", " + strings::FormatDistance(dist) +
-                (real_enemy ? strings::T(". Na celu.", ". On target.")
-                            : strings::T(". Na celu, nie walczy.", ". On target, not fighting.")),
+    // Turned towards it - nothing checked whether it is in the sights, so
+    // "on target" is not claimed; holding the aim key says that.
+    tolk::Speak(strings::T("Obrócony do: ", "Turned to: ") + host[0].name + ", " +
+                    strings::FormatDistance(dist) +
+                    (real_enemy ? std::string() : std::string(strings::T(", nie walczy", ", not fighting"))),
                 tolk::Priority::Combat, true);
 }
 
@@ -1502,19 +1583,14 @@ void CenterCamera()
 
 } // namespace
 
+bool AimHeld() { return g_aim_ctrl_was; }
+
 // Drives the deferred Use-key release (single-press path) and the pitch sweep
 // (floor-object path). Called every frame.
-// Line-of-sight aim cue. In FIRST person the read-back yaw(rotZ)+pitch(rotX)
-// reflect the camera direction, so we compute the angle from camera-forward to
-// each nearby actor — a LONG-RANGE "crosshair on an enemy" check (the engine's
-// own crosshair pick is short-range). Blips faster and higher-pitched the more
-// centred, so you can sweep onto a target by ear. Third person (camera orbits
-// independent of the body) falls back to the short-range pick.
-std::vector<game::Vec3> g_cue_actors;   // cached actor positions
-int   g_cue_refresh = 0;                // ticks until the actor list refresh
-int   g_cue_timer   = 0;                // ticks until the next blip
-uint32_t g_los_last = 0;                // 3rd-person fallback de-dupe
-constexpr float kCueConeDeg = 6.0f;     // half-angle of the "on target" cone
+// The "on target" tone is the held aim's (a ray along the view, in Tick). A
+// free-look cone used to beep at every enemy the view swept past - all through
+// an auto-walk, which turns the view - and is gone: who is in the sights is
+// told only while the player aims (] or the game's aim control).
 int   g_lp_timer    = 0;                // lockpick beep pacing
 
 void Tick(float)
@@ -1533,8 +1609,10 @@ void Tick(float)
     AimHoldPoll();   // let go of the aim key -> lower the weapon
     {
         // Someone who is not an enemy stepped between the aim and its target.
+        // Only while the player aims: a walk's look-at on arrival tracks a
+        // target too, and "in the line of fire" then meant nothing.
         std::string who;
-        if (poll::TakeLineOfFireWarning(&who))
+        if (poll::TakeLineOfFireWarning(&who) && g_aim_ctrl_was)
             tolk::Speak(strings::T("Uwaga, na linii strzału: ", "Warning, in the line of fire: ") +
                             who + ".",
                         tolk::Priority::Combat, true);
@@ -1654,23 +1732,6 @@ void Tick(float)
             tolk::Speak(buf, tolk::Priority::Combat, true);
         }
 
-        // A hit, reported by the target's health rather than by us guessing.
-        // Deliberately quiet and short: this lands in the middle of a firefight
-        // and has to be noticed without covering the game's own sounds. Pitched
-        // clear of the on-target tone so the two never read as the same thing.
-        if (poll::ConsumeTargetHit())
-            audio::Cue(config::Get().target_cue_hz + 500, 35);
-
-        // Down. Two falling notes, clearly different from both the on-target
-        // tone and the hit blip, plus the one word that matters. Without this
-        // a player keeps firing at a body — which is how a magazine went into an
-        // officer who was already finished.
-        if (poll::ConsumeTargetDown()) {
-            audio::Cue(config::Get().target_cue_hz - 300, 90);
-            audio::Cue(config::Get().target_cue_hz - 600, 120);
-            tolk::Speak(strings::T("Cel padł.", "Target down."), tolk::Priority::Combat, true);
-        }
-
         if (on) {
             // Keep sounding for as long as it stays true, so the player can
             // hold and squeeze rather than catch a single blip.
@@ -1682,64 +1743,6 @@ void Tick(float)
             }
         } else {
             g_hold_cue_timer = 0;   // silent the moment it stops being true
-        }
-    }
-
-    // LOS cue: only in normal gameplay (not menus/VATS) and not while auto-aim
-    // or leveling is driving the view. Suppressed while the aim key is held —
-    // that case is answered above, by the game rather than by a cone.
-    if (config::Get().target_cue && !g_aim_on && !g_level_on && !g_aim_held &&
-        GameplayAndHud() &&
-        !game::ArePlayerControlsDisabled()) {   // silent in scripted scenes (char creation)
-        if (game::IsThirdPerson()) {
-            // Camera != body in 3rd person — use the short-range engine pick.
-            uint32_t id = game::GetCrosshairActorID();
-            if (id != 0) {
-                if (id != g_los_last || --g_cue_timer <= 0) {
-                    audio::Cue(config::Get().target_cue_hz, 70);
-                    g_cue_timer = 4;
-                }
-            } else g_cue_timer = 0;
-            g_los_last = id;
-        } else {
-            // First person: angle from camera-forward to nearest actor.
-            if (--g_cue_refresh <= 0) {
-                // Hostiles only — don't beep at friendly NPCs (the "dziwne
-                // pikanie" while just walking around town).
-                auto act = game::ScanNearby(3000, 16, /*actors_only*/true,
-                                            /*hostiles_only*/true);
-                g_cue_actors.clear();
-                for (auto& e : act) g_cue_actors.push_back(e.position);
-                g_cue_refresh = 8;
-            }
-            auto pp = game::GetPlayerPosition();
-            const float D2R = 0.01745329f;
-            float yaw   = game::GetPlayerYaw()   * D2R;   // 0 = +Y, clockwise
-            float pitch = game::GetPlayerPitch() * D2R;
-            float cp = std::cos(pitch);
-            float fx = std::sin(yaw) * cp, fy = std::cos(yaw) * cp,
-                  fz = std::sin(pitch);
-            float ex = pp.x, ey = pp.y, ez = pp.z + 100.0f;   // eye height
-            float best = 999.0f;
-            for (const auto& a : g_cue_actors) {
-                float dx = a.x - ex, dy = a.y - ey, dz = (a.z + 50.0f) - ez;
-                float len = std::sqrt(dx*dx + dy*dy + dz*dz);
-                if (len < 1.0f) continue;
-                float dot = (fx*dx + fy*dy + fz*dz) / len;
-                if (dot > 1.0f) dot = 1.0f; else if (dot < -1.0f) dot = -1.0f;
-                float ang = std::acos(dot) * 57.2957795f;
-                if (ang < best) best = ang;
-            }
-            if (best <= kCueConeDeg) {
-                if (--g_cue_timer <= 0) {
-                    float center = 1.0f - best / kCueConeDeg;       // 0..1
-                    int hz = config::Get().target_cue_hz + (int)(center * 400.0f);
-                    audio::Cue(hz, 55);
-                    g_cue_timer = 2 + (int)((1.0f - center) * 8.0f);  // 2..10
-                }
-            } else {
-                g_cue_timer = 0;
-            }
         }
     }
 
@@ -1936,7 +1939,6 @@ void ResetSession()
     g_track_on     = false;
     g_track_refr   = nullptr;
     g_track_refid  = 0;
-    g_cue_actors.clear();
     F3A_INFO("World scan session reset (new game / load).");
 }
 

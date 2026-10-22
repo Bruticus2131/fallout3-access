@@ -29,4 +29,37 @@ bool BuildPath(const game::Vec3& from, const game::Vec3& to,
 // only a guess: the engine's pathfinder needs a point on the ground.
 bool GroundZ(float x, float y, float nearZ, float* outZ);
 
+// Keep a route off the walls it turns round. A route pulled taut (the
+// engine's) has each corner ON the navmesh's edge, against the wall on the
+// inside of the turn, and a player following it brushes that wall or, cutting
+// the bend, walks into it. Each corner sharper than ~15 degrees moves
+// `clearance` units out of the turn - less for a gentle bend, never more than
+// half its shorter leg - if the point it moves to, and both legs to it, are
+// still on the loaded navmesh at that height; else half as far; else it
+// stays. Corners where the route climbs (ramps, walkways) stay. Returns how
+// many moved.
+int InsetCorners(std::vector<game::Vec3>& waypoints, float clearance);
+
+// The engine's route walked off the walls. Its corners lie on the walls it
+// turns round and its straight legs run along them; our own route between
+// the same two ends keeps a margin off them. That one is put in `out` (and
+// true returned) only when it goes the same way: it ends where the engine's
+// does, is at most a fifth longer (the margin costs length on stairs and in
+// small rooms), and passes near every one of the engine's points - else the
+// engine's route stands (put through InsetCorners).
+bool RetraceWithMargin(const std::vector<game::Vec3>& route, std::vector<game::Vec3>& out,
+                       float clearance);
+
+// BuildPath's search and string pulling on triangles given as corners (three
+// per triangle), not read from the game: for testing it offline on a real
+// navmesh taken from Fallout3.esm.
+// `margin` keeps the route that far off the mesh's edges where it passes
+// through (see kWallMargin in navmesh.cpp).
+bool BuildPathOnTriangles(const std::vector<game::Vec3>& corners, const game::Vec3& from,
+                          const game::Vec3& to, std::vector<game::Vec3>& out_waypoints,
+                          float clearance = 40.0f, float margin = 32.0f);
+// RetraceWithMargin on triangles given as corners, the same way.
+bool RetraceOnTriangles(const std::vector<game::Vec3>& corners, const std::vector<game::Vec3>& route,
+                        std::vector<game::Vec3>& out, float clearance);
+
 } // namespace f3a::navmesh

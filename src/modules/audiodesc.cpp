@@ -65,7 +65,31 @@ struct Entry {
     std::string tag;                  // for logs and capture file names
     std::string alias;                // npc: the name in the game's language, when the
                                       // mod speaks another (from the twin file)
+    std::vector<uint32_t> ids;        // npc: their records in Fallout3.esm (every age's),
+                                      // so a game in any language finds them
 };
+
+// "[npc Name @quest #id,id]": the ids taken off the end. Hex, comma-separated.
+std::string TakeIds(std::string rest, std::vector<uint32_t>* ids)
+{
+    size_t hash = rest.rfind(" #");
+    if (hash == std::string::npos) return rest;
+    if (ids) {
+        const char* p = rest.c_str() + hash + 2;
+        while (*p) {
+            char* end = nullptr;
+            unsigned long v = std::strtoul(p, &end, 16);
+            if (end == p) break;
+            if (v) ids->push_back(static_cast<uint32_t>(v));
+            p = (*end == ',') ? end + 1 : end;
+            if (*end != ',') break;
+        }
+    }
+    rest.resize(hash);
+    size_t b = rest.find_last_not_of(" \t");
+    rest.resize(b == std::string::npos ? 0 : b + 1);
+    return rest;
+}
 
 std::vector<Entry> g_entries;
 std::vector<uint32_t> g_quests;       // quests with entries (watched)
@@ -126,7 +150,7 @@ bool Load(const std::wstring& path)
                 char tag[48]; std::snprintf(tag, sizeof(tag), "q%08X_s%d", q, st);
                 e.tag = tag;
             } else if (h.rfind("npc ", 0) == 0) {
-                std::string rest = Trim(h.substr(4));
+                std::string rest = TakeIds(Trim(h.substr(4)), &e.ids);
                 size_t at = rest.rfind(" @");
                 if (at != std::string::npos) {
                     e.quest = (uint32_t)std::strtoul(rest.c_str() + at + 2, nullptr, 16);
@@ -185,7 +209,7 @@ void LoadAliases(const std::wstring& path)
         if (line.size() < 6 || line[0] != '[' || line.back() != ']') continue;
         std::string h = Trim(line.substr(1, line.size() - 2));
         if (h.rfind("npc ", 0) != 0) continue;
-        std::string rest = Trim(h.substr(4));
+        std::string rest = TakeIds(Trim(h.substr(4)), nullptr);
         size_t at = rest.rfind(" @");
         if (at != std::string::npos) rest = Trim(rest.substr(0, at));
         names.push_back(rest);
@@ -401,7 +425,11 @@ void DescribeActor(uint32_t refid)
         Entry* best = nullptr;
         for (auto& e : g_entries) {
             if (e.kind != Entry::Kind::Npc || e.played) continue;
-            if (e.npc != a.name && e.alias != a.name) continue;
+            // By the name the game shows, or by the record behind it - the
+            // names differ between the game's languages, the records do not.
+            if (e.npc != a.name && e.alias != a.name &&
+                std::find(e.ids.begin(), e.ids.end(), a.base_id) == e.ids.end())
+                continue;
             if (e.quest && e.quest != ctx) continue;
             if (!best || (e.quest && !best->quest)) best = &e;   // the age-specific one wins
         }
@@ -517,8 +545,42 @@ void ToggleMovies()
                 tolk::Priority::System, true);
 }
 
+// The descriptions in the mod's language, English when there is none for it.
+// Again when the language changes: a translation plugin over an English
+// Fallout3.esm is only seen once the game has read its data, after Init.
+std::string g_loaded_lang;
+
+void LoadForLanguage()
+{
+    g_entries.clear();
+    g_quests.clear();
+    g_qstate.clear();
+    g_queue.clear();
+    g_seen_actors.clear();
+    g_loaded_lang = strings::Language();
+    std::wstring dir = config::DataDir();
+    if (dir.empty()) return;
+    const std::string& code = g_loaded_lang;
+    if (!Load(dir + L"\\audiodesc_" + std::wstring(code.begin(), code.end()) + L".txt"))
+        Load(dir + L"\\audiodesc_en.txt");
+    // People are matched by the name the GAME shows. When the mod speaks
+    // another language than the game, take the game's names from the twin
+    // file (the two files list the people in the same order).
+    const std::string& game = config::Get().game_language;
+    bool gamePl = game == "pl";
+    if ((game == "pl" || game == "en") && gamePl != strings::Polish())
+        LoadAliases(dir + (gamePl ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
+}
+
 void Tick(float)
 {
+    // Only between games (the main menu, where the language is settled), so a
+    // scene half way through is never forgotten.
+    if (strings::Language() != g_loaded_lang && !poll::IsGameplayActive()) {
+        F3A_INFO("AudioDesc: the language is now '%s' - descriptions reloaded",
+                 strings::Language().c_str());
+        LoadForLanguage();
+    }
     if (!g_enabled || !config::Get().audio_desc || g_entries.empty()) return;
     CheckMovies();                         // films play outside gameplay too
     if (!poll::IsGameplayActive() && !menu::IsOpen(menu::Id::Race)) return;
@@ -543,17 +605,7 @@ void Init()
 {
     g_enabled = config::Get().audio_desc;
     g_movies  = config::Get().intro_audio_desc;
-    std::wstring dir = config::DataDir();
-    if (!dir.empty()) {
-        Load(dir + (strings::Polish() ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
-        // People are matched by the name the GAME shows. When the mod speaks
-        // another language than the game, take the game's names from the twin
-        // file (the two files list the people in the same order).
-        const std::string& game = config::Get().game_language;
-        bool gamePl = game == "pl";
-        if ((game == "pl" || game == "en") && gamePl != strings::Polish())
-            LoadAliases(dir + (gamePl ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
-    }
+    LoadForLanguage();
     hotkeys::Bind(config::Get().hotkeys.audio_desc_repeat, &RepeatKey);
     F3A_INFO("AudioDesc module ready (%s%s).", g_enabled ? "on" : "off",
              config::Get().audio_desc_capture ? ", capturing screenshots" : "");

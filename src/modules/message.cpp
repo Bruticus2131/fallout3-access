@@ -24,6 +24,16 @@ int         g_watch = 0;
 
 void TryAnnounce()
 {
+    // A book or a paper: its whole text, not a button's label.
+    if (menu::ActiveMenu() == menu::Id::Book) {
+        std::string book = game::GetBookText();
+        if (book.empty() || book == g_last) return;
+        g_last   = book;
+        g_spoken = true;
+        F3A_INFO("Book: %u characters read", (unsigned)book.size());
+        tolk::Speak(book, tolk::Priority::System, true);
+        return;
+    }
     std::string text = game::GetActiveMessageText();
     if (text.empty()) {
         // Fall back to whatever the focused tile says (covers Book pages and
@@ -63,8 +73,10 @@ void OnClose()
 void OnTick(float)
 {
     if (!g_spoken) {
-        if (g_retry <= 0) return;
-        --g_retry;
+        // A book's text is looked for as long as it is open: a long one may
+        // be laid out later than the second a popup gets.
+        if (g_retry <= 0 && menu::ActiveMenu() != menu::Id::Book) return;
+        if (g_retry > 0) --g_retry;
         TryAnnounce();
         return;
     }
@@ -74,6 +86,15 @@ void OnTick(float)
     // text once it has held for two reads, so a redraw can't pass for one.
     if (++g_watch < 3) return;
     g_watch = 0;
+    if (menu::ActiveMenu() == menu::Id::Book) {
+        // A next page shows the same text further on: nothing new to say.
+        std::string book = game::GetBookText();
+        if (!book.empty() && book != g_last) {
+            g_last = book;
+            tolk::Speak(book, tolk::Priority::System, true);
+        }
+        return;
+    }
     std::string text = game::GetActiveMessageText();
     if (text.empty() || text == g_last) { g_pending.clear(); return; }
     if (text != g_pending) { g_pending = text; return; }

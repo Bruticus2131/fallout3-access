@@ -516,11 +516,26 @@ function Install-Mod([string] $Zip) {
     } else {
         # A fresh install speaks the language the installer was run in. An
         # update keeps the player's own choice, with the rest of their settings.
-        $lang = if ($script:Pl) { "pl" } else { "en" }
+        # Russian: the mod speaks from lang_ru.txt (this log stays English).
+        $lang = if ($script:Pl) { "pl" } elseif ($Language -eq "ru") { "ru" } else { "en" }
         $text = [IO.File]::ReadAllText($iniPath)
         $text = $text -replace '(?m)^(Language\s*=\s*)[A-Za-z]+', ('${1}' + $lang)
         [IO.File]::WriteAllText($iniPath, $text, (New-Object Text.UTF8Encoding($false)))
-        Write-Step (T "Język moda: polski (Language = pl w Fallout3Access.ini)" "Mod language set to English (Language = en in Fallout3Access.ini)")
+        if ($lang -eq "ru") { Write-Step "Mod language set to Russian (Language = ru in Fallout3Access.ini)" }
+        else { Write-Step (T "Język moda: polski (Language = pl w Fallout3Access.ini)" "Mod language set to English (Language = en in Fallout3Access.ini)") }
+    }
+    # Russian picked in the installer: the mod speaks Russian on an update
+    # too (there was no Russian before, so a kept file cannot have chosen
+    # it), and the game's text is read as Windows-1251 unless a code page
+    # was set by hand.
+    if ($Language -eq "ru") {
+        $text = [IO.File]::ReadAllText($iniPath)
+        $fixed = $text -replace '(?m)^(Language\s*=\s*)[A-Za-z]+', '${1}ru'
+        $fixed = $fixed -replace '(?m)^(GameTextCodepage\s*=\s*)0\b', '${1}1251'
+        if ($fixed -ne $text) {
+            [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
+            Write-Step "Russian: Language = ru, GameTextCodepage = 1251 in Fallout3Access.ini"
+        }
     }
 
     # Both files, where the game looks for them — checked, not assumed.

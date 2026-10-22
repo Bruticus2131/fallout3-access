@@ -137,7 +137,7 @@ A blinding white floods everything.
 You are one year old. You stand in a big wooden playpen in a nursery in Vault 101 - the walls are metal, like everywhere in the vault.
 Around you: toys, a small rug, a crib with a mobile, a couch and a small table. Dad crouches in the playpen and holds out his arms to you.
 
-[npc Dad @00014E83]
+[npc Dad @00014E83 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
 Dad: a middle-aged man with short, wavy, dark hair, in a white lab coat, with a Pip-Boy on his forearm. The game has made his face resemble yours.
 
 [stage 00014E83 18]
@@ -187,68 +187,68 @@ You stand next to Dad. Jonas raises a camera.
 [stage 00014E84 98]
 A camera flash. The picture turns white, and more years go by.
 
-[npc Overseer @00014E84]
+[npc Overseer @00014E84 #000CBCFB,000230DA,000300F0,0002D043]
 Overseer: an older man with Hispanic features, close-cropped gray hair and a stern face, in a blue vault jumpsuit.
 
-[npc Amata @00014E84]
+[npc Amata @00014E84 #000A7883,000230DD,000300E9,0002549E,0001CE24]
 Amata, your best friend and the Overseer's daughter: a ten-year-old girl with Hispanic features, dark hair and hazel eyes, in a child's vault jumpsuit and a party hat.
 
-[npc Butch @00014E84]
+[npc Butch @00014E84 #000C111F,000230DC,000300EA,00027F65,0001CE26]
 Butch: a boy your age and the school bully - fair-skinned, with curly dark blond hair, in a child's vault jumpsuit.
 
-[npc Paul Hannon @00014E84]
+[npc Paul Hannon @00014E84 #000C1120,000300EB,0001CE28]
 Paul Hannon: a Black boy with short black hair, in a party hat.
 
-[npc Wally Mack @00014E84]
+[npc Wally Mack @00014E84 #000C111E,0004E894,000300EC,0001CE2A]
 Wally Mack: a boy with short dark hair, a friend of Butch's.
 
-[npc Old Lady Palmer @00014E84]
+[npc Old Lady Palmer @00014E84 #000309A7,000309A6]
 Old Lady Palmer: a very old, slight woman with thin gray hair, in a birthday hat.
 
-[npc Stanley @00014E84]
+[npc Stanley @00014E84 #0006F543,0006B236,00031648,0001CFD8]
 Stanley: the vault's elderly mechanic, gray hair combed back, work overalls and a party hat.
 
-[npc Beatrice @00014E84]
+[npc Beatrice @00014E84 #0007542A,000309AC,0001CFBF]
 Beatrice: an older woman with Asian features, neatly styled dark hair, in a vault jumpsuit.
 
-[npc Andy @00014E84]
+[npc Andy @00014E84 #00074163,00020456,0009B172,0006B237]
 Andy: a Mister Handy helper robot - a round metal body hovering above the floor on a small thruster flame, three eyes on stalks and three arms ending in tools.
 
-[npc Jonas @00014E84]
+[npc Jonas @00014E84 #00099343,000300E7,0001CFBC]
 Jonas, Dad's assistant: a young Black man in glasses, with short black hair, in a white lab coat.
 
-[npc Dad @00014E84]
+[npc Dad @00014E84 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
 Dad: the first gray streaks show in his hair; he wears a white lab coat and a Pip-Boy.
 
-[npc Officer Gomez @00014E84]
+[npc Officer Gomez @00014E84 #00064911,000309AE,00027057]
 Officer Gomez: a vault guard with Hispanic features, in a security jumpsuit with a vest, a baton at his belt.
 
-[npc Officer Kendall @00014E84]
+[npc Officer Kendall @00014E84 #0009B171,0006490F,00027055]
 Officer Kendall: a vault guard with a shaved head, in a security jumpsuit with a vest.
 
 # ---------------------------------------------------------------- Future Imperfect
 [stage 00014E85 5]
 You are sixteen. You are in Dad's office in the vault clinic: a desk with a terminal, a lit X-ray viewer, a test-tube rack and a chemistry set.
 
-[npc Dad @00014E85]
+[npc Dad @00014E85 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
 Dad: grayer now, his face more tired; still in a white coat.
 
 [stage 00014E85 20]
 In the corridor, Butch and his two buddies surround Amata and taunt her.
 
-[npc Butch @00014E85]
+[npc Butch @00014E85 #000C111F,000230DC,000300EA,00027F65,0001CE26]
 Butch: sixteen, leader of the Tunnel Snakes gang - the gang's leather jacket with a snake, hair swept up high like a 1950s rock and roller.
 
-[npc Wally Mack @00014E85]
+[npc Wally Mack @00014E85 #000C111E,0004E894,000300EC,0001CE2A]
 Wally Mack: a teenager with close-cropped dark hair, in a Tunnel Snakes jacket.
 
-[npc Paul Hannon @00014E85]
+[npc Paul Hannon @00014E85 #000C1120,000300EB,0001CE28]
 Paul Hannon: a Black teenager with his hair swept up into a high pompadour, in a Tunnel Snakes jacket.
 
-[npc Amata @00014E85]
+[npc Amata @00014E85 #000A7883,000230DD,000300E9,0002549E,0001CE24]
 Amata: sixteen, dark hair pinned back, hazel eyes, a vault jumpsuit.
 
-[npc Mr. Brotch @00014E85]
+[npc Mr. Brotch @00014E85 #0003D347,0001CFB7]
 Mr. Brotch, the teacher: a middle-aged Black man with close-cropped hair, in a vault jumpsuit.
 
 [stage 00014E85 50]
@@ -264,7 +264,7 @@ The picture turns white again.
 [stage 00014E86 2]
 You are nineteen. You lie in bed in your room in the vault, and someone is shaking you - it's Amata. An alarm sounds in the distance.
 
-[npc Amata @00014E86]
+[npc Amata @00014E86 #000A7883,000230DD,000300E9,0002549E,0001CE24]
 Amata: nineteen, dark hair pinned back, in a vault jumpsuit; she is frightened and out of breath.
 
 [stage 00014E86 12]
@@ -273,19 +273,19 @@ In the corridor outside the door, a vault guard is fighting Radroaches.
 [stage 00014E86 18]
 In the DeLorias' quarters, Butch's mother cowers against the wall as Radroaches scurry around her.
 
-[npc Ellen DeLoria @00014E86]
+[npc Ellen DeLoria @00014E86 #000230DF,000273CB]
 Ellen DeLoria, Butch's mother: a middle-aged woman with brown hair pinned up in a bun, in a vault jumpsuit.
 
-[npc Butch @00014E86]
+[npc Butch @00014E86 #000C111F,000230DC,000300EA,00027F65,0001CE26]
 Butch: in his Tunnel Snakes jacket, terrified and close to tears.
 
 [stage 00014E86 36]
 In the security office, Amata stands before the Overseer, and a guard is about to strike her.
 
-[npc Overseer @00014E86]
+[npc Overseer @00014E86 #000CBCFB,000230DA,000300F0,0002D043]
 Overseer: gone almost completely gray, in a vault jumpsuit, his face tight with anger.
 
-[npc Jonas @00014E86]
+[npc Jonas @00014E86 #00099343,000300E7,0001CFBC]
 Jonas lies lifeless on the floor.
 
 [stage 00014E86 120]

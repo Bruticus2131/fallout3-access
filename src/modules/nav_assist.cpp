@@ -39,21 +39,6 @@ void SpeakWhereAmI()
     tolk::Speak(buf, tolk::Priority::System, true);
 }
 
-void SpeakPlayerStatus()
-{
-    if (SkipIfNotInGame()) return;
-    if (poll::MenuModeActive()) return;   // the world only — silent in VATS/menus
-    auto s = game::GetPlayerStatus();
-    char hp[16], ap[16], rad[16], caps[16];
-    std::snprintf(hp,   sizeof(hp),   "%d", s.health);
-    std::snprintf(ap,   sizeof(ap),   "%d", s.ap);
-    std::snprintf(rad,  sizeof(rad),  "%d", s.radiation);
-    std::snprintf(caps, sizeof(caps), "%d", s.caps);
-    tolk::Speak(
-        strings::RenderArgs(strings::Key::PlayerStatusFmt, hp, ap, rad, caps),
-        tolk::Priority::System, true);
-}
-
 void SpeakQuestTarget()
 {
     if (SkipIfNotInGame()) return;
@@ -73,6 +58,15 @@ void SpeakQuestTarget()
                    qt.position.z != 0.0f;
     if (!has_pos) {
         tolk::Speak(strings::T("Zadanie: ", "Quest: ") + label, tolk::Priority::System, true);
+        return;
+    }
+    // In another place: where, not a bearing to that place's coordinates.
+    if (qt.refr && !game::TargetSharesPlayerSpace(qt.refr)) {
+        std::string where = game::GetRefPlaceName(qt.refr);
+        tolk::Speak(strings::T("Zadanie: ", "Quest: ") + label +
+                        strings::T(", w innym miejscu", ", in another place") +
+                        (where.empty() ? std::string() : ": " + where),
+                    tolk::Priority::System, true);
         return;
     }
     auto pos = game::GetPlayerPosition();
@@ -140,7 +134,6 @@ void Init()
 {
     const auto& h = config::Get().hotkeys;
     hotkeys::Bind(h.where_am_i,       &SpeakWhereAmI);
-    hotkeys::Bind(h.player_status,    &SpeakPlayerStatus);
     hotkeys::Bind(h.quest_target,     &SpeakQuestTarget);
     hotkeys::Bind(h.describe_compass, &SpeakCompass);
     hotkeys::Bind(h.guide_quest,      &GuideToQuest);

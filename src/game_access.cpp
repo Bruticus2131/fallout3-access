@@ -36,15 +36,9 @@ namespace rt = fose_rt;
 // the bytes get reinterpreted as UTF-8.
 static UINT ResolveGameCodepage()
 {
-    int cp = config::Get().game_text_codepage;
-    if (cp > 0) return (UINT)cp;
-    // auto: the GAME's language decides (the mod may speak another one):
-    // Polish localization -> 1250; otherwise the system ANSI page.
-    const auto& c = config::Get();
-    const std::string& game = c.game_language.empty() ? c.language : c.game_language;
-    if (game == "pl") return 1250;
-    if (game == "en" || game == "de" || game == "fr" || game == "es" || game == "it") return 1252;
-    return CP_ACP;
+    // The INI's, or the GAME's language's (the mod may speak another one):
+    // Polish 1250, Russian 1251, Western 1252, otherwise the system's.
+    return (UINT)config::GameTextCodepage();
 }
 
 static std::string GameStrToUtf8(const char* s)
@@ -347,6 +341,25 @@ std::vector<std::string> RunningQuestNames()
     return out;
 }
 
+std::vector<std::string> CompletedQuestNames()
+{
+    std::vector<std::string> out;
+    UInt8* dh = rt::g_addrs ? rt::DataHandlerBase() : nullptr;
+    if (IsBadReadPtr(dh, 0xD8)) return out;
+    struct Node { UInt8* item; Node* next; };
+    Node* node = reinterpret_cast<Node*>(dh + 0xD4);
+    for (int safety = 0; node && safety < 8192; ++safety) {
+        if (IsBadReadPtr(node, 8)) break;
+        UInt8* q = node->item;
+        node = node->next;
+        if (!q || IsBadReadPtr(q, 0x54) || !(q[0x3C] & 0x02) || !QuestKnown(q)) continue;
+        const char* nm = *reinterpret_cast<char**>(q + 0x34);
+        if (IsBadReadPtr(nm, 1) || !*nm) continue;
+        out.push_back(GameStrToUtf8(nm));
+    }
+    return out;
+}
+
 std::vector<WorldEntity> GetActiveQuests(bool trackedOnly)
 {
     // List EVERY quest the player currently has, not just the tracked one.
@@ -474,6 +487,12 @@ const char* BaseFormName(TESForm* base)
     case kFormType_AlchemyItem:
         off = 0x48;
         break;
+    // BGSNote: TESModel (0x30) comes first, so its name is at 0x48 too
+    // (FOSE GameForms.h). Without it every note and holotape lying about was
+    // unnamed and the scanner skipped it - Dad's last holotape included.
+    case kFormType_Note:
+        off = 0x48;
+        break;
     default:
         return nullptr;
     }
@@ -483,6 +502,13 @@ const char* BaseFormName(TESForm* base)
     if (!s || !*s) return nullptr;
     if (fn->name.m_dataLen == 0 || fn->name.m_dataLen > 200) return nullptr;
     return s;
+}
+
+bool IsFixtureType(UInt32 t)
+{
+    return t == kFormType_Activator || t == kFormType_TalkingActivator ||
+           t == kFormType_Terminal  || t == kFormType_Furniture ||
+           t == kFormType_Light;
 }
 
 WorldEntity::Kind KindOf(UInt32 typeID)
@@ -708,6 +734,70 @@ int ContainerItemState(TESForm* base, const TESObjectREFR* r, ContainerTally* ou
     return ContainerItemStateAt(base, 0x30, r, out);
 }
 
+// The ref's ExtraContainerChanges entry list (tList<EntryData> head: item @0,
+// next @4; EntryData = extendData @0, countDelta @4, form @8), or null.
+const UInt8* ContainerChangesList(const TESObjectREFR* r)
+{
+    if (!Readable(r, 0x48)) return nullptr;
+    const UInt8* xn = *reinterpret_cast<const UInt8* const*>(
+                          reinterpret_cast<const UInt8*>(r) + 0x44);
+    for (int i = 0; xn && i < 128; ++i) {
+        if (!Readable(xn, 0x10)) return nullptr;
+        if (xn[0x04] == 0x15) {                            // kExtraData_ContainerChanges
+            const UInt8* data = *reinterpret_cast<const UInt8* const*>(xn + 0x0C);
+            if (!Readable(data, 0x04)) return nullptr;
+            return *reinterpret_cast<const UInt8* const*>(data);
+        }
+        xn = *reinterpret_cast<const UInt8* const*>(xn + 0x08);
+    }
+    return nullptr;
+}
+
+// The extra data of `type` in one ExtraDataList (vtable @0, first node @4;
+// a node: type byte @4, next @8), or null.
+const UInt8* FindExtra(const UInt8* xlist, UInt8 type)
+{
+    if (!Readable(xlist, 0x08)) return nullptr;
+    const UInt8* xn = *reinterpret_cast<const UInt8* const*>(xlist + 0x04);
+    for (int i = 0; xn && i < 64; ++i) {
+        if (!Readable(xn, 0x10)) return nullptr;
+        if (xn[0x04] == type) return xn;
+        xn = *reinterpret_cast<const UInt8* const*>(xn + 0x08);
+    }
+    return nullptr;
+}
+
+// How many of the form with this id a ref carries: its base container's count
+// plus the changes record's delta, as FOSE's GetItemCount counts it.
+// `contOff` = where the base keeps its TESContainer (+0x64 for actors).
+int ItemCountIn(const TESObjectREFR* r, UInt32 contOff, uint32_t formId)
+{
+    if (!Readable(r, 0x48) || !Readable(r->baseForm, contOff + 0x0C)) return -1;
+    long n = 0;
+    const UInt8* node = reinterpret_cast<const UInt8*>(r->baseForm) + contOff + 0x04;
+    for (int i = 0; node && i < 256; ++i) {
+        if (!Readable(node, 0x08)) break;
+        const UInt8* fc = *reinterpret_cast<const UInt8* const*>(node);   // FormCount*
+        if (fc && Readable(fc, 0x08)) {
+            auto* f = *reinterpret_cast<TESForm* const*>(fc + 0x04);
+            if (Readable(f, 0x10) && f->refID == formId)
+                n += *reinterpret_cast<const SInt32*>(fc);
+        }
+        node = *reinterpret_cast<const UInt8* const*>(node + 0x04);
+    }
+    for (const UInt8* list = ContainerChangesList(r); list; ) {
+        if (!Readable(list, 0x08)) break;
+        const UInt8* ed = *reinterpret_cast<const UInt8* const*>(list);
+        if (ed && Readable(ed, 0x0C)) {
+            auto* f = *reinterpret_cast<TESForm* const*>(ed + 0x08);
+            if (Readable(f, 0x10) && f->refID == formId)
+                n += *reinterpret_cast<const SInt32*>(ed + 0x04);
+        }
+        list = *reinterpret_cast<const UInt8* const*>(list + 0x04);
+    }
+    return n < 0 ? 0 : static_cast<int>(n);
+}
+
 // Scan one cell's reference list into `out`.
 void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
                   const void* selfRef, bool actors_only,
@@ -850,6 +940,8 @@ bool OnMainThread()
     DWORD t = g_main_tid.load();
     return t != 0 && t == GetCurrentThreadId();
 }
+
+bool IsFixture(const WorldEntity& e) { return IsFixtureType(e.form_type); }
 
 bool IsHostileToPlayer(const void* refr)
 {
@@ -1122,6 +1214,7 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
 
 namespace {
 std::vector<uint32_t> g_dead_ids;      // under g_hostile_mx
+std::vector<HostileRef> g_hostile_refs;   // under g_hostile_mx
 
 // Is this actor dead? The game's GetDead (0x0050F840) asks two virtuals:
 // vtable+0x100 "is an actor" and vtable+0x22C IsDead(1). 1 dead, 0 alive,
@@ -1171,6 +1264,7 @@ void RefreshHostiles()
     std::vector<const void*> compass;
     CompassHostiles(&compass);
     std::vector<uint32_t> ids, dead;
+    std::vector<HostileRef> refs;
     // Wider than anything the scanner lists (2400 units by default), and with
     // room for a crowd: a body left out here would be listed among the living.
     for (const auto& e : ScanNearby(8000, 256, /*actors_only*/true, false)) {
@@ -1178,12 +1272,32 @@ void RefreshHostiles()
         int d = ActorDeadState(e.refr);
         if (d == 1) { dead.push_back(e.form_id); continue; }
         bool onCompass = std::find(compass.begin(), compass.end(), e.refr) != compass.end();
-        if (onCompass || IsHostileToPlayer(e.refr)) ids.push_back(e.form_id);
+        if (onCompass || IsHostileToPlayer(e.refr)) {
+            ids.push_back(e.form_id);
+            refs.push_back({ e.refr, e.form_id, e.name });
+        }
     }
     std::lock_guard<std::mutex> lk(g_hostile_mx);
     g_hostile_ids.swap(ids);
     g_dead_ids.swap(dead);
+    g_hostile_refs.swap(refs);
 }
+
+void ForgetHostiles()
+{
+    std::lock_guard<std::mutex> lk(g_hostile_mx);
+    g_hostile_ids.clear();
+    g_dead_ids.clear();
+    g_hostile_refs.clear();
+}
+
+std::vector<HostileRef> GetHostileRefs()
+{
+    std::lock_guard<std::mutex> lk(g_hostile_mx);
+    return g_hostile_refs;
+}
+
+int RefDeadState(const void* refr) { return ActorDeadState(refr); }
 
 bool IsKnownHostile(uint32_t refid)
 {
@@ -1199,6 +1313,19 @@ bool IsKnownDead(uint32_t refid)
     std::lock_guard<std::mutex> lk(g_hostile_mx);
     for (uint32_t id : g_dead_ids) if (id == refid) return true;
     return false;
+}
+
+float GetGameHour()
+{
+    if (!OnMainThread()) return -1.0f;
+    const UInt8 want[] = { 0x51, 0x8B, 0x0D, 0x14, 0xDD, 0x06, 0x01 };   // LookupFormByID
+    auto* p = reinterpret_cast<const UInt8*>(0x00455190);
+    if (!Readable(p, sizeof(want)) || std::memcmp(p, want, sizeof(want)) != 0) return -1.0f;
+    using LookupFn = TESForm* (__cdecl*)(UInt32);
+    TESForm* f = reinterpret_cast<LookupFn>(0x00455190)(0x00000038);   // GameHour
+    if (!Readable(f, 0x28) || f->typeID != kFormType_Global) return -1.0f;
+    const float h = *reinterpret_cast<const float*>(reinterpret_cast<const UInt8*>(f) + 0x24);
+    return (std::isfinite(h) && h >= 0.0f && h <= 24.0f) ? h : -1.0f;
 }
 
 int GetQuestStage(uint32_t questId, bool* running)
@@ -1987,12 +2114,38 @@ std::string GetQuestObjectivesText()
     if (!m) return {};
     Tile* list = FindChildByName(m, "MM_QuestObjectivesList", 8);
     if (!list) return {};
+    // The list keeps a pool of rows: every objective it ever showed stays in
+    // it, hidden (28 rows, one of them shown, in a dump at Tranquility Lane),
+    // and their text tiles still say visible. Only the shown rows are this
+    // quest's, in their order on screen; a dimmed one is done, as the screen
+    // greys it out.
+    struct Row { float y; std::string text; bool done; };
+    std::vector<Row> rows;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(&list->childList);
+    for (int i = 0; node && i < 512; ++i) {
+        if (!Readable(node, sizeof(Node))) break;
+        Tile::ChildNode* cn = node->item;
+        node = node->next;
+        if (!cn || !Readable(cn, 0x08) || !cn->child || !TileVisible(cn->child)) continue;
+        Tile* txt = FindChildByName(cn->child, "ListItemText", 1);
+        const char* str = txt ? TileStringTrait(txt) : TileStringTrait(cn->child);
+        std::string t = str ? GameStrToUtf8(str) : std::string();
+        const char* kWs = " \t\n\r";
+        size_t b = t.find_first_not_of(kWs);
+        if (b == std::string::npos) continue;
+        t = t.substr(b, t.find_last_not_of(kWs) - b + 1);
+        const float a = txt ? TileNum(txt, kTileValue_alpha) : 255.0f;
+        rows.push_back({ TileNum(cn->child, kTileValue_y), t, a > 0.0f && a <= 128.0f });
+    }
+    std::stable_sort(rows.begin(), rows.end(), [](const Row& x, const Row& y) { return x.y < y.y; });
     std::string out;
-    CollectAllVisibleText(list, 0, out);
-    const char* kWs = " \t\n\r";
-    size_t b = out.find_first_not_of(kWs);
-    if (b == std::string::npos) return {};
-    return out.substr(b, out.find_last_not_of(kWs) - b + 1);
+    for (const auto& r : rows) {
+        if (!out.empty()) out += ' ';
+        out += r.text;
+        if (r.done) out += strings::T(" (wykonane)", " (done)");
+    }
+    return out;
 }
 
 // The "Ile?" quantity prompt: the amount currently chosen and the stack size.
@@ -2398,6 +2551,19 @@ float GetPlayerAV(uint32_t avCode)
     return reinterpret_cast<GetAVFn>(vtbl[3])(avOwner, avCode);
 }
 
+float GetPlayerAVMax(uint32_t avCode)
+{
+    auto* p = rt::Player();
+    if (!p) return -1.0f;
+    UInt8* avOwner = reinterpret_cast<UInt8*>(p) + 0x9C;
+    if (IsBadReadPtr(avOwner, 4)) return -1.0f;
+    void** vtbl = *reinterpret_cast<void***>(avOwner);
+    if (IsBadReadPtr(vtbl, 0x24) || IsBadReadPtr(vtbl[8], 1)) return -1.0f;
+    typedef float (__thiscall* GetAVFn)(void* thisptr, UInt32 code);
+    float v = reinterpret_cast<GetAVFn>(vtbl[8])(avOwner, avCode);
+    return std::isfinite(v) ? v : -1.0f;
+}
+
 // The same call as GetPlayerAV, but for any actor. Used to notice that a shot
 // landed: the engine has no event we can hook here, so the evidence is the
 // target's own health going down.
@@ -2419,6 +2585,58 @@ float GetRefAV(const void* refr, uint32_t avCode)
     typedef float (__thiscall* GetAVFn)(void* thisptr, UInt32 code);
     float v = reinterpret_cast<GetAVFn>(vtbl[3])(avOwner, avCode);
     return std::isfinite(v) ? v : -1.0f;
+}
+
+int GetPlayerItemCount(uint32_t formId)
+{
+    return ItemCountIn(reinterpret_cast<const TESObjectREFR*>(rt::Player()), 0x64, formId);
+}
+
+// The equipped weapon is the inventory entry of a weapon one of whose extra
+// data lists carries Worn (0x16) or WornLeft (0x17) - how FOSE's
+// GetEquippedObject finds it. TESObjectWEAP (FOSE GameForms.h): name @0x30,
+// TESHealthForm @0x94 (health @0x98), BGSAmmoForm @0xA4 (TESAmmo* @0xA8). The
+// carried weapon's own condition is its ExtraHealth (0x25, float @0x0C).
+bool GetEquippedWeapon(EquippedWeaponInfo* out)
+{
+    auto* p = reinterpret_cast<const TESObjectREFR*>(rt::Player());
+    if (!out || !p) return false;
+    for (const UInt8* list = ContainerChangesList(p); list; ) {
+        if (!Readable(list, 0x08)) break;
+        const UInt8* ed = *reinterpret_cast<const UInt8* const*>(list);
+        list = *reinterpret_cast<const UInt8* const*>(list + 0x04);
+        if (!ed || !Readable(ed, 0x0C)) continue;
+        auto* w = *reinterpret_cast<TESForm* const*>(ed + 0x08);
+        if (!Readable(w, 0xB0) || w->typeID != kFormType_Weapon) continue;
+        for (const UInt8* xl = *reinterpret_cast<const UInt8* const*>(ed); xl; ) {
+            if (!Readable(xl, 0x08)) break;
+            const UInt8* x = *reinterpret_cast<const UInt8* const*>(xl);   // ExtraDataList*
+            xl = *reinterpret_cast<const UInt8* const*>(xl + 0x04);
+            if (!x || !(FindExtra(x, 0x16) || FindExtra(x, 0x17))) continue;
+            const char* nm = BaseFormName(w);
+            out->name = nm ? GameStrToUtf8(nm) : std::string();
+            const UInt32 baseHealth = *reinterpret_cast<const UInt32*>(
+                                          reinterpret_cast<const UInt8*>(w) + 0x98);
+            if (baseHealth > 0 && baseHealth < 100000) {
+                float h = static_cast<float>(baseHealth);
+                if (const UInt8* xh = FindExtra(x, 0x25))
+                    if (Readable(xh, 0x10)) h = *reinterpret_cast<const float*>(xh + 0x0C);
+                if (std::isfinite(h)) {
+                    int pct = static_cast<int>(h / baseHealth * 100.0f + 0.5f);
+                    out->condition = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+                }
+            }
+            auto* ammo = *reinterpret_cast<TESForm* const*>(
+                             reinterpret_cast<const UInt8*>(w) + 0xA8);
+            if (Readable(ammo, 0x40) && ammo->typeID == kFormType_Ammo) {
+                const char* an = BaseFormName(ammo);
+                out->ammo = an ? GameStrToUtf8(an) : std::string();
+                out->ammo_count = GetPlayerItemCount(ammo->refID);
+            }
+            return !out->name.empty();
+        }
+    }
+    return false;
 }
 
 bool IsThirdPerson()
@@ -3742,6 +3960,19 @@ OSInputGlobals* InputGlobals()
     return *pp;
 }
 
+// Is the key bound to this control (a DirectInput scancode) held? Codes from
+// 0x80 up are E0-prefixed (the arrows, Insert/Delete, Home/End, PgUp/PgDn);
+// plain MAPVK_VSC_TO_VK does not translate those, so a control bound to an
+// arrow key read as never held.
+bool BoundKeyHeld(OSInputGlobals* globs, UInt32 control)
+{
+    UInt8 kb = globs->keyBinds[control];
+    if (kb == 0xFF || kb == 0) return false;
+    UINT vk = kb >= 0x80 ? MapVirtualKeyA(0xE000u | (kb & 0x7Fu), MAPVK_VSC_TO_VK_EX)
+                         : MapVirtualKeyA(kb, MAPVK_VSC_TO_VK);
+    return vk && (GetAsyncKeyState((int)vk) & 0x8000) != 0;
+}
+
 bool IsAimControlHeld()
 {
     constexpr UInt32 kControl_Aim = 6;
@@ -3749,11 +3980,7 @@ bool IsAimControlHeld()
     if (!globs || IsBadReadPtr(globs, 0x1BC0)) return false;
     if (kControl_Aim >= OSInputGlobals::kMaxControlBinds) return false;
 
-    UInt8 kb = globs->keyBinds[kControl_Aim];
-    if (kb != 0xFF && kb != 0) {
-        UINT vk = MapVirtualKeyA(kb, MAPVK_VSC_TO_VK);   // DirectInput scancode
-        if (vk && (GetAsyncKeyState((int)vk) & 0x8000)) return true;
-    }
+    if (BoundKeyHeld(globs, kControl_Aim)) return true;
     UInt8 mb = globs->mouseBinds[kControl_Aim];
     if (mb != 0xFF) {
         static const int kMouseVK[] = { VK_LBUTTON, VK_RBUTTON, VK_MBUTTON,
@@ -3762,6 +3989,14 @@ bool IsAimControlHeld()
             (GetAsyncKeyState(kMouseVK[mb]) & 0x8000)) return true;
     }
     return false;
+}
+
+bool IsControlKeyHeld(uint32_t control)
+{
+    auto* globs = InputGlobals();
+    if (!globs || IsBadReadPtr(globs, 0x1BC0)) return false;
+    if (control >= OSInputGlobals::kMaxControlBinds) return false;
+    return BoundKeyHeld(globs, control);
 }
 
 // Does the player have a weapon out? Aim assistance has no business running
@@ -4188,6 +4423,15 @@ bool FacePointNative(const Vec3& p)
 // prologue even loads the player singleton and special-cases moving the player).
 // Used as a last resort when navigation can't reach a target: teleport the
 // player to the selected object's reference. MUST run on the MAIN thread.
+namespace { std::atomic<DWORD> g_teleport_at{ 0 }; }
+constexpr DWORD kWorldSettleMs = 2500;
+
+bool WorldSettling()
+{
+    const DWORD t = g_teleport_at.load();
+    return t != 0 && GetTickCount() - t < kWorldSettleMs;
+}
+
 void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID)
 {
     auto* p = rt::Player();
@@ -4223,6 +4467,9 @@ void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID)
     auto* tr = reinterpret_cast<const TESObjectREFR*>(targetRefr);
     float bx = p->posX, by = p->posY, bz = p->posZ;
     using PFN = char (__cdecl*)(void* who, void* target, float x, float y, float z);
+    // From here the world is in motion: settle before touching it again.
+    g_teleport_at.store(GetTickCount() | 1u);
+    ForgetHostiles();
     char rv = reinterpret_cast<PFN>(0x00528730)(p, const_cast<void*>(targetRefr),
                                                 0.0f, 0.0f, 0.0f);
     F3A_INFO("Teleport: ret=%d player (%.0f,%.0f,%.0f) -> (%.0f,%.0f,%.0f) "
@@ -4269,6 +4516,23 @@ bool TargetSharesPlayerSpace(const void* targetRefr)
 // exterior, the worldspace name plus the worldspace pointer. Diagnostic aid for
 // the cross-worldspace autowalk (so a dump shows WHERE the target ref lives vs
 // the player). "(...)" placeholders on any bad read.
+std::string GetRefPlaceName(const void* refr)
+{
+    if (!refr || IsBadReadPtr((void*)refr, 0x40)) return {};
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    TESObjectCELL* c = r->parentCell;
+    if (!c || IsBadReadPtr(c, 0xC4)) return {};
+    TESWorldSpace* ws = c->worldSpace;
+    if (!ws) {
+        const char* cn = c->fullName.name.m_data;
+        if (cn && !IsBadReadPtr((void*)cn, 1) && *cn) return GameStrToUtf8(cn);
+        return {};
+    }
+    if (IsBadReadPtr(ws, 0x24)) return {};
+    const char* wn = ws->fullName.name.m_data;
+    return (wn && !IsBadReadPtr((void*)wn, 1) && *wn) ? GameStrToUtf8(wn) : std::string();
+}
+
 std::string GetRefSpaceLabel(const void* refr)
 {
     if (!refr || IsBadReadPtr((void*)refr, 0x40)) return "(bad ref)";
@@ -4865,8 +5129,15 @@ bool RowIsEquipped(Tile* row)
     // and its glove had `vis=1`, while the spare Pip-Boy, caps and Mentats
     // carried the same tile with no visible flag. Alpha is NOT the signal —
     // every marker sits at 255, so testing alpha reported every item as worn.
-    Tile* mk = FindChildByName(row, "Template_ItemMarker", 3);
-    return mk && TileVisible(mk);
+    // Pip-Boy: IM_Template_ItemMarker; container: CM_list_template_ItemMarker
+    // (a lower-case t - the old search for "Template_" never found it, so no
+    // worn item in a container screen was ever said to be worn). Barter's
+    // marker also shows an item put up for the deal: told apart by its
+    // picture, square_filled = equipped (see DescribeRowParts).
+    Tile* mk = FindChildByName(row, "emplate_ItemMarker", 3);
+    if (!mk || !TileVisible(mk)) return false;
+    const char* f = TileStrTrait(mk, kTileValue_filename);
+    return !(mt == kMenuType_Barter && f && !std::strstr(f, "filled"));
 }
 
 void DescribeRowParts(Tile* t, std::string& label, std::string& value)
@@ -4874,6 +5145,63 @@ void DescribeRowParts(Tile* t, std::string& label, std::string& value)
     label.clear();
     value.clear();
     if (!t) return;
+    // A barter row: its name, its price, and whether it is worn or put up for
+    // the deal - the square beside it says which (barter_menu.xml
+    // BM_list_template: _Filename_1 square_filled = equipped, _Filename_2
+    // square = selected for the transaction).
+    // Told by the menu the row is in, not by its name: the name test alone
+    // never matched in play ("Pancerz skórzany, 46" - a bare number nobody
+    // could place). The price is the ItemValue text, or else the row's one
+    // all-digit text.
+    if (TileNameHas(t, "BM_list_template") || OwningMenuType(t) == kMenuType_Barter) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            std::string kids;
+            struct Node { Tile::ChildNode* item; Node* next; };
+            auto* node = reinterpret_cast<Node*>(&t->childList);
+            for (int i = 0; node && i < 16; ++i) {
+                if (!Readable(node, sizeof(Node))) break;
+                Tile::ChildNode* cn = node->item;
+                node = node->next;
+                if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+                const char* kn = cn->child->name.m_data;
+                kids += std::string(kids.empty() ? "" : ", ") + (kn ? kn : "?");
+            }
+            F3A_INFO("Barter row tile '%s', children: %s",
+                     t->name.m_data ? t->name.m_data : "?", kids.c_str());
+        }
+        Tile* nameT  = FindChildByName(t, "ListItemText", 0);
+        Tile* priceT = FindChildByName(t, "ItemValue", 0);
+        Tile* mark   = FindChildByName(t, "ItemMarker", 0);
+        const char* n = nameT ? TileStringTrait(nameT) : TileStringTrait(t);
+        label = n ? GameStrToUtf8(n) : std::string();
+        if (label.empty()) return;
+        const char* pr = priceT ? TileStringTrait(priceT) : nullptr;
+        if (!pr || !*pr) {
+            struct Node { Tile::ChildNode* item; Node* next; };
+            auto* node = reinterpret_cast<Node*>(&t->childList);
+            for (int i = 0; node && i < 16 && !pr; ++i) {
+                if (!Readable(node, sizeof(Node))) break;
+                Tile::ChildNode* cn = node->item;
+                node = node->next;
+                if (!cn || !Readable(cn, 0x08) || !cn->child || cn->child == nameT) continue;
+                const char* s = TileStringTrait(cn->child);
+                if (!s || !*s) continue;
+                bool digits = true;
+                for (const char* c = s; *c; ++c) if ((*c < '0' || *c > '9') && *c != ' ') digits = false;
+                if (digits) pr = s;
+            }
+        }
+        if (pr && *pr)
+            label += strings::T(", cena ", ", price ") + GameStrToUtf8(pr);
+        if (mark && TileVisible(mark)) {
+            const char* f = TileStrTrait(mark, kTileValue_filename);
+            if (f && std::strstr(f, "filled")) label += strings::T(", założone", ", equipped");
+            else                               label += strings::T(", w transakcji", ", in the deal");
+        }
+        return;
+    }
     CollectRowText(t, 0, label);
     if (!label.empty() && RowIsEquipped(t)) label += strings::T(", założone", ", equipped");
 
@@ -4989,6 +5317,14 @@ std::optional<MenuSelection> GetKeyboardSelection()
     sel.container = listbox;
     sel.context   = CollectPanelStaticText(listbox);
 
+    // A dialogue topic already talked through is drawn dim: the row's
+    // _line_alpha, which dialog_menu.xml copies to its ListItemText's alpha.
+    if (TileNameHas(best, "DM_Topic")) {
+        Tile* txt = FindChildByName(best, "ListItemText", 0);
+        const float a = txt ? TileNum(txt, kTileValue_alpha) : 255.0f;
+        if (a > 0.0f && a <= 128.0f) sel.label += strings::T(", już powiedziane", ", already said");
+    }
+
     // Its place among the rows of the same kind (same tile name) beside it;
     // the highlight box and the scrollbar share the parent and are skipped.
     // Only from a listindex the row really has and no other row shares - a
@@ -5100,6 +5436,12 @@ std::optional<std::string> GetKeyboardSelectionText(bool withPosition)
     return t;
 }
 
+std::mutex& ColumnReadLock()
+{
+    static std::mutex m;
+    return m;
+}
+
 bool ClickMenuBack()
 {
     auto* ifm = rt::IFM();
@@ -5146,6 +5488,23 @@ bool ClickMenuBack()
                                  m->typeID);
                     }
                     return true;
+                }
+                // Barter and the container screen: their Exit buttons
+                // (BM_ButtonB id 14, CM_ExitButton id 11 - the menus' own
+                // XML) are not called *back*/exit_button. Pressed as a mouse
+                // click on them is, with the screen's reader held off.
+                if ((m->typeID == kMenuType_Barter || m->typeID == kMenuType_Container) &&
+                    TileVisible(cn->child)) {
+                    Tile* btn = FindChildByName(cn->child,
+                        m->typeID == kMenuType_Barter ? "BM_ButtonB" : "CM_ExitButton", 6);
+                    if (btn && TileVisible(btn)) {
+                        UInt32 id = (UInt32)TileNum(btn, kTileValue_id);
+                        F3A_INFO("ClickMenuBack: exit '%s' (id=%u) in menu 0x%X",
+                                 btn->name.m_data ? btn->name.m_data : "?", id, m->typeID);
+                        std::lock_guard<std::mutex> lk(ColumnReadLock());
+                        m->HandleClick(id, btn);
+                        return true;
+                    }
                 }
                 for (const char* nm : kBackNames) {
                     Tile* btn = FindChildByName(cn->child, nm, 6);
@@ -5235,63 +5594,28 @@ int CountListRows(Tile* list, Tile** firstRow)
     return n;
 }
 
-Tile* ContainerTile(const char* name, int depth)
-{
-    auto* ifm = rt::IFM();
-    if (!ifm || !ifm->menuRoot) return nullptr;
-    struct Node { Tile::ChildNode* item; Node* next; };
-    auto* node = reinterpret_cast<Node*>(&ifm->menuRoot->childList);
-    for (int safety = 0; node && safety < 4096; ++safety) {
-        Tile::ChildNode* cn = node->item;
-        node = node->next;
-        if (!cn || !cn->child) continue;
-        auto* tm = reinterpret_cast<TileMenu*>(cn->child);
-        Menu* m = tm->menu;
-        if (!m || m->typeID != kMenuType_Container) continue;
-        return FindChildByName(cn->child, name, depth);
-    }
-    return nullptr;
-}
+// The two-column menus: the container screen and barter. FO3 builds both the
+// same way (FOSE ListBox<T>, 0x30 each): your list, the other side's list, a
+// pointer to the focused one, and a HandleSpecialKeyInput (vtable slot 14)
+// that answers 13 / 14 by moving the focus to yours / theirs and 3 / 4 by
+// clicking the focused column's category arrows. Disassembly of FO3 1.7.0.3:
+// ContainerMenu 0x0063ADE0 (lists +0x84 / +0xB4, focus +0xE4), BarterMenu
+// 0x006337C0 (lists +0x94 / +0xC4, focus +0xF4, its own menu-on-top check
+// 0x41D). Their row tiles carry id 15 (container) and 18 (barter); their tile
+// names are the same but for the CM_ / BM_ prefix.
+struct ColumnMenu {
+    UInt32      type, vtbl, special_key, mine, theirs, focus;
+    float       row_id;
+    const char* prefix;
+};
+const ColumnMenu kColumnMenus[] = {
+    { kMenuType_Container, 0x00E04E54, 0x0063ADE0, 0x84, 0xB4, 0xE4, 15.0f, "CM_" },
+    { kMenuType_Barter,    0x00E04A04, 0x006337C0, 0x94, 0xC4, 0xF4, 18.0f, "BM_" },
+};
 
-} // namespace
-
-bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs)
-{
-    Tile* myList  = ContainerTile("CM_Items_InventoryList", 4);
-    Tile* thList  = ContainerTile("CM_Container_InventoryList", 4);
-    if (!myList && !thList) return false;
-    if (mine) {
-        Tile* t = ContainerTile("CM_ItemsTitle", 4);
-        mine->title = t && TileStringTrait(t) ? GameStrToUtf8(TileStringTrait(t))
-                                              : std::string();
-        mine->rows  = CountListRows(myList, nullptr);
-    }
-    if (theirs) {
-        Tile* t = ContainerTile("CM_ContainerTitle", 4);
-        theirs->title = t && TileStringTrait(t) ? GameStrToUtf8(TileStringTrait(t))
-                                                : std::string();
-        theirs->rows  = CountListRows(thList, nullptr);
-    }
-    return true;
-}
-
-// The container menu's own column switch.
-//
-// FO3's ContainerMenu answers the same special-key codes as New Vegas's (the
-// FNV mod leans on them): its HandleSpecialKeyInput — vtable slot 14 — moves
-// the focus to YOUR list on 13 (Shift+Left) and to the CONTAINER's on 14
-// (Shift+Right), and refuses when that list is empty. Disassembly of
-// 0x0063ADE0 (FO3 1.7.0.3); the focused list is the pointer at +0xE4, which
-// equals this+0x84 for your side and this+0xB4 for the container's.
-//
-// The old way pressed the first ROW of the other list. In this menu a row
-// press MOVES that item across — a side switch that took or gave something.
-// Calling the menu's own key handler is exactly what the keyboard would do.
-namespace {
-constexpr UInt32 kContainerMenuVtbl   = 0x00E04E54;
-constexpr UInt32 kContainerSpecialKey = 0x0063ADE0;   // vtable slot 14
-
-UInt8* FindContainerMenu()
+// The open two-column menu and which one it is - checked against the vtable
+// and the slot that was disassembled, so another build is left alone.
+UInt8* FindColumnMenu(const ColumnMenu** which, Tile** tile = nullptr)
 {
     auto* ifm = rt::IFM();
     if (!ifm || !ifm->menuRoot) return nullptr;
@@ -5305,40 +5629,102 @@ UInt8* FindContainerMenu()
         auto* tm = reinterpret_cast<TileMenu*>(cn->child);
         if (!Readable(tm, sizeof(TileMenu))) continue;
         Menu* m = tm->menu;
-        if (!m || !Readable(m, 0xE8) || m->typeID != kMenuType_Container) continue;
-        auto* raw = reinterpret_cast<UInt8*>(m);
-        // Only the build this was read from: the vtable and its slot must be
-        // exactly the ones disassembled, or nothing here may be trusted.
-        UInt32 vt = *reinterpret_cast<UInt32*>(raw);
-        if (vt != kContainerMenuVtbl || !Readable(reinterpret_cast<void*>(vt), 15 * 4))
-            return nullptr;
-        if (reinterpret_cast<UInt32*>(vt)[14] != kContainerSpecialKey) return nullptr;
-        return raw;
+        if (!m || !Readable(m, 0xF8)) continue;
+        for (const auto& d : kColumnMenus) {
+            if (m->typeID != d.type) continue;
+            auto* raw = reinterpret_cast<UInt8*>(m);
+            UInt32 vt = *reinterpret_cast<UInt32*>(raw);
+            if (vt != d.vtbl || !Readable(reinterpret_cast<void*>(vt), 15 * 4) ||
+                reinterpret_cast<UInt32*>(vt)[14] != d.special_key)
+                return nullptr;
+            if (which) *which = &d;
+            if (tile) *tile = cn->child;
+            return raw;
+        }
     }
     return nullptr;
 }
 
-int FocusSideOf(const UInt8* menu)
+Tile* ColumnTile(const char* suffix, int depth)
 {
-    const UInt8* cur = *reinterpret_cast<const UInt8* const*>(menu + 0xE4);
-    if (cur == menu + 0xB4) return 1;
-    if (cur == menu + 0x84) return 0;
+    const ColumnMenu* d = nullptr;
+    Tile* menuTile = nullptr;
+    if (!FindColumnMenu(&d, &menuTile) || !menuTile) return nullptr;
+    std::string name = std::string(d->prefix) + suffix;
+    return FindChildByName(menuTile, name.c_str(), depth);
+}
+
+std::string ColumnText(const char* suffix)
+{
+    Tile* t = ColumnTile(suffix, 4);
+    const char* s = t ? TileStringTrait(t) : nullptr;
+    return s ? GameStrToUtf8(s) : std::string();
+}
+
+} // namespace
+
+bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs)
+{
+    Tile* myList  = ColumnTile("Items_InventoryList", 4);
+    Tile* thList  = ColumnTile("Container_InventoryList", 4);
+    if (!myList && !thList) return false;
+    if (mine) {
+        mine->title = ColumnText("ItemsTitle");
+        mine->rows  = CountListRows(myList, nullptr);
+    }
+    if (theirs) {
+        theirs->title = ColumnText("ContainerTitle");
+        theirs->rows  = CountListRows(thList, nullptr);
+    }
+    return true;
+}
+
+bool GetBarterState(BarterInfo* out)
+{
+    const ColumnMenu* d = nullptr;
+    if (!out || !FindColumnMenu(&d) || d->type != kMenuType_Barter) return false;
+    *out = BarterInfo{};
+    out->vendor      = ColumnText("ContainerTitle");
+    out->player_caps = ColumnText("Items_CapsLabel");
+    out->vendor_caps = ColumnText("Container_CapsLabel");
+    // The deal so far: BM_CapsFlow is shown while one stands, the amount is
+    // its text, the arrow's picture says which way the caps go.
+    Tile* flow = ColumnTile("CapsFlow", 3);
+    if (flow && TileVisible(flow)) {
+        out->amount = ColumnText("TransactionAmount");
+        Tile* icon = ColumnTile("CapsFlowIcon", 4);
+        const char* f = icon ? TileStrTrait(icon, kTileValue_filename) : nullptr;
+        if (f && std::strstr(f, "sell")) out->direction = 1;
+        else if (f && std::strstr(f, "buy")) out->direction = -1;
+    }
+    out->valid = true;
+    return true;
+}
+
+namespace {
+int FocusSideOf(const UInt8* menu, const ColumnMenu& d)
+{
+    const UInt8* cur = *reinterpret_cast<const UInt8* const*>(menu + d.focus);
+    if (cur == menu + d.theirs) return 1;
+    if (cur == menu + d.mine) return 0;
     return -1;
 }
 } // namespace
 
 int ContainerFocusSide()
 {
-    const UInt8* m = FindContainerMenu();
-    return m ? FocusSideOf(m) : -1;
+    const ColumnMenu* d = nullptr;
+    const UInt8* m = FindColumnMenu(&d);
+    return m ? FocusSideOf(m, *d) : -1;
 }
 
-Tile* SelectedRowOf(UInt8* list);   // defined below
+Tile* SelectedRowOf(UInt8* list, float rowId);   // defined below
 
 std::optional<MenuSelection> GetContainerSelection(int* out_side)
 {
     if (out_side) *out_side = -1;
-    UInt8* m = FindContainerMenu();
+    const ColumnMenu* d = nullptr;
+    UInt8* m = FindColumnMenu(&d);
     if (!m) return std::nullopt;
     // The focused column's ListBox, and ITS selected row: ListBox+0x10 is the
     // selected tile (the game's own column switch reads it there — 0x00632250
@@ -5346,10 +5732,10 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side)
     // list's tile. Read from the menu, not guessed from where a highlight box
     // happens to sit — with two columns, two highlight boxes match two rows
     // equally well, and the wrong one kept winning.
-    int side = FocusSideOf(m);
+    int side = FocusSideOf(m, *d);
     if (side < 0) return std::nullopt;
-    UInt8* list = m + (side == 1 ? 0xB4 : 0x84);
-    Tile* row = SelectedRowOf(list);
+    UInt8* list = m + (side == 1 ? d->theirs : d->mine);
+    Tile* row = SelectedRowOf(list, d->row_id);
     if (!row) return std::nullopt;
     Tile* box = *reinterpret_cast<Tile* const*>(list + 0x0C);
     MenuSelection sel;
@@ -5360,7 +5746,7 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side)
     return sel;
 }
 
-// The row a container column has selected.
+// The row a column has selected.
 //
 // The game marks it with mouseover=1 (the interface's active tile) — the
 // in-game dump shows exactly one such row, the one the arrows put the
@@ -5370,7 +5756,7 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side)
 // after a keyboard step it is null and the row names went unread. Order of
 // trust: the mouseover row, then +0x10, then the row whose list index is the
 // list's saved index (+0x24). Always a visible row inside this list's tile.
-Tile* SelectedRowOf(UInt8* list)
+Tile* SelectedRowOf(UInt8* list, float rowId)
 {
     if (!Readable(list, 0x28)) return nullptr;
     Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
@@ -5397,16 +5783,16 @@ Tile* SelectedRowOf(UInt8* list)
         node = node->next;
         if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
         Tile* c = cn->child;
-        if (TileNum(c, kTileValue_id) == 15.0f && !TileHiddenExplicitly(c) &&
+        if (TileNum(c, kTileValue_id) == rowId && !TileHiddenExplicitly(c) &&
             (int)TileNum(c, kTileValue_listindex) == want)
             return c;
     }
     return nullptr;
 }
 
-// Visible rows of a container column (row tiles carry id 15; rows filtered
-// out by the category have visible=0 and list index -1).
-int CountVisibleRows(Tile* box)
+// Visible rows of a column (rows filtered out by the category have visible=0
+// and list index -1).
+int CountVisibleRows(Tile* box, float rowId)
 {
     int n = 0;
     struct Node { Tile::ChildNode* item; Node* next; };
@@ -5417,36 +5803,46 @@ int CountVisibleRows(Tile* box)
         node = node->next;
         if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
         Tile* c = cn->child;
-        if (TileNum(c, kTileValue_id) == 15.0f && !TileHiddenExplicitly(c) &&
+        if (TileNum(c, kTileValue_id) == rowId && !TileHiddenExplicitly(c) &&
             TileNum(c, kTileValue_listindex) >= 0.0f)
             ++n;
     }
     return n;
 }
 
+int ContainerSelectedIndex(bool container_side)
+{
+    const ColumnMenu* d = nullptr;
+    UInt8* m = FindColumnMenu(&d);
+    if (!m) return -1;
+    UInt8* list = m + (container_side ? d->theirs : d->mine);
+    Tile* row = SelectedRowOf(list, d->row_id);
+    return row ? (int)TileNum(row, kTileValue_listindex) : -1;
+}
+
 int StepContainerSelection(bool container_side, int delta)
 {
-    UInt8* m = FindContainerMenu();
+    const ColumnMenu* d = nullptr;
+    UInt8* m = FindColumnMenu(&d);
     if (!m) return -1;
     const int want = container_side ? 1 : 0;
-    if (FocusSideOf(m) != want) {
+    if (FocusSideOf(m, *d) != want) {
         // The game's own Up/Down roam YOUR column, and the moment they put the
         // mouseover on one of your rows the menu switches the focus back to
         // it. Take the focus back first, the game's own way.
         using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
-        reinterpret_cast<SpecialKey>(kContainerSpecialKey)(
-            m, container_side ? 14u : 13u, 1.0f);
-        int now = FocusSideOf(m);
+        reinterpret_cast<SpecialKey>(d->special_key)(m, container_side ? 14u : 13u, 1.0f);
+        int now = FocusSideOf(m, *d);
         if (now < 0) return -1;
         if (now != want) return 0;
     }
-    UInt8* list = m + (container_side ? 0xB4 : 0x84);
+    UInt8* list = m + (container_side ? d->theirs : d->mine);
     if (!Readable(list, 0x28)) return -1;
     Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
     if (!Readable(box, sizeof(Tile))) return -1;
-    int n = CountVisibleRows(box);
+    int n = CountVisibleRows(box, d->row_id);
     if (n <= 0) return 0;
-    Tile* row = SelectedRowOf(list);
+    Tile* row = SelectedRowOf(list, d->row_id);
     int cur = row ? (int)TileNum(row, kTileValue_listindex) : -1;
     if (cur < 0 || cur >= n) {
         float saved = *reinterpret_cast<float*>(list + 0x24);
@@ -5466,20 +5862,23 @@ int StepContainerSelection(bool container_side, int delta)
     *reinterpret_cast<float*>(list + 0x24) = (float)nw;
     using SelectFn = void (__thiscall*)(void*, UInt32);
     reinterpret_cast<SelectFn>(0x00633140)(list, 1);
-    F3A_INFO("Container: step %+d in the %s column: row %d -> %d of %d",
-             delta, container_side ? "container" : "player", cur, nw, n);
+    F3A_INFO("%s: step %+d in the %s column: row %d -> %d of %d",
+             d->type == kMenuType_Barter ? "Barter" : "Container",
+             delta, container_side ? "other" : "player", cur, nw, n);
     return 1;
 }
 
 int SwitchContainerSide(bool container_side)
 {
-    UInt8* m = FindContainerMenu();
+    const ColumnMenu* d = nullptr;
+    UInt8* m = FindColumnMenu(&d);
     if (!m) return -1;
     using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
-    auto fn = reinterpret_cast<SpecialKey>(kContainerSpecialKey);
+    auto fn = reinterpret_cast<SpecialKey>(d->special_key);
     bool handled = fn(m, container_side ? 14u : 13u, 1.0f);
-    int side = FocusSideOf(m);
-    F3A_INFO("Container: side key %u -> handled=%d, focus now %d (1=container 0=yours)",
+    int side = FocusSideOf(m, *d);
+    F3A_INFO("%s: side key %u -> handled=%d, focus now %d (1=other 0=yours)",
+             d->type == kMenuType_Barter ? "Barter" : "Container",
              container_side ? 14u : 13u, (int)handled, side);
     if (side < 0) return -1;                  // can't tell: say nothing confident
     return side == (container_side ? 1 : 0) ? 1 : 0;
@@ -5490,20 +5889,20 @@ int SwitchContainerSide(bool container_side)
 // Both columns carry one: a dump of an open locker shows
 // CM_Items_LeftFilterArrow (id 0) and CM_Items_RightFilterArrow (id 2) beside
 // 'SPRZĘT', and CM_Container_LeftFilterArrow (id 5) / RightFilterArrow (id 7)
-// beside the container's name. They are ordinary buttons with ordinary ids,
-// and the engine offered them to nothing but the mouse — which is why forty
-// rows of looted junk could only ever be read one arrow key at a time.
+// beside the container's name (barter: BM_..., ids 2/4 and 7/9). They are
+// ordinary buttons with ordinary ids, and the engine offered them to nothing
+// but the mouse.
 //
 // Safe for HandleClick: an arrow neither closes the menu nor moves an item,
 // the two things that crash this path.
 bool ClickContainerFilter(bool container_side, bool next)
 {
-    const char* nm = container_side
-        ? (next ? "CM_Container_RightFilterArrow"
-                : "CM_Container_LeftFilterArrow")
-        : (next ? "CM_Items_RightFilterArrow"
-                : "CM_Items_LeftFilterArrow");
-    return ClickMenuButton(kMenuType_Container, nm, 4);
+    const ColumnMenu* d = nullptr;
+    if (!FindColumnMenu(&d)) return false;
+    std::string nm = std::string(d->prefix) +
+        (container_side ? (next ? "Container_RightFilterArrow" : "Container_LeftFilterArrow")
+                        : (next ? "Items_RightFilterArrow" : "Items_LeftFilterArrow"));
+    return ClickMenuButton(d->type, nm.c_str(), 4);
 }
 
 bool ClickVatsButton(const char* btnName)
@@ -5759,11 +6158,16 @@ int TrackSelectedQuest()
 }
 bool OpenSelectedNote() { return ClickDataListRow("MM_NotesList", 0x150, 0x14); }
 
+namespace { Tile* FindChildExact(Tile* t, const char* name, int depth); }
+
 std::string GetDataPageText()
 {
     Tile* m = FindVisibleMenuTile(kMenuType_Map);
     if (!m) return {};
-    Tile* t = FindChildByName(m, "MM_DataText", 8);
+    // By its whole name: "MM_DataText" is also the start of its parent's,
+    // MM_DataTextRect, which comes first and holds no text - so not one note
+    // was ever read.
+    Tile* t = FindChildExact(m, "MM_DataText", 8);
     if (!t || !TileVisible(t)) return {};
     for (UInt32 i = 0; i < t->values.size; ++i) {          // faded out = not shown
         Tile::Value* v = t->values.data[i];
@@ -5771,6 +6175,98 @@ std::string GetDataPageText()
     }
     const char* s = TileStringTrait(t);
     return s && *s ? GameStrToUtf8(s) : std::string();
+}
+
+namespace {
+// Book text is HTML (<p>, <br>, <font ...>): the tags go, a paragraph or a
+// line break becomes a pause, entities become their letters.
+std::string StripBookHtml(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        if (c == '<') {
+            size_t e = in.find('>', i);
+            if (e == std::string::npos) break;
+            std::string tag = in.substr(i + 1, e - i - 1);
+            for (auto& ch : tag) ch = (char)std::tolower((unsigned char)ch);
+            if (tag.rfind("br", 0) == 0 || tag.rfind("p", 0) == 0 || tag.rfind("/p", 0) == 0 ||
+                tag.rfind("div", 0) == 0 || tag.rfind("/div", 0) == 0)
+                out += '\n';
+            i = e;
+            continue;
+        }
+        if (c == '&') {
+            static const struct { const char* ent; char ch; } kEnt[] = {
+                { "&nbsp;", ' ' }, { "&amp;", '&' }, { "&lt;", '<' }, { "&gt;", '>' },
+                { "&quot;", '"' }, { "&apos;", '\'' } };
+            bool done = false;
+            for (const auto& e : kEnt) {
+                size_t n = std::strlen(e.ent);
+                if (in.compare(i, n, e.ent) == 0) { out += e.ch; i += n - 1; done = true; break; }
+            }
+            if (done) continue;
+        }
+        out += c;
+    }
+    // Lines trimmed, runs of blank lines folded into one break.
+    std::string clean;
+    size_t pos = 0;
+    bool blank = false;
+    while (pos <= out.size()) {
+        size_t e = out.find('\n', pos);
+        if (e == std::string::npos) e = out.size();
+        std::string line = out.substr(pos, e - pos);
+        size_t a = line.find_first_not_of(" \t\r"), b = line.find_last_not_of(" \t\r");
+        line = a == std::string::npos ? std::string() : line.substr(a, b - a + 1);
+        if (line.empty()) { blank = !clean.empty(); }
+        else {
+            if (!clean.empty()) clean += blank ? "\n\n" : "\n";
+            clean += line;
+            blank = false;
+        }
+        pos = e + 1;
+    }
+    return clean;
+}
+} // namespace
+
+std::string GetBookText()
+{
+    Tile* m = FindVisibleMenuTile(kMenuType_Book);
+    if (!m) return {};
+    const char* s = TileStrTrait(m, kTileValue_user2);
+    if (!s || !*s) {
+        // The page tiles copy the same text; the scroll's, for a paper.
+        for (const char* nm : { "book_scroll_text", "book_page_1_text" }) {
+            if (Tile* t = FindChildByName(m, nm, 6)) {
+                s = TileStringTrait(t);
+                if (s && *s) break;
+            }
+        }
+    }
+    if (!s || !*s) return {};
+    return StripBookHtml(GameStrToUtf8(s));
+}
+
+std::string GetDataNoteKind()
+{
+    Tile* m = FindVisibleMenuTile(kMenuType_Map);
+    if (!m) return {};
+    Tile* audio = FindChildByName(m, "MM_DataAudioInfo", 8);
+    if (audio && TileVisible(audio)) {
+        std::string s = strings::T("Nagranie", "Audio");
+        if (Tile* left = FindChildByName(audio, "MM_AudioTimeRemaining", 3)) {
+            // "--:--:-" before it plays: no time to tell.
+            const char* t = TileStringTrait(left);
+            if (t && std::strpbrk(t, "0123456789")) s += ", " + GameStrToUtf8(t);
+        }
+        return s;
+    }
+    Tile* image = FindChildByName(m, "MM_DataImage", 8);
+    if (image && TileVisible(image)) return strings::T("Obraz", "Image");
+    return {};
 }
 
 int MapMenuTab()
@@ -6099,6 +6595,10 @@ std::string GetSelectedItemInfo()
 {
     // The Pip-Boy's own card first: only its shown panels, in words.
     if (std::string card = GetItemCard(); !card.empty()) return card;
+    // On the Stats page, the description / the status view.
+    if (std::string detail = GetStatsDetail(); !detail.empty()) return detail;
+    // On a repair screen, the before / after comparison.
+    if (std::string detail = GetRepairDetail(); !detail.empty()) return detail;
     // The selected item's stat card is an "*ItemInfoRect" box (Pip-Boy
     // inventory IM_ItemInfoRect) holding CI_TitleText+CI_ValueText sub-panels:
     // weight, value, damage/DR, condition, effects, ammo. Find the visible one
@@ -6155,10 +6655,14 @@ std::optional<std::string> GetTextEditText()
     if (!t) return std::nullopt;
     const char* s = TileStringTrait(t);
     std::string r = s ? GameStrToUtf8(s) : std::string();
-    // Strip the trailing caret glyph the field appends (and any blink/space) so
-    // a blinking caret doesn't read as a change and the text comes out clean.
-    while (!r.empty() && (r.back() == '|' || r.back() == ' ' ||
-                          r.back() == '\t')) r.pop_back();
+    // The caret is a DEL (0x7F) the field puts where the cursor is, there one
+    // moment and gone the next - "b", "b", "b" on every blink while it was
+    // kept. It and any other control character are not part of the name.
+    r.erase(std::remove_if(r.begin(), r.end(), [](char c) {
+                const unsigned char u = static_cast<unsigned char>(c);
+                return u == 0x7F || u < 0x20;
+            }), r.end());
+    while (!r.empty() && (r.back() == '|' || r.back() == ' ')) r.pop_back();
     return r;
 }
 
@@ -6525,7 +7029,7 @@ bool NudgeLockpick(float delta, bool* atEdge)
 
 namespace {
 struct HackRow { unsigned long addr; std::string chars; Tile* row; int prefix; };
-struct HackWord { std::string text; float tx; float ty; float cw; };   // middle letter
+struct HackWord { std::string text; float tx; float ty; float cw; bool bracket = false; };
 
 void CollectHackRows(Tile* t, int depth, std::vector<HackRow>& rows)
 {
@@ -6600,6 +7104,32 @@ void BuildHackWords(Tile* m, std::vector<HackWord>& out)
         if (ch >= 'A' && ch <= 'Z') run += ch; else flush(i);
     }
     flush(stream.size());
+
+    // Bracket pairs: an opening ( [ { < and its own closing mate later on the
+    // SAME line, nothing but symbols between them. The click goes on the
+    // opening one - that is where the game highlights the pair.
+    for (auto& r : rows) {
+        int fullLen = r.prefix + (int)r.chars.size();
+        float cw = fullLen > 0 ? TileNum(r.row, kTileValue_width) / fullLen : 0.0f;
+        for (size_t i = 0; i < r.chars.size(); ++i) {
+            const char o = r.chars[i];
+            const char c = o == '(' ? ')' : o == '[' ? ']' : o == '{' ? '}' : o == '<' ? '>' : 0;
+            if (!c) continue;
+            for (size_t j = i + 1; j < r.chars.size(); ++j) {
+                const char ch = r.chars[j];
+                if (ch >= 'A' && ch <= 'Z') break;
+                if (ch != c) continue;
+                HackWord b{ r.chars.substr(i, j - i + 1), 0.0f, 0.0f, cw, true };
+                b.tx = TileAbsX(r.row) + (r.prefix + (int)i) * cw + cw * 0.5f;
+                b.ty = TileAbsY(r.row) + TileNum(r.row, kTileValue_height) * 0.5f;
+                out.push_back(b);
+                break;
+            }
+        }
+    }
+    // Words first, brackets after: the order the module's list and
+    // GetHackWordTarget's numbering share.
+    std::stable_partition(out.begin(), out.end(), [](const HackWord& w) { return !w.bracket; });
 }
 } // namespace
 
@@ -6646,7 +7176,7 @@ HackingInfo GetHackingInfo()
     if (!m) return h;
     std::vector<HackWord> words;
     BuildHackWords(m, words);
-    for (auto& w : words) h.words.push_back(w.text);
+    for (auto& w : words) (w.bracket ? h.brackets : h.words).push_back(w.text);
     h.attempts = CountTilesNamed(m, 0, "hacking_guess_block");
     h.highlighted = HighlightedWordOf(m);
     if (h.highlighted.empty()) {
@@ -7000,9 +7530,9 @@ bool GetQuestReminder(std::string* headline, std::string* stages)
             *headline = JoinChildStrings(qa, " ", letters);
         }
     }
-    if (stages) {
+    if (stages) {     // one objective per line
         if (Tile* qs = FindChildByName(rem, "QuestStages", 1))
-            *stages = JoinChildStrings(qs, ". ", false);
+            *stages = JoinChildStrings(qs, "\n", false);
     }
     return true;
 }
@@ -7332,17 +7862,517 @@ std::optional<std::string> GetVatsSelectionText()
 
 // ---- Dialog / Barter / Lockpick / VATS — TODO ----------------------------
 
-std::string GetCurrentDialogSpeaker() { return {}; }
-std::string GetCurrentDialogLine()    { return {}; }
-std::vector<DialogOption> GetDialogOptions() { return {}; }
-int GetHighlightedDialogOption() { return -1; }
+namespace {
+// A tile's text as UTF-8, without the whitespace around it; "" for none.
+std::string TrimmedText(Tile* t)
+{
+    const char* s = t ? TileStringTrait(t) : nullptr;
+    std::string r = s ? GameStrToUtf8(s) : std::string();
+    size_t b = r.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    size_t e = r.find_last_not_of(" \t\r\n");
+    return r.substr(b, e - b + 1);
+}
 
-BarterState GetBarterState() { return {}; }
+std::string DialogTileText(const char* name)
+{
+    Tile* m = FindVisibleMenuTile(kMenuType_Dialog);
+    return TrimmedText(m ? FindChildExact(m, name, 4) : nullptr);
+}
+} // namespace
+
+std::string GetCurrentDialogSpeaker() { return DialogTileText("DM_SpeakerNameLabel"); }
+std::string GetCurrentDialogLine()    { return DialogTileText("DM_SpeakerText"); }
+
 LockpickState GetLockpickState() { return {}; }
 std::vector<VatsTarget> GetVatsTargets() { return {}; }
 int GetVatsSelectedIndex() { return -1; }
+// FO3's stats_menu has the same tiles as New Vegas's (checked against a dump):
+// the menu tile's user0 is the tab (0 Status, 1 S.P.E.C.I.A.L., 2 Skills,
+// 3 Perks, 4 General), stats_status_container's user0 the Status view (0 CND,
+// 1 RAD, 2 EFF).
+std::string GetStatsDetail()
+{
+    Tile* m = FindVisibleMenuTile(kMenuType_Stats);
+    if (!m) return {};
+    auto text = [](Tile* t) { return TrimmedText(t); };
+    const int tab = static_cast<int>(TileNum(m, kTileValue_user0));
+    if (tab != 0) {
+        Tile* d = FindChildExact(m, "stats_description", 6);
+        return d && TileVisible(d) ? text(d) : std::string();
+    }
+    Tile* sc = FindChildExact(m, "stats_status_container", 3);
+    if (!sc) return {};
+    const int view = static_cast<int>(TileNum(sc, kTileValue_user0));
+    std::string out;
+    auto add = [&](const std::string& part) {
+        if (part.empty()) return;
+        if (!out.empty()) out += ", ";
+        out += part;
+    };
+    if (view == 0) {
+        // Each limb: a meter (the filled image's width out of its background's)
+        // and a CRIPPLED label shown when it is.
+        static const struct { const char* tile; const char* pl; const char* en; } kLimbs[] = {
+            { "head",     "głowa",      "head" },
+            { "torso",    "tułów",      "torso" },
+            { "leftarm",  "lewa ręka",  "left arm" },
+            { "rightarm", "prawa ręka", "right arm" },
+            { "leftleg",  "lewa noga",  "left leg" },
+            { "rightleg", "prawa noga", "right leg" },
+        };
+        Tile* body = FindChildExact(sc, "stats_player_head", 1);
+        if (!body) return {};
+        for (const auto& l : kLimbs) {
+            const std::string base = std::string("stats_player_") + l.tile;
+            Tile* crip = FindChildExact(body, (base + "_crippled").c_str(), 2);
+            Tile* meter = FindChildExact(body, (base + "_pct_meter").c_str(), 3);
+            Tile* img = meter ? FindChildExact(meter, "MeterImage", 0) : nullptr;
+            Tile* bg  = meter ? FindChildExact(meter, "MeterBackground", 0) : nullptr;
+            const float full = bg ? TileNum(bg, kTileValue_width) : 0.0f;
+            std::string part = strings::T(l.pl, l.en);
+            if (crip && TileVisible(crip)) {
+                part += strings::T(" okaleczona", " crippled");
+            } else if (img && full > 0.0f) {
+                int pct = static_cast<int>(TileNum(img, kTileValue_width) / full * 100.0f + 0.5f);
+                part += " " + std::to_string(pct < 0 ? 0 : pct > 100 ? 100 : pct) + "%";
+            } else {
+                continue;
+            }
+            add(part);
+        }
+    } else if (view == 1) {
+        Tile* rc = FindChildExact(sc, "stats_radiation_container", 1);
+        std::string rads = rc ? text(FindChildExact(rc, "stats_player_rads", 2)) : std::string();
+        if (rads.empty()) rads = std::to_string(static_cast<int>(GetPlayerAV(54) + 0.5f));
+        add(strings::T("promieniowanie ", "rads ") + rads);
+        std::string resist = rc ? text(FindChildExact(rc, "stats_rad_resist_level", 2)) : std::string();
+        if (!resist.empty()) add(strings::T("odporność na promieniowanie ", "rad resistance ") + resist);
+    } else if (view == 2) {
+        Tile* none = FindChildExact(sc, "stats_no_effects", 1);
+        if (none && TileVisible(none)) return strings::T("Brak efektów.", "No effects.");
+        Tile* list = FindChildExact(sc, "stats_effects_container", 1);
+        struct Node { Tile::ChildNode* item; Node* next; };
+        auto* node = list ? reinterpret_cast<Node*>(&list->childList) : nullptr;
+        for (int i = 0; node && i < 256; ++i) {
+            // Read off the poll thread while the game may rebuild the list:
+            // every node checked, as the other tile walks here do.
+            if (!Readable(node, sizeof(Node))) break;
+            Tile::ChildNode* cn = node->item;
+            node = node->next;
+            Tile* row = (cn && Readable(cn, 0x08)) ? cn->child : nullptr;
+            if (!row || !TileNameHas(row, "stats_effects_template_item") || !TileVisible(row) ||
+                TileNum(row, kTileValue_listindex) < 0.0f)
+                continue;
+            std::string nm = text(FindChildExact(row, "stats_effect_name", 0));
+            std::string fx = text(FindChildExact(row, "stats_effect_string", 0));
+            if (nm.empty() && fx.empty()) continue;
+            if (!out.empty()) out += ". ";
+            out += nm.empty() ? fx : fx.empty() ? nm : nm + ": " + fx;
+        }
+    }
+    return out;
+}
+
 int GetVatsQueueLength()   { return 0; }
 int GetVatsQueueCapacity() { return 0; }
 std::optional<std::string> PollNewSubtitle() { return std::nullopt; }
+
+bool GetSleepWaitInfo(SleepWaitInfo* out)
+{
+    Tile* m = FindVisibleMenuTile(kMenuType_SleepWait);
+    if (!m || !out) return false;
+    auto text = [m](const char* name) -> std::string {
+        Tile* t = FindChildByName(m, name, 5);
+        const char* s = t ? TileStringTrait(t) : nullptr;
+        return s ? GameStrToUtf8(s) : std::string();
+    };
+    out->prompt = text("SWM_HowManyText");
+    out->hours  = text("SWM_HoursChosen");
+    out->now    = text("SWM_CurrentTime");
+    return !(out->prompt.empty() && out->hours.empty() && out->now.empty());
+}
+
+namespace {
+// The open repair screen and its tile prefix.
+Tile* RepairMenuTile(const char** prefix)
+{
+    if (Tile* m = FindVisibleMenuTile(kMenuType_RepairServices)) { *prefix = "RSM_"; return m; }
+    if (Tile* m = FindVisibleMenuTile(kMenuType_Repair))         { *prefix = "RM_";  return m; }
+    return nullptr;
+}
+
+// A card_info panel shown on screen: "TITLE value"; a condition card has a
+// meter instead of a value, read as a percentage of its width.
+std::string CardText(Tile* card)
+{
+    if (!card || !TileVisible(card)) return {};
+    std::string title = TrimmedText(FindChildByName(card, "CI_TitleText", 0));
+    std::string value = TrimmedText(FindChildByName(card, "CI_ValueText", 0));
+    if (value.empty()) {
+        Tile* meter = FindChildByName(card, "Meter", 0);
+        Tile* img = meter ? FindChildByName(meter, "MeterImage", 0) : nullptr;
+        Tile* bg  = meter ? FindChildByName(meter, "MeterBackground", 0) : nullptr;
+        const float full = bg ? TileNum(bg, kTileValue_width) : 0.0f;
+        if (img && full > 0.0f) {
+            int pct = static_cast<int>(TileNum(img, kTileValue_width) / full * 100.0f + 0.5f);
+            value = std::to_string(pct < 0 ? 0 : pct > 100 ? 100 : pct) + "%";
+        }
+    }
+    if (title.empty() && value.empty()) return {};
+    return title.empty() ? value : value.empty() ? title : title + " " + value;
+}
+} // namespace
+
+std::string GetRepairDetail()
+{
+    const char* pre = nullptr;
+    Tile* m = RepairMenuTile(&pre);
+    if (!m) return {};
+    auto tile = [&](const char* suffix) {
+        return FindChildByName(m, (std::string(pre) + suffix).c_str(), 6);
+    };
+    auto shown = [&](const char* suffix) {
+        Tile* t = tile(suffix);
+        return t && TileVisible(t) ? TrimmedText(t) : std::string();
+    };
+    std::string out;
+    auto add = [&](const std::string& part, const char* sep = ", ") {
+        if (part.empty()) return;
+        if (!out.empty()) out += sep;
+        out += part;
+    };
+    std::string now, after;
+    for (const char* card : { "BrokenItemHealth", "BrokenItemStat" }) {
+        std::string c = CardText(tile(card));
+        if (!c.empty()) now += (now.empty() ? "" : ", ") + c;
+    }
+    for (const char* card : { "FixedItemHealth", "FixedItemStat" }) {
+        std::string c = CardText(tile(card));
+        if (!c.empty()) after += (after.empty() ? "" : ", ") + c;
+    }
+    if (!now.empty())   add(strings::T("teraz: ", "now: ") + now);
+    if (!after.empty()) add(strings::T("po naprawie: ", "after repair: ") + after, "; ");
+    std::string gain = shown("HealthImprovementText");
+    std::string sgain = shown("StatImprovementText");
+    if (!gain.empty() || !sgain.empty())
+        add(strings::T("zysk ", "gain ") + gain + (gain.empty() || sgain.empty() ? "" : ", ") + sgain);
+    add(shown("RepairCostText"), ". ");
+    add(shown("ErrorText"), ". ");
+    add(shown("ChooseItemText"), ". ");
+    return out;
+}
+
+std::string GetRepairHeader()
+{
+    const char* pre = nullptr;
+    Tile* m = RepairMenuTile(&pre);
+    if (!m) return {};
+    std::string out;
+    if (std::strcmp(pre, "RM_") == 0) {
+        out = CardText(FindChildByName(m, "RM_Headline_PlayerSkillInfo", 6));
+    } else {
+        out = TrimmedText(FindChildByName(m, "RSM_VendorSkillLabel", 6));
+        std::string caps = TrimmedText(FindChildByName(m, "RSM_CapsLabel", 6));
+        if (!caps.empty()) out += (out.empty() ? "" : ", ") + caps;
+    }
+    return out;
+}
+
+// inventory_menu.xml: IM_HotKeyWheel (HotKeys.xml prefab) is shown while the
+// player assigns or picks a hotkey; HK_Item_0..7 each have an HK_SelectionBox
+// visible on the selected one, IM_HotKeyText copies the wheel's _SelectedText.
+bool GetHotkeyWheel(int* slot, std::string* text)
+{
+    Tile* inv = FindVisibleMenuTile(kMenuType_Inventory);
+    Tile* wheel = inv ? FindChildByName(inv, "IM_HotKeyWheel", 4) : nullptr;
+    if (!wheel || !TileVisible(wheel)) return false;
+    int sel = -1;
+    for (int i = 0; i < 8 && sel < 0; ++i) {
+        char nm[16];
+        std::snprintf(nm, sizeof(nm), "HK_Item_%d", i);
+        Tile* item = FindChildExact(wheel, nm, 0);
+        Tile* box = item ? FindChildByName(item, "HK_SelectionBox", 0) : nullptr;
+        if (box && TileVisible(box)) sel = i;
+    }
+    if (slot) *slot = sel;
+    if (text) *text = TrimmedText(FindChildByName(wheel, "IM_HotKeyText", 0));
+    return true;
+}
+
+// ---- The console (~) -------------------------------------------------------
+
+namespace {
+struct ConsoleAddrs {
+    UInt8** mgr    = nullptr;   // &ConsoleManager*
+    UInt32  shown  = 0;         // int: how many lines the view shows
+    void**  text   = nullptr;   // &DebugText* - the engine's on-screen text lines
+    UInt32  lookup = 0;         // DebugText: the text drawn at (x, y) in a font
+};
+ConsoleAddrs   g_con;
+std::once_flag g_con_once;
+
+// The bytes at `at` match `sig` (-1 = any byte).
+template <size_t N>
+bool CodeIs(UInt32 at, const int (&sig)[N])
+{
+    auto* p = reinterpret_cast<const UInt8*>(at);
+    if (!at || IsBadReadPtr(p, N)) return false;
+    for (size_t i = 0; i < N; ++i)
+        if (sig[i] >= 0 && p[i] != static_cast<UInt8>(sig[i])) return false;
+    return true;
+}
+UInt32 CallTarget(UInt32 at) { return at + 5 + *reinterpret_cast<const SInt32*>(at + 1); }
+
+// Everything is found from FOSE's GetSingleton address and checked byte by
+// byte, so a wrong edition reads nothing instead of crashing.
+void FindConsole()
+{
+    static const int kGet[] = { 0xA1, -1, -1, -1, -1, 0x85, 0xC0, 0x75 };   // mov eax, [g]; test; jne
+    const UInt32 get = rt::g_addrs->consoleSingleton;
+    if (!CodeIs(get, kGet)) {
+        F3A_WARN("Console: no GetSingleton at %08X; the console is not read.", get);
+        return;
+    }
+    const UInt32 global = *reinterpret_cast<const UInt32*>(get + 1);
+    g_con.mgr = reinterpret_cast<UInt8**>(global);
+    g_con.shown = global + 0x14;     // the static beside it the scrolling clamps by
+    // The key handler comes right after GetSingleton. Where it fetches the line
+    // being typed: fild [edi+0x34] ... push 1; call DebugText::GetSingleton;
+    // add esp, 4; mov ecx, eax; call DebugText::Lookup(out, x, y, font).
+    static const int kKeyHandler[] = { 0x6A, 0xFF, 0x68, -1, -1, -1, -1, 0x64, 0xA1, 0, 0, 0, 0,
+                                       0x50, 0xB8, 0x68, 0x21, 0, 0 };
+    static const int kFetch[] = { 0xDB, 0x47, 0x34, 0x56, 0x83, 0xEC, 0x08, 0x8D, 0x8C, 0x24, -1, -1, -1, -1,
+                                  0xD9, 0x5C, 0x24, 0x04, 0xDB, 0x47, 0x30, 0xD9, 0x1C, 0x24, 0x51, 0x56,
+                                  0xE8, -1, -1, -1, -1, 0x83, 0xC4, 0x04, 0x8B, 0xC8, 0xE8 };
+    static const int kTextGet[] = { 0xA1, -1, -1, -1, -1, 0x85, 0xC0, 0x75 };
+    static const int kLookup[]  = { 0x53, 0x55, 0x8B, 0x6C, 0x24, 0x0C, 0x56, 0x8B, 0xD9 };
+    const UInt32 keys = get + 0x50;
+    if (CodeIs(keys, kKeyHandler)) {
+        for (UInt32 at = keys; at < keys + 0x200; ++at) {
+            if (!CodeIs(at, kFetch)) continue;
+            const UInt32 single = CallTarget(at + 26);
+            const UInt32 look   = CallTarget(at + 36);
+            if (CodeIs(single + 0x25, kTextGet) && CodeIs(look, kLookup)) {
+                g_con.text   = *reinterpret_cast<void***>(single + 0x26);
+                g_con.lookup = look;
+            }
+            break;
+        }
+    }
+    F3A_INFO("Console: manager at %08X, typed line %s (%08X)", global,
+             g_con.lookup ? "readable" : "NOT readable", g_con.lookup);
+}
+
+UInt8* ConsoleMgr()
+{
+    std::call_once(g_con_once, FindConsole);
+    if (!g_con.mgr || IsBadReadPtr(g_con.mgr, 4)) return nullptr;
+    UInt8* m = *g_con.mgr;
+    if (!m || IsBadReadPtr(m, 0x40)) return nullptr;
+    return m;
+}
+
+std::string ConsoleNodeText(const UInt8* node)
+{
+    const char* s = *reinterpret_cast<const char* const*>(node + 0x08);
+    // One probe up to the terminator (or 0x800), not one per character: the
+    // dump snapshot reads 20 lines this way every half second on the game's
+    // thread.
+    if (!s || IsBadStringPtrA(s, 0x800)) return {};
+    return GameStrToUtf8(std::string(s, strnlen(s, 0x800)).c_str());
+}
+
+const char kEmptyConsole = 0;   // a cursor for "the list was empty"
+} // namespace
+
+bool ConsoleOpen()
+{
+    UInt8* m = ConsoleMgr();
+    return m && *reinterpret_cast<const signed char*>(m + 0x38) > 0;
+}
+
+bool GetConsoleInput(std::string* text, int* caret)
+{
+    if (!OnMainThread() || !ConsoleOpen() || !g_con.lookup || !g_con.text ||
+        IsBadReadPtr(g_con.text, 4) || !*g_con.text)
+        return false;
+    UInt8* m = ConsoleMgr();
+    static char buf[0x800];
+    buf[0] = 0;
+    typedef void(__thiscall* LookupFn)(void*, char*, float, float, int);
+    reinterpret_cast<LookupFn>(g_con.lookup)(*g_con.text, buf,
+        static_cast<float>(*reinterpret_cast<const int*>(m + 0x30)),
+        static_cast<float>(*reinterpret_cast<const int*>(m + 0x34)), 1);
+    buf[sizeof(buf) - 1] = 0;
+    std::string t(buf);
+    size_t bar = t.find('|');   // the engine's own caret, the first '|'
+    if (bar == std::string::npos) bar = t.size();
+    else t.erase(bar, 1);
+    *text  = t;
+    *caret = static_cast<int>(bar);
+    return true;
+}
+
+std::vector<std::string> ConsoleNewLines(const void** cursor)
+{
+    std::vector<std::string> out;
+    if (!OnMainThread()) return out;
+    UInt8* m = ConsoleMgr();
+    if (!m) { *cursor = nullptr; return out; }
+    UInt8* last = *reinterpret_cast<UInt8**>(m + 0x08);
+    const void* now = last ? static_cast<const void*>(last) : &kEmptyConsole;
+    if (!*cursor) { *cursor = now; return out; }
+    if (*cursor == now) return out;
+    const void* was = *cursor;
+    // Back from the newest to the one seen last time.
+    std::vector<const UInt8*> fresh;
+    bool found = false;
+    for (const UInt8* n = last; n && fresh.size() < 400; ) {
+        if (n == was) { found = true; break; }
+        if (IsBadReadPtr(n, 0x10)) break;
+        fresh.push_back(n);
+        n = *reinterpret_cast<const UInt8* const*>(n + 0x04);
+    }
+    *cursor = now;
+    // That one gone (the console cleared, or more lines than it keeps): the
+    // newest few only.
+    // (The list was empty last time: every line is new, none is cut.)
+    if (!found && was != &kEmptyConsole && fresh.size() > 50) fresh.resize(50);
+    for (auto it = fresh.rbegin(); it != fresh.rend(); ++it) {
+        std::string t = ConsoleNodeText(*it);
+        if (!t.empty()) out.push_back(std::move(t));
+    }
+    return out;
+}
+
+bool ConsoleView(int* count, int* bottom, int* shown)
+{
+    UInt8* m = ConsoleMgr();
+    if (!m) return false;
+    *count  = *reinterpret_cast<const int*>(m + 0x0C);
+    *bottom = *reinterpret_cast<const int*>(m + 0x24);
+    int v = 0;
+    if (g_con.shown && !IsBadReadPtr(reinterpret_cast<const void*>(g_con.shown), 4))
+        v = *reinterpret_cast<const int*>(g_con.shown);
+    *shown = (v >= 1 && v <= 200) ? v : 10;
+    return true;
+}
+
+std::vector<std::string> ConsoleLines(int from, int to)
+{
+    std::vector<std::string> out;
+    UInt8* m = ConsoleMgr();
+    if (!m || to <= from) return out;
+    int i = 0;
+    for (const UInt8* n = *reinterpret_cast<UInt8**>(m + 0x04); n && i < to && i < 2000; ++i) {
+        if (IsBadReadPtr(n, 0x10)) break;
+        if (i >= from) out.push_back(ConsoleNodeText(n));
+        n = *reinterpret_cast<const UInt8* const*>(n);
+    }
+    return out;
+}
+
+std::string GameTextToUtf8(const std::string& raw) { return GameStrToUtf8(raw.c_str()); }
+
+// ---- A game setting as loaded ----------------------------------------------
+
+namespace {
+// A setting the exe defines is a static {vtable, value, name}; the game puts
+// the loaded value (Fallout3.esm, then any plugin over it) in it - the XP
+// sum reads iXPBumpBase only from there, and the game's 550 for level 3 is
+// Fallout3.esm's 150, not the exe's 100. Found by its name: the name's text,
+// then the dword pointing at it. Remembered once found.
+const UInt32* FindExeSetting(const char* name)
+{
+    static std::mutex mx;
+    static std::unordered_map<std::string, const UInt32*> found;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        auto it = found.find(name);
+        if (it != found.end()) return it->second;
+    }
+    const UInt32* result = nullptr;
+    auto* base = reinterpret_cast<const UInt8*>(GetModuleHandleW(nullptr));
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (base && !IsBadReadPtr(base, 0x400) && dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+        if (!IsBadReadPtr(nt, sizeof(*nt)) && nt->Signature == IMAGE_NT_SIGNATURE) {
+            const UInt32 lo = reinterpret_cast<UInt32>(base);
+            const UInt32 hi = lo + nt->OptionalHeader.SizeOfImage;
+            const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+            const int nsec = nt->FileHeader.NumberOfSections;
+            std::string pat(1, '\0');
+            pat += name;
+            pat += '\0';
+            UInt32 text = 0;
+            for (int i = 0; i < nsec && !text; ++i) {
+                if (!(sec[i].Characteristics & IMAGE_SCN_MEM_READ)) continue;
+                const char* p = reinterpret_cast<const char*>(base + sec[i].VirtualAddress);
+                const size_t n = sec[i].Misc.VirtualSize;
+                if (n < pat.size() || IsBadReadPtr(p, n)) continue;
+                const char* hit = std::search(p, p + n, pat.begin(), pat.end());
+                if (hit != p + n) text = reinterpret_cast<UInt32>(hit + 1);
+            }
+            for (int i = 0; text && i < nsec && !result; ++i) {
+                if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
+                auto* w = reinterpret_cast<const UInt32*>(base + sec[i].VirtualAddress);
+                const size_t n = sec[i].Misc.VirtualSize / 4;
+                if (IsBadReadPtr(w, n * 4)) continue;
+                for (size_t k = 2; k < n; ++k) {
+                    if (w[k] != text) continue;
+                    if (w[k - 2] < lo || w[k - 2] >= hi) continue;   // the vtable is the exe's
+                    result = w + k - 2;
+                    break;
+                }
+            }
+        }
+    }
+    std::lock_guard<std::mutex> lk(mx);
+    found[name] = result;
+    return result;
+}
+} // namespace
+
+std::string ExeGameSettingString(const char* name)
+{
+    const UInt32* gs = FindExeSetting(name);
+    if (!gs) return {};
+    const char* val = reinterpret_cast<const char*>(gs[1]);
+    if (!val || IsBadReadPtr(val, 1)) return {};
+    size_t len = 0;
+    while (len < 64 && !IsBadReadPtr(val + len, 1) && val[len]) ++len;
+    return std::string(val, len);
+}
+
+int ExeGameSettingInt(const char* name, int fallback)
+{
+    const UInt32* gs = FindExeSetting(name);
+    return gs ? static_cast<int>(gs[1]) : fallback;
+}
+
+int GetPlayerLevel()
+{
+    auto* p = rt::Player();
+    if (!p || !Readable(p, 0x20)) return 0;
+    auto* base = reinterpret_cast<const UInt8*>(p->baseForm);
+    if (!base || !Readable(base + 0x30, 0x10)) return 0;
+    const int level = *reinterpret_cast<const UInt16*>(base + 0x3C);
+    return (level >= 1 && level <= 255) ? level : 0;
+}
+
+int XPForLevel(int level)
+{
+    if (level <= 1) return 0;
+    const int first = ExeGameSettingInt("iXPBase", 200);
+    const int bump  = ExeGameSettingInt("iXPBumpBase", 150);
+    // As the game adds it up: each step takes `bump` more than the last.
+    int total = first, step = first;
+    for (int n = level - 1; n > 1; --n) {
+        step += bump;
+        total += step;
+    }
+    return total;
+}
 
 } // namespace f3a::game

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace f3a::game { struct Vec3; }
 
@@ -11,7 +12,12 @@ void ShutdownAll();
 
 namespace pipboy   { void Init(); void Shutdown(); }
 namespace dialog   { void Init(); void Shutdown(); }
-namespace barter   { void Init(); void Shutdown(); }
+namespace barter   { void Init(); void Shutdown();
+                     // Driven from the container module (one handler per menu):
+                     void Open(); void Close(); void Tick();
+                     // H in barter: caps on both sides and the deal. False
+                     // when barter is not open.
+                     bool SpeakSummary(); }
 namespace lockpick { void Init(); void Shutdown(); }
 namespace vats     { void Init(); void Shutdown(); }
 namespace container{ void Init(); void Shutdown(); }
@@ -20,6 +26,9 @@ namespace message  { void Init(); void Shutdown();
                      bool Announced(); }
 namespace nav      { void Init(); void Shutdown(); void Tick(float dt); }
 namespace worldscan{ void Init(); void Shutdown(); void Tick(float dt); void ResetSession();
+                     // Is the player aiming - our ] key or the game's own aim
+                     // control? Who is under the crosshair is said only then.
+                     bool AimHeld();
                      // Let go of every key/button the module holds (F12 off).
                      void StopInput(); }
 namespace intro    { void Init(); void Shutdown(); void Tick(float dt); void Start(); }
@@ -48,6 +57,14 @@ namespace audiodesc { void Init(); void Shutdown(); void Tick(float dt); void To
 // The level-up screen: headline, points left, entries with values and their
 // descriptions, in the game's own words.
 namespace levelup { void Init(); void Shutdown(); }
+namespace repair  { void Init(); void Shutdown(); }
+// The console (~): the line being typed, what commands print, PageUp /
+// PageDown pages. MainThreadTick runs from MainThreadWork; DumpLines for F11.
+namespace devconsole { void Init(); void Shutdown(); void MainThreadTick();
+                       std::vector<std::string> DumpLines(); }
+namespace sleepwait { void Init(); void Shutdown();
+                      // H in the sleep / wait screen: the time and the hours.
+                      bool SpeakSummary(); }
 
 // AutoWalk: walks the player to a scanner-selected target. Ticked from the
 // polling loop while in gameplay.

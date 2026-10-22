@@ -282,9 +282,12 @@ void Tick(float dt)
     g_last = e;
     g_have_last = true;
     std::string say = strings::T("Po drodze: ", "On the way: ") + Label(e) + ", " + Where(e);
-    if (fresh.size() > 1)
-        say += strings::T(", i jeszcze ", ", and ") + std::to_string(fresh.size() - 1) +
-               (strings::Polish() ? "" : " more");
+    if (fresh.size() > 1) {
+        char more[96];
+        std::snprintf(more, sizeof(more), strings::T(", i jeszcze %d", ", and %d more"),
+                      static_cast<int>(fresh.size() - 1));
+        say += more;
+    }
     say += ".";
     if (!g_hint_said) {
         g_hint_said = true;

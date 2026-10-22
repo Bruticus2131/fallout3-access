@@ -78,9 +78,33 @@ enum class Key {
 // Is the mod speaking Polish (config Language, or the game's language)?
 bool Polish();
 
-// The text in the mod's language: T("Polish", "English"). For text written
-// in place in the modules; the keyed table above is the older way.
-inline const char* T(const char* pl, const char* en) { return Polish() ? pl : en; }
+// The language the mod speaks: "pl", "en", or another code ("ru"...) whose
+// texts come from a translation file, Fallout3Access\lang_<code>.txt, made of
+// English -> that language. Without the file that language speaks English.
+std::string Language();
+
+// Switch the mod's language: at load, and again when the game turns out to be
+// in another language than its Fallout3.esm said (a translation plugin).
+// Loads lang_<code>.txt from `dataDir` for a language other than pl / en.
+void SetLanguage(const std::string& code, const std::wstring& dataDir);
+
+// The text in the mod's language: T("Polish", "English"). Another language
+// looks the English up in its translation file - English when it is not
+// there. For text written in place in the modules; the keyed table above is
+// the older way.
+const char* T(const char* pl, const char* en);
+
+// The plural form a count takes in the mod's language: 0 = one, 1 = few
+// (2-4), 2 = many. Polish: 1 / 2-4 (not 12-14) / the rest; Russian: 1, 21,
+// 31... (not 11) / 2-4, 22-24... (not 12-14) / the rest; English and the
+// others: 1 / - / the rest.
+int PluralForm(long long n);
+
+// "N word" with the word in the right form for the mod's language: Polish
+// and Russian give three forms, English two (a language without its own
+// forms here takes the English ones).
+std::string Counted(long long n, const char* const pl[3], const char* const ru[3],
+                    const char* enOne, const char* enMany);
 
 // All format directives are positional printf-style for std::snprintf.
 const char* Fmt(Key k);

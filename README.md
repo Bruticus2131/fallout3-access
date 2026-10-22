@@ -11,11 +11,22 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 - **Menu reading with full keyboard navigation** — main menu, pause, save & load, the character creation.
   settings (sliders read their value, toggles and steppers read their choice),
   confirmation dialogs (question first, then the focused button).
-- **Pip-Boy** — stats, items, data; quest list with objectives.
-- **Dialogue, barter, containers and the message boxes** the game throws at you.
-- **Inventory** — item stat cards on **D**, worn items announced as equipped,
-  **Delete** drops the selected item, and the "how many?" stack prompt is read
-  out with the game's own confirm/cancel keys.
+- **Pip-Boy** — every tab named; after an item's name its card is read as the
+  screen shows it (damage or resistance, weight, value, condition in percent,
+  ammo, effects); on the Stats page the description of each S.P.E.C.I.A.L.,
+  skill and perk, the limbs' condition, radiation and active effects; the
+  hotkey wheel; quests marked tracked / not tracked / completed, Enter tracks
+  a quest and opens a note.
+- **Dialogue** — who you talk to, topics with their place in the list and
+  "already said", and **D** repeats the other side's last line.
+- **Barter** — both columns (Left / Right), prices, items put up for the deal,
+  how many caps the deal moves and which way, both sides' caps on **H**.
+- **Containers, repair and sleep / wait** — container columns with category
+  filters, the repair screens' before / after comparison and cost, the hours
+  and the time when you wait.
+- **Inventory** — worn items announced as equipped, **Delete** drops the
+  selected item, and the "how many?" stack prompt is read out with the game's
+  own confirm/cancel keys (the game's crash on that prompt is fixed).
 - **World navigation** — object scanner, turn-to-object, audio beacon guidance
   and auto-walk that routes around walls using the game's navmesh, including
   through load doors into other cells. Long walks follow an offline map of the
@@ -34,13 +45,25 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 - **World map** — browse every known location with distance and bearing, and
   fast-travel there through the game's own travel path.
 - **Combat** — VATS is fully keyboard-driven (switch target, cycle body part,
-  hear hit chance); outside VATS an audio cue tells you when an enemy is under
-  the crosshair.
+  hear hit chance); holding **]** aims at the enemy and a tone says when a shot
+  would hit; every hit and every kill is heard, for any enemy.
 - **Terminals and the hacking minigame** — screen text is read as it types out,
-  candidate passwords are listed and spelled.
-- **Lockpicking** — an audio cue guides the pick to the sweet spot.
-- **Player status** on **H**, location on **L**, compass on **J**.
-- Localized game text handled code-page-aware (Polish cp1250 detected from the game).
+  candidate passwords and bracket pairs are listed and spelled, Enter enters
+  the chosen one, and after a wrong guess you hear which words still fit.
+- **Lockpicking** — Left / Right move the bobby pin, an audio cue guides it to
+  the sweet spot.
+- **Player status** on **H** (health and AP with their maximum, radiation,
+  crippled limbs, weapon and ammo, caps, carry weight, time), location on
+  **L**, compass on **J**.
+- **The console (~)** — every character you type or delete is spoken, the caret's
+  moves too, a command brought back with Up / Down is read whole, what a command
+  prints after Enter is read out, and PageUp / PageDown read the page of output
+  that scrolls into view. The mod's own keys are off while the console is open
+  (F11 still dumps it, with the console's state and last lines).
+- Localized game text handled code-page-aware (Polish cp1250 and Russian cp1251
+  detected from the game, a translation plugin included).
+- The mod speaks Polish, English or Russian; any other language can be added
+  with a text file (`Fallout3Access\lang_<code>.txt`, English → that language).
 - Works with both retail editions of patch 1.7.0.3 (standard and no-gore),
   detected automatically.
 
@@ -113,7 +136,8 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 | J | compass direction |
 | X | read nearby objects |
 | C | read nearby hostiles |
-| H | player status — health, action points, radiation |
+| H | player status — health and action points out of their maximum, radiation, crippled limbs, weapon with its condition and ammo, caps, carry weight, place and time (in barter: both sides' caps and the deal; while waiting: the hours) |
+| Shift + H | your level, your experience out of what the next level takes, and how much is left |
 | K | current quest target: name, direction and distance |
 | F | the game's view-toggle key; the mod announces first or third person |
 | F8 | opening-cinematic audio description (plays by itself; F8 stops it) |
@@ -127,13 +151,13 @@ Explore and travel without sight:
 | Key | Action |
 | --- | --- |
 | Page Up / Page Down | cycle nearby objects (reads "name, distance, clock direction, i of N") |
-| Shift + Page Up / Page Down | change scanner category: all / NPCs / items / doors / containers / quests |
+| Shift + Page Up / Page Down | change scanner category: all / people / bodies / items / doors / containers / places / quest objects / quests (only those with something in them) |
 | `'` (apostrophe) | turn to face the selected object |
 | Home | centre the view on the selected object (or the nearest actor) |
 | Shift + Home | keep the camera on a moving target until you press it again |
 | `;` (semicolon) | **beacon guidance**: you walk, the mod plays a positional sonar ping at the target — panned by direction, higher-pitched ahead and lower behind, faster as you close in. Press again to stop. |
 | `.` (period) | beacon guidance to the current quest marker |
-| `\` (backslash) | **auto-walk**: the mod walks you there, following a navmesh path around walls and through load doors. Press again to stop. |
+| `\` (backslash) | **auto-walk**: the mod walks you there, following a navmesh path around walls and through load doors. Press again to stop; W / A / S / D stop it too. |
 | End | **activate** the selected object without aiming — opens the door, reads the book, loots the container |
 | Alt + Home | last resort: teleport to the selected object when it cannot be reached on foot |
 | G | say what is under the crosshair |
@@ -162,11 +186,11 @@ your way, the walk retargets instead of finishing at a stale marker.
 
 | Key | Action |
 | --- | --- |
-| D | read the selected item's stat card (weight, value, damage, condition) |
+| D | read the selected item's stat card again (weight, value, damage, condition); on the Stats page the description; on a repair screen the comparison |
 | Delete | drop the selected item |
 | Arrows, then **A** / **E** | in the "how many?" prompt: set the amount, then confirm / cancel (these are the game's own keys; the mod reads the number aloud) |
 
-### Containers (open one with End)
+### Containers and barter (open a container with End)
 
 | Key | Action |
 | --- | --- |
@@ -176,6 +200,34 @@ your way, the walk retargets instead of finishing at a stale marker.
 | Enter | the game's own take / put — stealing, karma and the "how many?" prompt behave as in the game |
 | `[` | toggle between the two columns |
 
+Barter uses the same keys: each row says its price, and the deal is announced
+as it changes ("you pay N caps" / "you get N caps"). **H** says both sides'
+caps.
+
+### Dialogue
+
+| Key | Action |
+| --- | --- |
+| Up / Down | topics, with "N of M" and "already said" for topics you have used |
+| D | repeat the other side's last line |
+
+### Terminals, hacking and lockpicking
+
+| Key | Action |
+| --- | --- |
+| Up / Down | hacking: the candidate words (spelled), then the bracket pairs; a word ruled out by your earlier guesses is marked |
+| Enter | hacking: enter the chosen word or bracket pair |
+| Left / Right | hacking: read the screen; lockpicking: move the bobby pin |
+
+### Console (~, the game's own key)
+
+| Key | Action |
+| --- | --- |
+| typing, Backspace, Delete, Left / Right, Home / End | each character typed or deleted is spoken, and the character the caret moves onto |
+| Up / Down | an earlier command, read whole |
+| Enter | run it; the mod reads what it printed (or "Done." when it printed nothing) |
+| PageUp / PageDown | scroll the output; the page that comes into view is read, "Top." / "Bottom." at the ends |
+
 ### Combat
 
 | Key | Action |
@@ -183,7 +235,7 @@ your way, the walk retargets instead of finishing at a stale marker.
 | V.A.T.S. key | enter VATS; the mod reads target, body part and hit chance |
 | A / D | in VATS: previous / next target |
 | W / S | in VATS: next / previous body part, read at once with its hit chance |
-| `]` | hold to aim (free aim): locks onto the nearest enemy fighting you and says who and how far |
+| `]` | hold to aim (free aim): locks onto the nearest enemy fighting you and says who and how far; while held, a tone says the shot would hit |
 | `,` (comma) | aim the view at the selected or nearest target (free aim, no VATS) |
 | `=` | skip an objective that cannot be completed blind (advances the quest stage — use deliberately) |
 
@@ -192,11 +244,15 @@ your way, the walk retargets instead of finishing at a stale marker.
 Edit `Data\FOSE\Plugins\Fallout3Access.ini`:
 
 - `[General] Language` — `auto` (default: the game's language, read from
-  `Fallout3.esm` — Polish for the Polish release, English for any other), or
-  `pl` / `en` to choose the language of the mod's own messages,
+  `Fallout3.esm` and checked again once the game has loaded its plugins —
+  Polish for the Polish release, Russian for a Russian one, English for any
+  other), or `pl` / `en` / `ru` to choose the language of the mod's own
+  messages. Another code (`de`...) speaks from `Fallout3Access\lang_<code>.txt`
+  — pairs of lines, `en: "English text"` then `de: "translation"`; whatever is
+  not in the file is spoken in English and logged as "no translation for",
 - `[General] GameTextCodepage` — code page of the *game's* text; `0` = auto
-  (Polish game → 1250, otherwise system ANSI). Set `1250` / `1252` explicitly
-  if item names sound garbled,
+  (Polish game → 1250, Russian → 1251, otherwise system ANSI). Set `1250` /
+  `1251` / `1252` explicitly if item names sound garbled,
 - `[Modules]` — enable/disable feature modules,
 - `[Hotkeys]` — every key listed above, as DirectInput scancodes,
 - `[Debug] StartGameCommand` — console command bound to F10.
@@ -208,12 +264,14 @@ Useful `[Voice]` settings:
 | `CrosshairNames` | say the NAME of what you are looking at, not just the verb |
 | `CrosshairDistance` | add the distance to that announcement (off by default) |
 | `HideEmptyContainers` | leave empty containers out of the scanner (`0` lists them, marked "pusty") |
-| `TargetCue`, `TargetCueHz` | audio cue when an enemy is under the crosshair, and its pitch |
+| `TargetCue`, `TargetCueHz` | while aiming with `]`, a tone when the shot would hit the target, and its pitch |
+| `ItemCard` | after an item's name, read its card (and a stat's description) as the screen shows it |
 | `NativeWalk` | auto-walk drives the player directly (`0` falls back to holding the movement keys) |
 | `AutoWalkSpeed` | auto-walk speed in game units per second |
 | `WalkAnimation` | play the game's walk/run animation while auto-walking (this is what gives you real footstep sounds) |
 | `FootstepCue` | synthesized step clicks, used only when the animation is off |
-| `NearbyScanRadius`, `NearbyScanMaxItems` | how far and how much the scanner reports |
+| `NearbyScanRadius`, `NearbyScanMaxItems` | how far and how much X (nearby objects) reads |
+| `ScannerRadius` | how far the PgUp/PgDn scanner reaches outdoors (default 8000 units, about 125 m); indoors it covers the whole interior |
 | `CompassUnits` | `0` = clock face ("three o'clock"), `1` = degrees |
 
 ## Troubleshooting
@@ -258,7 +316,13 @@ cmake --build build --config Release
 - Mod code — MIT (see `LICENSE`).
 - [Tolk](https://github.com/dkager/tolk) by Davy Kager — LGPL; bundled binaries unmodified.
 - `nvdaControllerClient32.dll` — NV Access, LGPL.
-- The road-graph loader, nearest-node grid and road rules are ported from
-  [FalloutNVAccess](https://git.alex19ep.me/alex19EP/FalloutNVAccess) by Alexander Epaneshnikov — MIT.
+- Parts of the auto-walk design (engine pathfinding via the player's mover,
+  turn-speed scaling and look-ahead braking, waypoint advance, the final-leg
+  height guard, stopping the walk animation), the aiming recipes (native aim
+  rotation, skeleton / collision aim points, raycast hit checks), several
+  container and loot-menu techniques, the approach to the hacking minigame and
+  to experience announcements, and the road-graph loader, generator and format
+  are based on [FalloutNVAccess](https://github.com/FalloutAccess/FalloutNVAccess)
+  by Alexander Epaneshnikov (MIT).
 - [FOSE](https://fose.silverlock.org) by Ian Patterson, Stephen Abel and Paul Connelly — not bundled.
 - Fallout 3 © Bethesda Softworks.

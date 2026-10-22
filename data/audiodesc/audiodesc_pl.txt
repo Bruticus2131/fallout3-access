@@ -137,7 +137,7 @@ Wszystko zalewa oślepiająca biel.
 Masz rok. Stoisz w dużym drewnianym kojcu w pokoju dziecinnym w Krypcie 101 - ściany są z metalu, jak w całej krypcie.
 Wokół zabawki, mały dywanik, łóżeczko z karuzelą, kanapa i stolik. W kojcu kuca tata i wyciąga do ciebie ręce.
 
-[npc Tata @00014E83]
+[npc Tata @00014E83 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
 Tata: mężczyzna w średnim wieku z krótkimi, falującymi, ciemnymi włosami, w białym lekarskim kitlu, z Pip-Boyem na przedramieniu. Gra upodobniła jego twarz do twojej.
 
 [stage 00014E83 18]
@@ -187,68 +187,68 @@ Stoisz obok taty. Jonas unosi aparat fotograficzny.
 [stage 00014E84 98]
 Błysk flesza. Obraz bieleje i mijają kolejne lata.
 
-[npc Nadzorca @00014E84]
+[npc Nadzorca @00014E84 #000CBCFB,000230DA,000300F0,0002D043]
 Nadzorca: starszy mężczyzna o latynoskich rysach, z krótko przyciętymi siwymi włosami i surową twarzą, w niebieskim kombinezonie krypty.
 
-[npc Amata @00014E84]
+[npc Amata @00014E84 #000A7883,000230DD,000300E9,0002549E,0001CE24]
 Amata, twoja najlepsza przyjaciółka i córka Nadzorcy: dziesięcioletnia dziewczynka o latynoskich rysach, z ciemnymi włosami i piwnymi oczami, w dziecięcym kombinezonie krypty i w urodzinowej czapeczce.
 
-[npc Butch @00014E84]
+[npc Butch @00014E84 #000C111F,000230DC,000300EA,00027F65,0001CE26]
 Butch: twój rówieśnik i szkolny łobuz - jasnoskóry chłopiec o kręconych, ciemnoblond włosach, w dziecięcym kombinezonie krypty.
 
-[npc Paul Hannon @00014E84]
+[npc Paul Hannon @00014E84 #000C1120,000300EB,0001CE28]
 Paul Hannon: czarnoskóry chłopiec z krótkimi czarnymi włosami, w urodzinowej czapeczce.
 
-[npc Wally Mack @00014E84]
+[npc Wally Mack @00014E84 #000C111E,0004E894,000300EC,0001CE2A]
 Wally Mack: chłopiec z krótkimi ciemnymi włosami, kolega Butcha.
 
-[npc Staruszka Palmer @00014E84]
+[npc Staruszka Palmer @00014E84 #000309A7,000309A6]
 Staruszka Palmer: bardzo stara, drobna kobieta o rzadkich siwych włosach, w urodzinowym kapeluszu.
 
-[npc Stanley @00014E84]
+[npc Stanley @00014E84 #0006F543,0006B236,00031648,0001CFD8]
 Stanley: starszy mechanik krypty, siwe włosy zaczesane do tyłu, roboczy kombinezon i urodzinowa czapeczka.
 
-[npc Beatrice @00014E84]
+[npc Beatrice @00014E84 #0007542A,000309AC,0001CFBF]
 Beatrice: starsza kobieta o azjatyckich rysach, z ciemnymi, starannie ułożonymi włosami, w kombinezonie krypty.
 
-[npc Andy @00014E84]
+[npc Andy @00014E84 #00074163,00020456,0009B172,0006B237]
 Andy: robot pomocnik typu Pan Złota Rączka - metalowy kulisty korpus unoszący się nad podłogą na płomieniu silniczka, trzy oczy na wysięgnikach i trzy ramiona zakończone narzędziami.
 
-[npc Jonas @00014E84]
+[npc Jonas @00014E84 #00099343,000300E7,0001CFBC]
 Jonas, asystent taty: młody czarnoskóry mężczyzna w okularach, z krótkimi czarnymi włosami, w białym lekarskim kitlu.
 
-[npc Tata @00014E84]
+[npc Tata @00014E84 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
 Tata: we włosach ma już pierwsze siwe pasma; nosi biały lekarski kitel i Pip-Boya.
 
-[npc Funkcjonariusz Gomez @00014E84]
+[npc Funkcjonariusz Gomez @00014E84 #00064911,000309AE,00027057]
 Funkcjonariusz Gomez: strażnik krypty o latynoskich rysach, w kombinezonie ochrony z kamizelką, z pałką u pasa.
 
-[npc Funkcjonariusz Kendall @00014E84]
+[npc Funkcjonariusz Kendall @00014E84 #0009B171,0006490F,00027055]
 Funkcjonariusz Kendall: strażnik krypty z ogoloną głową, w kombinezonie ochrony z kamizelką.
 
 # ---------------------------------------------------------------- Niedoskonała przyszłość
 [stage 00014E85 5]
 Masz szesnaście lat. Jesteś w gabinecie taty w klinice krypty: biurko z terminalem, podświetlana tablica na zdjęcia rentgenowskie, statyw z probówkami i zestaw do doświadczeń chemicznych.
 
-[npc Tata @00014E85]
+[npc Tata @00014E85 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
 Tata: siwizny przybyło, twarz ma bardziej zmęczoną; wciąż w białym kitlu.
 
 [stage 00014E85 20]
 Na korytarzu Butch i jego dwaj kumple otaczają Amatę i z niej drwią.
 
-[npc Butch @00014E85]
+[npc Butch @00014E85 #000C111F,000230DC,000300EA,00027F65,0001CE26]
 Butch: szesnastolatek, przywódca gangu Węży Tunelowych - skórzana kurtka gangu z wężem, włosy zaczesane wysoko do góry jak u rockmana z lat pięćdziesiątych.
 
-[npc Wally Mack @00014E85]
+[npc Wally Mack @00014E85 #000C111E,0004E894,000300EC,0001CE2A]
 Wally Mack: chłopak z krótko ostrzyżonymi ciemnymi włosami, w kurtce Węży Tunelowych.
 
-[npc Paul Hannon @00014E85]
+[npc Paul Hannon @00014E85 #000C1120,000300EB,0001CE28]
 Paul Hannon: czarnoskóry chłopak z włosami zaczesanymi w wysoki czub, w kurtce Węży Tunelowych.
 
-[npc Amata @00014E85]
+[npc Amata @00014E85 #000A7883,000230DD,000300E9,0002549E,0001CE24]
 Amata: szesnastoletnia, ciemne włosy spięte z tyłu, piwne oczy, kombinezon krypty.
 
-[npc Pan Brotch @00014E85]
+[npc Pan Brotch @00014E85 #0003D347,0001CFB7]
 Pan Brotch, nauczyciel: czarnoskóry mężczyzna w średnim wieku z krótko przyciętymi włosami, w kombinezonie krypty.
 
 [stage 00014E85 50]
@@ -264,7 +264,7 @@ Obraz znów bieleje.
 [stage 00014E86 2]
 Masz dziewiętnaście lat. Leżysz w łóżku w swoim pokoju w krypcie, ktoś tobą potrząsa - to Amata. Z oddali słychać alarm.
 
-[npc Amata @00014E86]
+[npc Amata @00014E86 #000A7883,000230DD,000300E9,0002549E,0001CE24]
 Amata: dziewiętnastoletnia, ciemne włosy spięte z tyłu, w kombinezonie krypty; jest wystraszona i zdyszana.
 
 [stage 00014E86 12]
@@ -273,19 +273,19 @@ Na korytarzu przed drzwiami strażnik krypty walczy z radrakanami.
 [stage 00014E86 18]
 W mieszkaniu DeLoriów matka Butcha kuli się pod ścianą, a wokół niej uwijają się radrakany.
 
-[npc Ellen DeLoria @00014E86]
+[npc Ellen DeLoria @00014E86 #000230DF,000273CB]
 Ellen DeLoria, matka Butcha: kobieta w średnim wieku z brązowymi włosami upiętymi w kok, w kombinezonie krypty.
 
-[npc Butch @00014E86]
+[npc Butch @00014E86 #000C111F,000230DC,000300EA,00027F65,0001CE26]
 Butch: w kurtce Węży Tunelowych, przerażony i bliski płaczu.
 
 [stage 00014E86 36]
 W gabinecie ochrony Amata stoi przed Nadzorcą, a strażnik zamierza się na nią.
 
-[npc Nadzorca @00014E86]
+[npc Nadzorca @00014E86 #000CBCFB,000230DA,000300F0,0002D043]
 Nadzorca: posiwiały prawie zupełnie, w kombinezonie krypty, z twarzą ściągniętą gniewem.
 
-[npc Jonas @00014E86]
+[npc Jonas @00014E86 #00099343,000300E7,0001CFBC]
 Jonas leży bez życia na podłodze.
 
 [stage 00014E86 120]

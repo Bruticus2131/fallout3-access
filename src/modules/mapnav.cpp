@@ -30,6 +30,10 @@ bool        g_open  = false;
 // selection moves, but the objectives — the part that says what to actually do —
 // sit in a separate list. Read them whenever they change.
 std::string g_last_objectives;
+std::string g_note_said;        // the note text read last (Enter clears it: read again)
+std::string g_note_kind_said;   // "Audio" / "Image" said for the note shown
+std::string g_seen_objectives;   // as last read, settling (the rows are filled in a few at a time)
+int         g_objectives_ticks = 0;
 std::string g_confirm_pending;    // name awaiting a second Enter (undiscovered)
 
 // Fast travel runs through the game's own path: a click on the marker (on the
@@ -236,7 +240,9 @@ void Tick(float)
     // list is empty on the other tabs, so this costs nothing there.
     {
         std::string obj = game::GetQuestObjectivesText();
-        if (!obj.empty() && obj != g_last_objectives) {
+        if (obj != g_seen_objectives) { g_seen_objectives = obj; g_objectives_ticks = 0; }
+        else if (g_objectives_ticks < 2) ++g_objectives_ticks;
+        if (g_objectives_ticks >= 2 && !obj.empty() && obj != g_last_objectives) {
             g_last_objectives = obj;
             tolk::Speak(obj, tolk::Priority::Ui, false);
         }
@@ -253,17 +259,40 @@ void Tick(float)
         if (KeyEdge(VK_RETURN, &g_enter)) {
             if (tab == game::kMapTabQuests && game::IsKeyboardSelectionIn("MM_QuestsList"))
                 poll::RequestTrackQuest();       // Enter tracks the highlighted quest
-            else if (tab == game::kMapTabNotes && game::IsKeyboardSelectionIn("MM_NotesList"))
+            else if (tab == game::kMapTabNotes && game::IsKeyboardSelectionIn("MM_NotesList")) {
                 poll::RequestOpenNote();         // ...opens the note / plays the holotape
-        }
-        // An open note's text, when it changes (a holotape plays aloud instead).
-        if (tab == game::kMapTabNotes) {
-            static std::string s_note;
-            std::string t = game::GetDataPageText();
-            if (t != s_note) {
-                s_note = t;
-                if (!t.empty()) tolk::Speak(t, tolk::Priority::Ui, false);
+                g_note_said.clear();             // and its text is read again, whole
+                g_note_kind_said.clear();
             }
+        }
+        // The note beside the list, as a sighted player reads it the moment
+        // it is selected (as the FNV mod does): its text, or what kind it is
+        // when it has none (a holotape plays aloud, with its time left). Enter
+        // reads it again from the start. The kind is looked at first: while a
+        // holotape or a picture is shown, the text tile may still hold the
+        // words of the text note before it.
+        if (tab == game::kMapTabNotes) {
+            const std::string k = game::GetDataNoteKind();
+            const std::string t = k.empty() ? game::GetDataPageText() : std::string();
+            if (t != g_note_said) {
+                g_note_said = t;
+                if (!t.empty()) {
+                    F3A_INFO("Notes: note text read (%u characters)", (unsigned)t.size());
+                    tolk::Speak(t, tolk::Priority::Ui, false);
+                }
+            }
+            // The time left ticks while a holotape plays: the kind once per
+            // note (the note being the row selected).
+            const std::string head = k.empty() ? std::string()
+                                               : k.substr(0, k.find(',')) + "|" +
+                                                     game::GetKeyboardSelectionText().value_or("");
+            if (head != g_note_kind_said) {
+                g_note_kind_said = head;
+                if (!k.empty()) tolk::Speak(k, tolk::Priority::Ui, false);
+            }
+        } else {
+            g_note_said.clear();
+            g_note_kind_said.clear();
         }
         KeyEdge(VK_NEXT, &g_pgdn); KeyEdge(VK_PRIOR, &g_pgup);
         KeyEdge(VK_HOME, &g_home); KeyEdge(VK_END, &g_end);

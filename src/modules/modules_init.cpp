@@ -25,6 +25,9 @@ void InitAll()
     quantity::Init();
     lootmenu::Init();
     levelup::Init();
+    sleepwait::Init();
+    repair::Init();
+    devconsole::Init();
     if (c.enable_worldscan) sonar::Init();
     if (c.enable_worldscan) explore::Init();
     audiodesc::Init();
@@ -51,6 +54,9 @@ void ShutdownAll()
     quantity::Shutdown();
     lootmenu::Shutdown();
     levelup::Shutdown();
+    sleepwait::Shutdown();
+    repair::Shutdown();
+    devconsole::Shutdown();
     sonar::Shutdown();
     explore::Shutdown();
     audiodesc::Shutdown();

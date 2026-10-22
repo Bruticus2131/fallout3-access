@@ -262,6 +262,7 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
     // replays.
     RememberSaid(text);
     g_last_text.assign(text);
+    F3A_DEBUG("say: %.*s", static_cast<int>(text.size()), text.data());
 
     g_current_prio.store(static_cast<int>(prio));
     g_last_speak_at = now;

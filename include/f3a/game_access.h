@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -36,13 +37,6 @@ struct InventoryItem {
     int         condition   = 100; // 0..100
     bool        equipped    = false;
     uint32_t    form_id     = 0;
-};
-
-struct DialogOption {
-    int         index;
-    std::string text;
-    std::string skill_req;     // "" if no requirement; e.g. "[Wymowa 50]"
-    bool        available;
 };
 
 struct VatsTarget {
@@ -103,6 +97,10 @@ struct WorldEntity {
     int         open_state = -1;
 };
 
+// A fixture rather than something to pick up: activators (buttons, switches),
+// terminals, furniture, lights - "Przedmiot: Terminal" was wrong for them.
+bool IsFixture(const WorldEntity& e);
+
 // Is this reference an actor currently fighting the PLAYER? Asked of the
 // engine (Actor::GetCombatTarget, a virtual slot), not guessed from a field.
 // MAIN THREAD ONLY (a virtual call); returns false anywhere else.
@@ -118,6 +116,11 @@ std::vector<WorldEntity> GetNearbyLocations(float radius, int max_results);
 // (RefreshHostiles, from MainThreadWork) and read anywhere: ScanNearby marks
 // `hostile` and honours `hostiles_only` from this set.
 void RefreshHostiles();
+// The enemies RefreshHostiles last found: reference, its id, its name.
+struct HostileRef { const void* refr = nullptr; uint32_t id = 0; std::string name; };
+std::vector<HostileRef> GetHostileRefs();
+// Is this actor dead: 1, alive: 0, can't tell: -1. MAIN THREAD (virtual calls).
+int RefDeadState(const void* refr);
 bool IsKnownHostile(uint32_t refid);
 // Dead actors near the player, from the same main-thread pass (the game's
 // own GetDead test). False when not known to be dead.
@@ -221,6 +224,9 @@ bool AdvanceTrackedQuestStage();
 std::vector<WorldEntity> GetActiveQuests(bool trackedOnly = false);
 // The names of the running quests (as the Pip-Boy's quest list shows them).
 std::vector<std::string> RunningQuestNames();
+// Quests the player has finished (TESQuest flags +0x3C bit 1, and once shown
+// in the journal): the Pip-Boy lists them with the running ones.
+std::vector<std::string> CompletedQuestNames();
 
 // Quest objects near the player (questobjs.dat): buttons, terminals, doors,
 // items, trigger spots and free seats that still move the TRACKED quest on
@@ -244,6 +250,34 @@ bool IsThirdPerson();
 // 12 = ActionPoints, 16 = Health, 54 = RadLevel). Returns -1 on failure.
 // Calls the engine's GetActorValue via the avOwner vtable.
 float GetPlayerAV(uint32_t avCode);
+// The value's maximum (GetPermanentActorValue: avOwner vtable slot 8, +0x20,
+// as the script command's handler 0x0050F0A0 calls it); -1 when unreadable.
+float GetPlayerAVMax(uint32_t avCode);
+
+// The game's clock: the GameHour global (form 0x38, TESGlobal float @0x24),
+// 0..24; -1 when it can't be read. MAIN THREAD (LookupFormByID).
+float GetGameHour();
+
+// The sleep / wait screen's own texts: the question, the hours chosen, the
+// time now (SWM_HowManyText, SWM_HoursChosen, SWM_CurrentTime). Empty when
+// the screen is not up.
+struct SleepWaitInfo { std::string prompt, hours, now; };
+bool GetSleepWaitInfo(SleepWaitInfo* out);
+
+// The weapon in the player's hands, read from the inventory: its name, its
+// condition in percent (-1 when it has none), the ammo it fires and how many
+// of those the player carries (empty / -1 for a weapon without ammo).
+struct EquippedWeaponInfo {
+    std::string name;
+    int         condition = -1;
+    std::string ammo;
+    int         ammo_count = -1;
+};
+bool GetEquippedWeapon(EquippedWeaponInfo* out);
+
+// How many of the item with this form id the player carries (bottle caps are
+// 0x0000000F). Plain data reads.
+int GetPlayerItemCount(uint32_t formId);
 
 // The same, for any actor (16 = Health). -1 when it cannot be read. MUST run on
 // the main thread: it calls into the engine.
@@ -455,6 +489,11 @@ std::string ExpandControlTokens(const std::string& text);
 
 // Is the player holding the game's AIM control (whatever they bound it to)?
 bool IsAimControlHeld();
+
+// Is the key the player bound to a game control held right now (keyboard
+// binding only)? Controls: 0 forward, 1 back, 2 strafe left, 3 strafe right,
+// 6 aim. False when the control has no key.
+bool IsControlKeyHeld(uint32_t control);
 
 // Is a weapon drawn?
 bool IsWeaponOut();
@@ -680,12 +719,29 @@ void SetPlayerAngleDeg(int axisAscii, float degrees);
 // `expectedRefID` guards a stale pointer (0 = unchecked; callers pass it).
 void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID);
 
+// For a moment after a teleport the game is still moving the player: it
+// re-attaches the player and the camera and loads and frees the cells round
+// the new spot, people in them included. Engine calls on the world then
+// (aiming rays, a person's 3D, actor values, faces) land on things half moved
+// or gone - the crash a teleport sometimes ended in (a jump to 0x00000001, the
+// aim key pressed just after Alt+Home). While this is true, nothing on the
+// game's thread touches the world. Any thread.
+bool WorldSettling();
+
+// Drop the list of who is fighting the player (their pointers are of the
+// place just left). The next refresh builds it again.
+void ForgetHostiles();
+
 // True when a target reference shares the player's coordinate frame (same cell,
 // or both in the same exterior worldspace). On-foot guidance walks toward a
 // target's raw world position, which is only valid within one frame — a marker
 // in another worldspace (e.g. a Wasteland location while you're in Megaton) must
 // be reached by teleport, not by walking. Fails safe (false) on unreadable refs.
 bool TargetSharesPlayerSpace(const void* targetRefr);
+
+// Where a reference is, as the game names it: its cell's name (an interior),
+// else its worldspace's ("Pustkowia Stołeczne"). "" when it has none.
+std::string GetRefPlaceName(const void* refr);
 
 // Load-door helpers for cross-worldspace autowalk: is this ref a load door
 // (teleports on use), does walking through it reach the target's coordinate
@@ -809,6 +865,9 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side = nullptr);
 // the game's own arrows moved it away). MAIN THREAD ONLY. Returns 1 = moved,
 // 2 = already at that end, 0 = nothing to select there, -1 = no menu.
 int StepContainerSelection(bool container_side, int delta);
+// The list index of the row a column has selected, -1 when none / unreadable.
+// Plain data read.
+int ContainerSelectedIndex(bool container_side);
 
 // The row's place as said after it, ", 2 z 5" / ", 2 of 5"; empty when the
 // list has one row or the place is not known.
@@ -857,27 +916,42 @@ std::string GetSelectedItemInfo();
 // Items page shows no card.
 std::string GetItemCard();
 
-// ---- Dialog ----
+// The Pip-Boy Stats page's detail, as it stands beside the list: on
+// S.P.E.C.I.A.L., Skills, Perks and General the description of what is
+// selected; on Status the open view - CND each limb's condition, RAD the rads
+// and rad resistance, EFF the active effects. "" when the page is not up.
+std::string GetStatsDetail();
 
-std::string                 GetCurrentDialogSpeaker();
-std::string                 GetCurrentDialogLine();
-std::vector<DialogOption>   GetDialogOptions();
-int                         GetHighlightedDialogOption();
+// The repair screens (your own repair and a vendor's services, the same tiles
+// as RM_ / RSM_): what the screen compares for the selected item - now and
+// after the repair - with the cost and any refusal; and the header (your
+// repair skill, or the vendor's skill and your caps). "" when not up.
+std::string GetRepairDetail();
+
+// The Pip-Boy's hotkey wheel, when it is open: the slot the selection is on
+// (0-7, keys 1-8) and the text under the wheel (what is on that slot). False
+// while the wheel is not shown.
+bool GetHotkeyWheel(int* slot, std::string* text);
+std::string GetRepairHeader();
+
+// ---- Dialog ----
+// FO3's dialog_menu.xml (the same as New Vegas's): DM_SpeakerNameLabel holds
+// who speaks, DM_SpeakerText their line (kept after it is spoken), DM_TopicList
+// the player's topics, shown while the NPC is not speaking. Plain data reads.
+std::string GetCurrentDialogSpeaker();
+std::string GetCurrentDialogLine();
 
 // ---- Barter ----
 
-struct BarterState {
-    int  player_total_value;
-    int  vendor_total_value;
-    int  player_caps;
-    int  vendor_caps;
-    bool player_side_active;     // true if focus is on player's inventory
-    std::optional<InventoryItem> selected;
-    // False until the reader is implemented (GetBarterState is still a stub):
-    // the module must say nothing rather than "0 for 0".
-    bool valid = false;
+// Barter, read from its tiles: who you trade with, both sides' caps as the
+// screen shows them, and the deal standing - its amount and which way the
+// caps go (+1 to you, -1 from you, 0 no deal). False when barter is not open.
+struct BarterInfo {
+    bool        valid = false;
+    std::string vendor, player_caps, vendor_caps, amount;
+    int         direction = 0;
 };
-BarterState GetBarterState();
+bool GetBarterState(BarterInfo* out);
 
 // ---- Lockpick ----
 
@@ -963,6 +1037,16 @@ std::string GetDataPageText();
 // an OK notification or the character-creation gender prompt. Empty if no
 // Message menu is visible.
 std::string GetActiveMessageText();
+
+// The open book or paper (BookMenu): its whole text, which the menu holds in
+// its user2 trait (the page tiles only show parts of it), HTML taken out. ""
+// when no book is up.
+std::string GetBookText();
+
+// The Pip-Boy note shown beside the notes list, when it is not text: an
+// audio note (holotape) says "audio" and its time left, a picture "image".
+// "" for a text note (GetDataPageText has it) or when none is shown.
+std::string GetDataNoteKind();
 
 // Text-entry popup (TextEditMenu — character name, etc.): the prompt question
 // and the text typed so far (caret glyph stripped). nullopt if it isn't open.
@@ -1062,6 +1146,10 @@ struct HackingInfo {
     bool                     locked = false;
     int                      attempts = 0;    // guesses remaining
     std::vector<std::string> words;           // candidate passwords (all same length)
+    // Bracket pairs on one line with no letter between them, "[!#]": entered
+    // like a word, one takes out a wrong word or gives the attempts back.
+    // GetHackWordTarget numbers them after the words.
+    std::vector<std::string> brackets;
     std::string              highlighted;     // word under the cursor, "" if none
 };
 HackingInfo GetHackingInfo();
@@ -1101,6 +1189,50 @@ std::string GetHackingLog();
 // All readable text lines of the hacking screen (header + log), for browsing
 // (left/right) and live reading of text as it appears.
 std::vector<std::string> GetHackingTextLines();
+
+// ---- The console (~) ----
+// The engine's ConsoleManager, found through its GetSingleton (FOSE's address
+// for each edition): open flag +0x38, the printed lines at +0x04 (first, last,
+// count; a node is next, prev, the line's text), +0x24 the line at the bottom
+// of the view. The line being typed is not in it: the console draws it as a
+// debug-text line at the manager's (+0x30, +0x34), with '|' as the caret.
+//   ConsoleOpen     - the console is down. Plain data read, any thread.
+//   GetConsoleInput - the line being typed, in the game's code page, with the
+//                     caret taken out, and the caret's place. MAIN THREAD.
+//   ConsoleNewLines - the lines printed after *cursor (the last node seen,
+//                     kept by the caller; nullptr starts from now and returns
+//                     nothing), oldest first, UTF-8. MAIN THREAD.
+//   ConsoleView     - how many lines there are, the bottom of the view and how
+//                     many lines it shows. ConsoleLines: lines [from, to).
+//   GameTextToUtf8  - a string in the game's code page, as UTF-8.
+bool ConsoleOpen();
+bool GetConsoleInput(std::string* text, int* caret);
+std::vector<std::string> ConsoleNewLines(const void** cursor);
+bool ConsoleView(int* count, int* bottom, int* shown);
+std::vector<std::string> ConsoleLines(int from, int to);
+std::string GameTextToUtf8(const std::string& raw);
+
+// Held while the container / barter screen is being read (poll thread) and
+// while Backspace closes it (main thread), so the menu is never freed under a
+// read of it.
+std::mutex& ColumnReadLock();
+
+// A string game setting the exe defines ("sYes"), as the game loaded it:
+// Fallout3.esm's value, or a plugin's over it. Raw, in the game's code page;
+// "" when it cannot be found. Plain data read, after the data has loaded.
+std::string ExeGameSettingString(const char* name);
+// The same for a whole-number setting ("iXPBase"); `fallback` when it cannot
+// be found.
+int ExeGameSettingInt(const char* name, int fallback);
+
+// The player's level: the level on their record, which is what GetLevel reads
+// (0x00510AB0 -> TESActorBaseData 0x0044F2E0: base form +0x30, word +0x0C).
+// 0 when it cannot be read. Plain data read.
+int GetPlayerLevel();
+// The experience a level takes, the game's own sum (0x005850F0): iXPBase for
+// the first step and iXPBumpBase more for every step after it - 200, 550,
+// 1050... with Fallout3.esm's settings. 0 for level 1.
+int XPForLevel(int level);
 
 // ---- Subtitles / voice lines ----
 

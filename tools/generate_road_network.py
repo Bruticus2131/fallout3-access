@@ -3,7 +3,7 @@ Generate a road waypoint graph for a Fallout 3 worldspace (Fallout3.esm).
 
 Adapted for Fallout3.esm (Capital Wasteland, worldspace EDID "Wasteland") from
 tools/generate_road_network.py in FalloutNVAccess by Alexander Epaneshnikov
-(https://git.alex19ep.me/alex19EP/FalloutNVAccess), used under the MIT License:
+(https://github.com/FalloutAccess/FalloutNVAccess), used under the MIT License:
 
     MIT License
 

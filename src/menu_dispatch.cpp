@@ -92,6 +92,12 @@ static bool SuppressOpenAnnouncement(Id id)
         // The message module reads the actual popup text (and the LevelUp
         // line); announcing "Wiadomość otwarte" on top would be noise.
         return true;
+    case Id::Dialog:
+        // The dialog module says who: "Rozmowa z Moirą".
+        return true;
+    case Id::Barter:
+        // The barter module says who and the caps.
+        return true;
     default:
         return false;
     }

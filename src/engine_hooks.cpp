@@ -84,6 +84,40 @@ bool RedirectCall(uintptr_t site, uintptr_t expected, const void* hook)
     return true;
 }
 
+// --- Up and Down in a text field ---------------------------------------------
+//
+// The text-edit control (0x00625640) turns keys into special codes, 0x80000000
+// plus: 1 Left, 2 Right, 3 Up, 4 Down (0x00620AA4..). Left and Right move the
+// cursor; Up and Down fall through its jump table (0x006258CC) to the case
+// that INSERTS a character - the code's low byte, an invisible 0x03 / 0x04 -
+// and the name check then greys out Ok. Blind, the arrows are pressed by habit
+// to look for the button, and the name could no longer be confirmed. The two
+// entries are pointed at the handler's plain exit (0x006258B1, where its other
+// do-nothing cases end), so the arrows do nothing there.
+constexpr uintptr_t kEditKeyTable = 0x006258CC;
+constexpr uintptr_t kEditInsertChar = 0x0062581F;
+constexpr uintptr_t kEditKeyDone = 0x006258B1;
+bool g_edit_arrows_patched = false;
+
+void PatchTextEditArrows()
+{
+    auto* table = reinterpret_cast<uint32_t*>(kEditKeyTable);
+    // backspace, left, right, up, down - as this build has them
+    const uint32_t expect[5] = { 0x0062570C, 0x006257AE, 0x006257C4,
+                                 kEditInsertChar, kEditInsertChar };
+    bool ok = !IsBadReadPtr(table, sizeof(expect)) &&
+              std::memcmp(table, expect, sizeof(expect)) == 0;
+    DWORD old = 0;
+    if (ok && VirtualProtect(table + 3, 8, PAGE_EXECUTE_READWRITE, &old)) {
+        table[3] = kEditKeyDone;
+        table[4] = kEditKeyDone;
+        VirtualProtect(table + 3, 8, old, &old);
+        g_edit_arrows_patched = true;
+    }
+    F3A_INFO("engine_hooks: text field Up/Down fix %s.",
+             g_edit_arrows_patched ? "installed" : "NOT installed (code differs)");
+}
+
 void PatchDropQuantity()
 {
     // The push of the game's callback right before the call confirms the site.
@@ -100,7 +134,8 @@ void PatchDropQuantity()
 bool InstallHooks()
 {
     PatchDropQuantity();
-    return g_drop_patched;
+    PatchTextEditArrows();
+    return g_drop_patched && g_edit_arrows_patched;
 }
 
 void RemoveHooks() {}

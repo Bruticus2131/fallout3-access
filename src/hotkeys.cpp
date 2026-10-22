@@ -285,6 +285,13 @@ void Poll()
         if (--it->second <= 0) it = g_suppressed.erase(it); else ++it;
     }
 
+    // Typing in a text field (the name at birth) or the console (~): the
+    // letters are the text, not the mod's keys - "bruticus" fired U, T, I and
+    // C, "coc" C and O, and the arrows the aim trim. Only the on/off key and
+    // the F11 dump still work.
+    const bool typing = menu::IsOpen(menu::Id::TextEdit) || game::ConsoleOpen();
+    const uint32_t dump_key = config::Get().hotkeys.dump_menu_tree;
+
     for (auto& b : g_bindings) {
         int vk = DikToVk(b.dik);
         if (!vk) continue;
@@ -296,7 +303,9 @@ void Poll()
         bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
         // Mod switched off: only the toggle key works, so it can be switched
         // back on.
-        if (!config::IsEnabled() && b.dik != config::Get().hotkeys.toggle_mod) {
+        const bool still = b.dik == config::Get().hotkeys.toggle_mod ||
+                           (config::IsEnabled() && b.dik == dump_key);
+        if ((!config::IsEnabled() || typing) && !still) {
             b.was_down = down;
             continue;
         }

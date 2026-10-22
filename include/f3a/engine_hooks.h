@@ -7,6 +7,8 @@
 //   - Dropping a stack from the inventory: the "Ile?" prompt's Ok crashed the
 //     game when played with keyboard and mouse (the selected item was cleared
 //     behind the prompt).
+//   - Up and Down in a text field (the name at birth) typed an invisible
+//     character, and the name could not be confirmed.
 
 namespace f3a::engine {
 

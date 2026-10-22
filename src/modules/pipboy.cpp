@@ -20,12 +20,15 @@ std::string g_last_subtab;
 std::string g_last_kbd;      // the keyboard highlight's row, as last seen
 std::string g_last_act;      // the mouse's (activeTile) row, as last seen
 
-// The item card (damage, weight, value, condition, ammo, effects) is what a
-// sighted player reads off the Items page together with the name, so it is
-// said after the name. The game fills it in as the highlight lands, so it is
-// read a moment later - and only if the highlight is still on that row.
+// What a sighted player reads beside the list, said after the row: on the
+// Items page the item card (damage, weight, value, condition, ammo, effects),
+// on the Stats page the description of the selected S.P.E.C.I.A.L., skill or
+// perk, or the open Status view (limbs, radiation, effects). The game fills it
+// in as the highlight lands, so it is read a moment later - and only if the
+// highlight is still on that row.
 std::string g_card_row;      // the row the card is due for
 DWORD       g_card_due = 0;
+bool        g_card_stats = false;   // the Stats page's detail, not an item card
 constexpr DWORD kCardDelayMs = 150;
 
 bool ItemsPage()
@@ -34,9 +37,18 @@ bool ItemsPage()
            !menu::IsOpen(menu::Id::Map);
 }
 
+bool StatsPage()
+{
+    return menu::IsOpen(menu::Id::Stats) && !menu::IsOpen(menu::Id::Inventory) &&
+           !menu::IsOpen(menu::Id::Map);
+}
+
 void ScheduleCard(const std::string& row)
 {
-    if (!ItemsPage()) { g_card_due = 0; return; }
+    if (!config::Get().item_card) { g_card_due = 0; return; }   // [Voice] ItemCard = 0
+    if (ItemsPage())      g_card_stats = false;
+    else if (StatsPage()) g_card_stats = true;
+    else { g_card_due = 0; return; }
     g_card_row = row;
     g_card_due = GetTickCount() + kCardDelayMs;
 }
@@ -75,6 +87,8 @@ std::string QuestState(const std::string& row)
     if (!tracked.empty() && row == tracked) return strings::T(", śledzone", ", tracked");
     for (const auto& n : game::RunningQuestNames())
         if (n == row) return strings::T(", nieśledzone", ", not tracked");
+    for (const auto& n : game::CompletedQuestNames())
+        if (n == row) return strings::T(", ukończone", ", completed");
     return {};
 }
 
@@ -84,43 +98,14 @@ std::string QuestState(const std::string& row)
 // real move of the selection speaks normally.
 void AnnounceSelection(bool force, bool mute = false, bool interrupt = true)
 {
-    auto item = game::GetSelectedInventoryItem();
-    if (!item) {
-        auto text = CurrentRow(force);
-        if (!text || text->empty()) return;
-        if (!force && *text == g_last_selection) return;
-        g_last_selection = *text;
-        if (!mute) {
-            tolk::Speak(*text + QuestState(*text), tolk::Priority::Ui, interrupt);
-            ScheduleCard(*text);
-        }
-        return;
+    auto text = CurrentRow(force);
+    if (!text || text->empty()) return;
+    if (!force && *text == g_last_selection) return;
+    g_last_selection = *text;
+    if (!mute) {
+        tolk::Speak(*text + QuestState(*text), tolk::Priority::Ui, interrupt);
+        ScheduleCard(*text);
     }
-
-    char extra[160] = {0};
-    const auto& cfg = config::Get();
-    int extra_len = 0;
-
-    if (cfg.read_item_weight && item->weight > 0.01f) {
-        char wbuf[32]; std::snprintf(wbuf, sizeof(wbuf), "%.1f", item->weight);
-        extra_len += std::snprintf(extra + extra_len, sizeof(extra) - extra_len,
-                                   "%s%s",
-                                   extra_len ? ", " : "",
-                                   strings::RenderArgs(strings::Key::ItemWeightFmt, wbuf).c_str());
-    }
-    if (cfg.read_item_value && item->value_caps > 0) {
-        char vbuf[16]; std::snprintf(vbuf, sizeof(vbuf), "%d", item->value_caps);
-        extra_len += std::snprintf(extra + extra_len, sizeof(extra) - extra_len,
-                                   "%s%s",
-                                   extra_len ? ", " : "",
-                                   strings::RenderArgs(strings::Key::ItemValueFmt, vbuf).c_str());
-    }
-
-    std::string line = strings::RenderArgs(strings::Key::SelectionFmt,
-                                           item->name.c_str(), extra);
-    if (!force && line == g_last_selection) return;
-    g_last_selection = line;
-    if (!mute) tolk::Speak(line, tolk::Priority::Ui, true);
 }
 
 bool AnnounceTabIfChanged()
@@ -228,14 +213,35 @@ void CardTick()
 {
     if (!g_card_due || GetTickCount() < g_card_due) return;
     g_card_due = 0;
-    if (g_card_row != g_last_selection || !ItemsPage()) return;   // moved on
-    std::string card = game::GetItemCard();
+    if (g_card_row != g_last_selection) return;                    // moved on
+    if (g_card_stats ? !StatsPage() : !ItemsPage()) return;        // page switched
+    std::string card = g_card_stats ? game::GetStatsDetail() : game::GetItemCard();
     if (!card.empty()) tolk::Speak(card, tolk::Priority::Ui, false);   // after the name
+}
+
+// The hotkey wheel, while it is open: which key the selection is on and what
+// it holds, on every change.
+void HotkeyWheelTick()
+{
+    static int s_slot = -2;
+    static std::string s_text;
+    int slot = -1;
+    std::string text;
+    if (!ItemsPage() || !game::GetHotkeyWheel(&slot, &text)) { s_slot = -2; s_text.clear(); return; }
+    if (slot == s_slot && text == s_text) return;
+    const bool opened = s_slot == -2;
+    s_slot = slot; s_text = text;
+    std::string say;
+    if (opened) say = strings::T("Szybki wybór. ", "Hotkeys. ");
+    if (slot >= 0) say += strings::T("Klawisz ", "Key ") + std::to_string(slot + 1);
+    if (!text.empty()) say += (say.empty() || say.back() == ' ' ? "" : ": ") + text;
+    if (!say.empty()) tolk::Speak(say, tolk::Priority::Ui, true);
 }
 
 void OnTick(float)
 {
     CardTick();
+    HotkeyWheelTick();
     // Switching page with F1/F2/F3 says the PAGE, full stop.
     //
     // It used to say three things at once: the page, then the sub-tab strip it
@@ -253,6 +259,9 @@ void OnTick(float)
     // it lands on after it - queued, so the name is not cut off by the row.
     if (AnnounceSubTabIfChanged(false)) {
         AnnounceSelection(/*force*/true, /*mute*/false, /*interrupt*/false);
+        // Status's CND / RAD / EFF have no list row of their own to hang the
+        // view on: the switch itself brings it.
+        if (StatsPage() && g_card_due == 0) ScheduleCard(g_last_selection);
         return;
     }
     AnnounceSelection(false);

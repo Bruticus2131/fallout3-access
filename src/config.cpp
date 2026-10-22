@@ -1,5 +1,6 @@
 #include "f3a/config.h"
 #include "f3a/logger.h"
+#include "f3a/strings.h"
 
 #include <windows.h>
 #include <atomic>
@@ -108,6 +109,36 @@ void SaveAimOffset(uint32_t base_form_id, float x, float y, float z)
 
 namespace {
 
+// The game's language from its word for "Yes" (the sYes setting), raw bytes in
+// its own code page: "Tak" Polish, "Да" (cp1251) Russian, "Так" Ukrainian...
+// "?" when it is none of these.
+std::string LanguageFromYes(const std::string& v)
+{
+    if (v == "Tak")  return "pl";
+    if (v == "Yes")  return "en";
+    if (v == "Ja")   return "de";
+    if (v == "Oui")  return "fr";
+    if (v == "S\xED" || v == "Si") return "es";
+    if (v == "S\xEC") return "it";
+    if (v == "Ano")  return "cs";
+    if (v == "Igen") return "hu";
+    // Cyrillic in Windows-1251: Д = C4, а = E0 (А = C0); Т = D2, к = EA.
+    if (v.size() == 2 && (unsigned char)v[0] == 0xC4 &&
+        ((unsigned char)v[1] == 0xE0 || (unsigned char)v[1] == 0xC0)) return "ru";
+    if (v == "\xD2\xE0\xEA" || v == "\xD2\xC0\xCA") return "uk";
+    return "?";
+}
+
+// The code page of a language's text in the game's files.
+unsigned CodepageFor(const std::string& code)
+{
+    if (code == "pl" || code == "cs" || code == "hu") return 1250;
+    if (code == "ru" || code == "uk") return 1251;
+    if (code == "en" || code == "de" || code == "fr" || code == "es" || code == "it") return 1252;
+    return CP_ACP;
+}
+std::atomic<unsigned> g_game_cp{ CP_ACP };
+
 // The language the game itself is in, from Fallout3.esm beside the plugin
 // (Data\FOSE\Plugins\..\..\Fallout3.esm): the game setting sYes, in the first
 // group of the file, is "Tak" in the Polish release and "Yes" in the English
@@ -172,13 +203,7 @@ std::string ReadGameLanguage(const std::wstring& path)
                         isYes = n == 5 && std::memcmp(d, "sYes", 5) == 0;
                     } else if (isYes && std::memcmp(&g[q], "DATA", 4) == 0) {
                         std::string v(d, strnlen(d, n));
-                        if (v == "Tak") found = "pl";
-                        else if (v == "Yes") found = "en";
-                        else if (v == "Ja") found = "de";
-                        else if (v == "Oui") found = "fr";
-                        else if (v == "S\xED" || v == "Si") found = "es";
-                        else if (v == "S\xEC") found = "it";
-                        else found = "?";
+                        found = LanguageFromYes(v);
                         F3A_INFO("Game language: sYes = '%s' -> %s", v.c_str(), found.c_str());
                         break;
                     }
@@ -198,15 +223,21 @@ bool Load(const wchar_t* ini_path)
 {
     auto& s = g_settings;
     // The mod speaks the game's language unless the INI says otherwise:
-    // Polish for the Polish release, English for every other.
+    // Polish for the Polish release, Russian for a Russian one (from its
+    // translation file), English for every other.
     s.game_language = DetectGameLanguage(ini_path);
-    s.language = s.game_language == "pl" ? "pl" : "en";
-    // Not readable at all: a Polish Windows is the better guess for Polish.
-    if (s.game_language.empty() && PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_POLISH)
-        s.language = "pl";
+    s.language = s.game_language.empty() ? "en" : s.game_language;
+    // Not readable at all: the Windows language is the better guess.
+    if (s.game_language.empty()) {
+        const LANGID ui = PRIMARYLANGID(GetUserDefaultUILanguage());
+        if (ui == LANG_POLISH)  s.language = "pl";
+        if (ui == LANG_RUSSIAN) s.language = "ru";
+    }
+    g_game_cp.store(CodepageFor(s.game_language.empty() ? s.language : s.game_language));
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
         F3A_WARN("INI not found at the expected path; using defaults (language '%s').",
                  s.language.c_str());
+        strings::SetLanguage(s.language, std::wstring());
         return false;
     }
 
@@ -222,9 +253,7 @@ bool Load(const wchar_t* ini_path)
     s.enable_subtitles = ReadBool(L"Modules", L"Subtitles", true,  ini_path);
 
     s.speak_on_menu_open  = ReadBool(L"Voice", L"SpeakOnMenuOpen", true, ini_path);
-    s.verbose_pipboy      = ReadBool(L"Voice", L"VerbosePipBoy",   false, ini_path);
-    s.read_item_weight    = ReadBool(L"Voice", L"ReadItemWeight",  true, ini_path);
-    s.read_item_value     = ReadBool(L"Voice", L"ReadItemValue",   true, ini_path);
+    s.item_card           = ReadBool(L"Voice", L"ItemCard",        true, ini_path);
     s.vats_tutorial       = ReadBool(L"Voice", L"VatsTutorial",    true, ini_path);
     s.intro_audio_desc    = ReadBool(L"Voice", L"IntroAudioDesc",  true, ini_path);
     s.target_cue          = ReadBool(L"Voice", L"TargetCue",       true, ini_path);
@@ -242,8 +271,10 @@ bool Load(const wchar_t* ini_path)
     s.quest_arrive_dist   = ReadInt (L"Voice", L"QuestArriveDist",  0,    ini_path);
     s.footstep_cue        = ReadBool(L"Voice", L"FootstepCue",       true, ini_path);
     s.walk_animation      = ReadBool(L"Voice", L"WalkAnimation",     true, ini_path);
-    s.barter_warn_loss_caps = ReadInt (L"Voice", L"BarterWarnLossCaps", 10, ini_path);
     s.nearby_scan_radius    = ReadInt (L"Voice", L"NearbyScanRadius",   1200, ini_path);
+    s.scanner_radius        = ReadInt (L"Voice", L"ScannerRadius",      8000, ini_path);
+    if (s.scanner_radius < 1000)  s.scanner_radius = 1000;
+    if (s.scanner_radius > 40000) s.scanner_radius = 40000;
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
     s.hide_empty_containers = ReadBool(L"Voice", L"HideEmptyContainers", true, ini_path);
     s.explore_mode          = ReadBool(L"Voice", L"ExploreMode",        false, ini_path);
@@ -261,7 +292,13 @@ bool Load(const wchar_t* ini_path)
     s.activate_pick_radius  = ReadInt (L"Voice", L"ActivatePickRadius", 150, ini_path);
 
     std::string lang = ReadStr(L"General", L"Language", "auto", ini_path);
-    if (lang == "pl" || lang == "en") s.language = lang;     // else "auto": the game's
+    for (auto& ch : lang) if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    // pl, en, or the code of a translation file (ru: lang_ru.txt); else
+    // "auto": the game's.
+    bool code = lang.size() >= 2 && lang.size() <= 3 && lang != "aut";
+    for (char ch : lang) if (ch < 'a' || ch > 'z') code = false;
+    s.language_auto = !code;
+    if (code) s.language = lang;
     s.prefer_sapi = ReadBool(L"General", L"PreferSAPI", false, ini_path);
     s.game_text_codepage = ReadInt(L"General", L"GameTextCodepage", 0, ini_path);
 
@@ -313,14 +350,43 @@ bool Load(const wchar_t* ini_path)
     h.aim_up           = ReadKey(L"Hotkeys", L"AimUp",           h.aim_up,           ini_path);
     h.aim_down         = ReadKey(L"Hotkeys", L"AimDown",         h.aim_down,         ini_path);
 
-    F3A_INFO("Config loaded. Language='%s' (INI '%s', game '%s').", s.language.c_str(),
-             lang.c_str(), s.game_language.empty() ? "unknown" : s.game_language.c_str());
+    if (s.game_text_codepage > 0) g_game_cp.store((unsigned)s.game_text_codepage);
+    strings::SetLanguage(s.language, DataDir());
+    F3A_INFO("Config loaded. Language='%s' (INI '%s', game '%s', game text code page %u).",
+             s.language.c_str(), lang.c_str(),
+             s.game_language.empty() ? "unknown" : s.game_language.c_str(), g_game_cp.load());
     F3A_INFO("Hotkeys: toggle=0x%02X silence=0x%02X dump=0x%02X",
              h.toggle_mod, h.silence, h.dump_menu_tree);
     return true;
 }
 
 const Settings& Get() { return g_settings; }
+
+unsigned GameTextCodepage() { return g_game_cp.load(); }
+
+void ConfirmGameLanguage(const std::string& yes)
+{
+    if (yes.empty()) {
+        F3A_INFO("Game language: the loaded sYes could not be read; keeping '%s'",
+                 g_settings.game_language.c_str());
+        return;
+    }
+    const std::string code = LanguageFromYes(yes);
+    char hex[40] = {};
+    for (size_t i = 0; i < yes.size() && i < 12; ++i)
+        std::snprintf(hex + i * 3, 4, "%02X ", (unsigned char)yes[i]);
+    // "Yes" is also what that setting holds before any file is read, so it
+    // never overrules the file: only another language is news.
+    if (code == "?" || code == "en" || code == g_settings.game_language) {
+        F3A_INFO("Game language: the loaded sYes (%s) -> %s; keeping '%s'", hex, code.c_str(),
+                 g_settings.game_language.c_str());
+        return;
+    }
+    F3A_INFO("Game language: the loaded game says %s (sYes %s), Fallout3.esm said '%s'",
+             code.c_str(), hex, g_settings.game_language.c_str());
+    if (g_settings.game_text_codepage <= 0) g_game_cp.store(CodepageFor(code));
+    if (g_settings.language_auto) strings::SetLanguage(code, DataDir());
+}
 
 void SetEnabled(bool e) { g_enabled.store(e); }
 bool IsEnabled()        { return g_enabled.load(); }

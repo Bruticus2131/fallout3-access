@@ -38,3 +38,6 @@ __pycache__/
 # tools/generate_world_doors.py (needs the game), 35 MB; shipped in the
 # release archive, not kept in git.
 data/roadnet/*.dat
+
+# test builds handed out by hand
+testbuild/

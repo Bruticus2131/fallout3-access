@@ -9,7 +9,7 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.5.5"
+#define AppVersion   "0.5.6"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
 ; Nexus Mods SSO application id ("slug"), issued by Nexus staff. While it is
@@ -46,8 +46,9 @@ PrivilegesRequired=admin
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"
+Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 
-; Every text of our own pages, in both languages. Code reads them through
+; Every text of our own pages, in all three languages. Code reads them through
 ; CustomMessage('...') and the sections through {cm:...}; a text typed straight
 ; into the code would be shown in that one language whatever the user picked.
 [CustomMessages]
@@ -117,6 +118,39 @@ pl.InstallFailed=Pobieranie się udało, ale instalacja plików nie. Szczegóły
 en.InstallFailed=The download worked, but installing the files did not. Details are in the log: %1
 pl.FailedCode=Instalacja zakończyła się kodem %1. Szczegóły w dzienniku: %2
 en.FailedCode=The installation ended with code %1. Details are in the log: %2
+ru.ShowLog=Показать журнал установки
+ru.GamePageCaption=Папка игры
+ru.GamePageDescription=Где установлен Fallout 3?
+ru.GamePageText=Выберите папку, в которой находится Fallout3.exe. Если игра найдена, путь уже указан.
+ru.MethodPageCaption=Патч понижения версии
+ru.MethodPageDescription=Вашей версии игры нужен патч, чтобы работал FOSE
+ru.MethodPageText=Патч размещён на Nexus Mods. Nexus разрешает автоматическую загрузку только для Premium-аккаунтов, поэтому по умолчанию установщик просто открывает страницу, а вы выбираете скачанный файл.
+ru.MethodManual=Скачаю вручную — открыть страницу и выбрать файл (Premium-аккаунт не нужен)
+ru.MethodApiKey=У меня есть API-ключ Nexus и Premium-аккаунт — скачать автоматически
+ru.MethodSso=Войти через Nexus Mods (Premium-аккаунт) — скачать автоматически
+ru.KeyPageCaption=Ключ Nexus Mods
+ru.KeyPageDescription=Ключ из настроек вашего аккаунта
+ru.KeyPageText=Он находится на nexusmods.com в настройках аккаунта, в разделе API Access («Personal API Key»).
+ru.KeyPrompt=API-ключ:
+ru.FilePageCaption=Скачанный патч
+ru.FilePageDescription=Выберите архив, скачанный с Nexus
+ru.FilePageText=Страница патча открылась в браузере. Скачайте патч, затем выберите скачанный файл (обычно он в папке «Загрузки»).
+ru.FilePrompt=Файл патча:
+ru.FileFilter=Архивы|*.zip;*.7z;*.rar|Все файлы|*.*
+ru.OptPageCaption=Что установить
+ru.OptPageDescription=Уже установленные части можно пропустить
+ru.OptFose=Установить FOSE (без него мод не работает)
+ru.OptMod=Установить / обновить Fallout 3 Access
+ru.SsoInfo=Сейчас в браузере откроется страница Nexus Mods. Войдите, нажмите Authorise и вернитесь в установщик — он продолжит сам.
+ru.SsoFailed=Не удалось войти через Nexus Mods. Попробуйте ещё раз или выберите другой способ.
+ru.NoGameExe=В этой папке нет Fallout3.exe. Выберите папку, в которой находится игра.
+ru.NoPatchNeeded=Ваша игра уже версии 1.7.0.3 — патч не нужен.
+ru.FileNotFound=Выбранный файл не найден.
+ru.Working=Загрузка и установка компонентов…
+ru.NoPowerShell=Не удалось запустить PowerShell.
+ru.DownloadFailed=Не удалось скачать один из файлов. Подробности в журнале: %1
+ru.InstallFailed=Загрузка удалась, но установить файлы не удалось. Подробности в журнале: %1
+ru.FailedCode=Установка завершилась с кодом %1. Подробности в журнале: %2
 
 [Files]
 Source: "f3a-install.ps1"; DestDir: "{app}"; Flags: ignoreversion

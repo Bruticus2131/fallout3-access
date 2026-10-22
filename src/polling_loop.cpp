@@ -261,7 +261,8 @@ void PollActiveTile()
     // game's own arrows move the active tile through YOUR column even while
     // the container's is in use, and reading that tile here is what made the
     // other column's items cut in.
-    if (menu::ActiveMenu() == menu::Id::Container) return;
+    if (menu::ActiveMenu() == menu::Id::Container ||
+        menu::ActiveMenu() == menu::Id::Barter) return;   // their module reads the columns
     // The level-up screen too: its module reads the row with its value and
     // description, and this reader would say the row a second time.
     if (menu::ActiveMenu() == menu::Id::LevelUp) return;
@@ -440,7 +441,10 @@ bool LooksLikeHint(const std::string& raw)
            raw.find("naciśnij ESC") != std::string::npos ||
            starts("Press ") || starts("Hold ") || starts("To ") ||
            raw.find(" press ") != std::string::npos ||
-           raw.find("Press ESC") != std::string::npos;
+           raw.find("Press ESC") != std::string::npos ||
+           // A Russian game: "Нажмите", "Удерживайте", "Чтобы ..."
+           starts("Нажмите") || starts("Нажми") || starts("Удерживайте") ||
+           starts("Чтобы ") || raw.find(" нажмите ") != std::string::npos;
 }
 
 // Hints already read this game session (cleared only when the game restarts).
@@ -589,42 +593,82 @@ void PollHudProse()
 // "Otwórz właz Krypty") is put up while the terminal is still open, and a
 // reader that waited for the menu to close found it gone — which is why that
 // objective was never announced. Each text is said once it has held still for
-// a couple of polls (the headline is animated letter by letter), and again
-// only after something different was shown.
+// a while (the headline types itself out a couple of letters every 0.4 s and
+// wipes itself the same way - "CE", "CELE N", ... "NAUKOWE", "KOWE" were all
+// read), and each objective line only if it was not said lately.
 std::string g_qr_head_seen, g_qr_head_said;
-std::string g_qr_stage_seen, g_qr_stage_said;
-int         g_qr_head_stable = 0, g_qr_stage_stable = 0;
+std::string g_qr_stage_seen;
+DWORD       g_qr_head_since = 0, g_qr_stage_since = 0;
+bool        g_qr_head_done = false, g_qr_stage_done = false;
+constexpr DWORD kQrSettleMs = 900;
 std::string g_qr_last_objective;   // shared with PollQuestChange (no double)
 DWORD       g_qr_last_objective_at = 0;
+
+// Objective lines said lately, off the reminder or as a new objective. The
+// game puts the reminder up again and again - in Tranquility Lane every 30 s,
+// the main quest's objective and then the current one - and a sighted player
+// glances past what they already know. Said again only after ten minutes
+// without it being shown.
+struct SaidObjective { std::string text; DWORD when; };
+std::mutex                 g_obj_said_mx;
+std::vector<SaidObjective> g_obj_said;   // under g_obj_said_mx
+constexpr DWORD kObjectiveRepeatMs = 10 * 60 * 1000;
+
+bool ObjectiveSaidLately(const std::string& line)
+{
+    std::lock_guard<std::mutex> lk(g_obj_said_mx);
+    DWORD now = GetTickCount();
+    for (auto& s : g_obj_said) {
+        if (s.text != line) continue;
+        bool lately = now - s.when < kObjectiveRepeatMs;
+        s.when = now;
+        return lately;
+    }
+    if (g_obj_said.size() >= 64) g_obj_said.erase(g_obj_said.begin());
+    g_obj_said.push_back({ line, now });
+    return false;
+}
 
 void PollQuestReminder()
 {
     if (!g_system_ready || !IsGameplayActive() || g_postload_cooldown > 0 ||
         LoadPending()) {
-        g_qr_head_seen.clear(); g_qr_head_said.clear(); g_qr_head_stable = 0;
-        g_qr_stage_seen.clear(); g_qr_stage_said.clear(); g_qr_stage_stable = 0;
+        g_qr_head_seen.clear(); g_qr_head_said.clear(); g_qr_head_done = false;
+        g_qr_stage_seen.clear(); g_qr_stage_done = false;
         return;
     }
     std::string head, stages;
     if (!game::GetQuestReminder(&head, &stages)) return;
 
-    auto settle = [](const std::string& now, std::string& seen, int& stable) {
-        if (now != seen) { seen = now; stable = 0; return false; }
-        return ++stable == 2;            // exactly once, two polls after it settled
+    const DWORD now = GetTickCount();
+    auto settled = [now](const std::string& text, std::string& seen, DWORD& since, bool& done) {
+        if (text != seen) { seen = text; since = now; done = false; return false; }
+        if (done || now - since < kQrSettleMs) return false;
+        done = true;                     // exactly once per text
+        return true;
     };
-    if (settle(head, g_qr_head_seen, g_qr_head_stable) &&
-        !head.empty() && head != g_qr_head_said) {
+    // Not a piece of the headline just read, wiping itself away.
+    if (settled(head, g_qr_head_seen, g_qr_head_since, g_qr_head_done) &&
+        !head.empty() && g_qr_head_said.find(head) == std::string::npos) {
         g_qr_head_said = head;
         F3A_INFO("Quest popup: '%s'", head.c_str());
         tolk::Speak(head, tolk::Priority::Ui, false);
     }
-    if (settle(stages, g_qr_stage_seen, g_qr_stage_stable) &&
-        !stages.empty() && stages != g_qr_stage_said) {
-        g_qr_stage_said = stages;
-        g_qr_last_objective = stages;
-        g_qr_last_objective_at = GetTickCount();
-        F3A_INFO("Quest objective: '%s'", stages.c_str());
-        tolk::Speak(stages, tolk::Priority::Ui, false);
+    if (settled(stages, g_qr_stage_seen, g_qr_stage_since, g_qr_stage_done) && !stages.empty()) {
+        std::string shown, fresh;
+        for (size_t a = 0; a <= stages.size(); ) {
+            size_t b = stages.find('\n', a);
+            if (b == std::string::npos) b = stages.size();
+            std::string line = stages.substr(a, b - a);
+            a = b + 1;
+            if (line.empty()) continue;
+            shown += (shown.empty() ? "" : " ") + line;
+            if (!ObjectiveSaidLately(line)) fresh += (fresh.empty() ? "" : " ") + line;
+        }
+        g_qr_last_objective = shown;
+        g_qr_last_objective_at = now;
+        F3A_INFO("Quest objective: '%s'%s", shown.c_str(), fresh.empty() ? " (said lately)" : "");
+        if (!fresh.empty()) tolk::Speak(fresh, tolk::Priority::Ui, false);
     }
     if (head.empty()) g_qr_head_said.clear();      // a new popup may repeat it
 }
@@ -644,6 +688,8 @@ void PollActivatePrompt()
     if (g_postload_cooldown > 0) { reset(); return; }   // HUD still settling
     menu::Id m = menu::ActiveMenu();
     if (m != menu::Id::None && m != menu::Id::HUDMain) { reset(); return; }
+    // An auto-walk turns the view, and everyone it swept past was named.
+    if (modules::autowalk::IsWalking()) { reset(); return; }
 
     // Debounce on the picked REFERENCE, not on the prompt text: sweeping the view
     // changes the ref many times a second, and the verb alone repeats across
@@ -666,6 +712,10 @@ void PollActivatePrompt()
     // "obiekt": that only filled every glance at the scenery with noise, so an
     // unnamed thing with nothing to do on it is simply not announced. Distance
     // is off by default (CrosshairDistance=1 brings it back).
+    // Someone with nothing to do on them - an enemy, a creature - is who is in
+    // the sights: said only while aiming. Not marked as said, so raising the
+    // weapon at them names them then.
+    if (t.is_actor && verb.empty() && !modules::worldscan::AimHeld()) return;
     const auto& c = config::Get();
     std::string say = verb;
     if (c.crosshair_names && t.known && !t.name.empty() && t.name != verb) {
@@ -686,7 +736,8 @@ void PollKeyboardSelection()
 {
     if (!g_system_ready) return;
     if (menu::ActiveMenu() == menu::Id::TextEdit) return;   // TextEdit reader owns it
-    if (menu::ActiveMenu() == menu::Id::Container) return;  // the container module owns it
+    if (menu::ActiveMenu() == menu::Id::Container ||
+        menu::ActiveMenu() == menu::Id::Barter) return;     // the container module owns both
     if (menu::ActiveMenu() == menu::Id::LevelUp) return;    // the level-up module owns it
     // A message box: its text first (the message module says it, then the
     // button the selection is on). Read now, the button cut the question off -
@@ -820,6 +871,7 @@ void PollQuestChange()
         bool popupSaid = !g_qr_last_objective.empty() && !obj.empty() &&
                          GetTickCount() - g_qr_last_objective_at < 30000 &&
                          g_qr_last_objective.find(obj) != std::string::npos;
+        if (!obj.empty()) ObjectiveSaidLately(obj);    // the reminder need not repeat it
         F3A_INFO("Quest change: %s%s", line.c_str(),
                  popupSaid ? " (already read from the HUD)" : "");
         if (!popupSaid) tolk::Speak(line, tolk::Priority::Ui, false);
@@ -827,9 +879,10 @@ void PollQuestChange()
         // Already read off the HUD's quest reminder a moment ago? Then once is
         // enough. (Ui, not Background: a hint arriving at the same moment used
         // to drown it.)
-        bool justSaid = !g_qr_last_objective.empty() &&
+        const bool lately = ObjectiveSaidLately(obj);
+        bool justSaid = lately || (!g_qr_last_objective.empty() &&
                         GetTickCount() - g_qr_last_objective_at < 30000 &&
-                        g_qr_last_objective.find(obj) != std::string::npos;
+                        g_qr_last_objective.find(obj) != std::string::npos);
         F3A_INFO("Quest change: new objective '%s'%s", obj.c_str(),
                  justSaid ? " (already read from the HUD)" : "");
         if (!justSaid) tolk::Speak(strings::T("Nowy cel: ", "New objective: ") + obj, tolk::Priority::Ui, false);
@@ -967,6 +1020,7 @@ void PollViewChange()
 // HP/AP/radiation readout, requested by the H hotkey (worker thread sets the
 // flag; we read the actor values here, on the main thread).
 std::atomic<bool> g_status_pending{ false };
+std::atomic<bool> g_level_pending{ false };   // Shift+H
 
 // Menu-back / close (Backspace). Calls Menu::HandleClick (a game function that
 // opens/closes menus), so it must run on the main thread too.
@@ -1084,25 +1138,12 @@ std::string g_fire_name;        // under g_fire_mx; non-empty = a warning to spe
 uint32_t    g_fire_warned = 0;  // main thread: who was last warned about
 int         g_fire_clear  = 0;  // main thread: readings since the ray left them
 int  g_aim_reapply = 0;         // passes until the held aim is re-applied
-// Watching the held target's health, to notice a shot landing.
-std::atomic<uint32_t> g_hit_last_hp{ 0 };
-std::atomic<bool>     g_hit_pending{ false };
-std::atomic<bool>     g_kill_pending{ false };
-// WHO we are watching for damage, kept apart from whatever the aim is
-// currently pointed at.
-//
-// These used to be the same thing, and that is why a firefight was silent:
-// once the ray refinement has found the exact spot on the target that a shot
-// can reach, it re-locks the aim onto that POINT and deliberately passes no
-// reference (handing one over would make the tracker go back to aiming at the
-// target's origin and undo the measurement). The health watch hung off that
-// same reference, so the moment the aim got GOOD, the watch went blind — and
-// the player emptied a magazine into an officer with nothing to say whether
-// any of it landed.
+// WHO the player aims at, kept apart from whatever the aim is currently
+// pointed at: once the ray refinement has found the spot on the target a shot
+// can reach, it re-locks onto that POINT and passes no reference. Its death is
+// "target down"; any other enemy's is said by name (TrackHostileHealth).
 std::atomic<const void*> g_hit_watch_refr{ nullptr };
 std::atomic<uint32_t>    g_hit_watch_id{ 0 };
-bool g_hit_have  = false;
-int  g_hit_every = 0;
 // No line of fire: how far the blocker is, and how high off the floor.
 std::atomic<uint32_t> g_block_dist{ 0 }, g_block_up{ 0 };
 std::atomic<bool>     g_block_pending{ false };
@@ -1237,18 +1278,108 @@ std::atomic<int>  g_face_x{ 0 }, g_face_y{ 0 }, g_face_z{ 0 };
 float BitsToF(int bits) { float f; std::memcpy(&f, &bits, 4); return f; }
 int   FToBits(float f)  { int b;  std::memcpy(&b, &f, 4);  return b; }
 
+// Shift+H: the level and the experience, what the Pip-Boy's header shows - the
+// experience as a number of the next level's, and how much is left to it.
+void AnnounceLevel()
+{
+    if (!g_level_pending.exchange(false)) return;
+    const int level = game::GetPlayerLevel();
+    const float v = game::IsPlayerValid() ? game::GetPlayerAV(24) : -1.0f;   // 24 = XP
+    if (level <= 0 || v < 0.0f) {
+        tolk::Speak(strings::T("Nie mogę odczytać poziomu.", "Cannot read the level."),
+                    tolk::Priority::System, true);
+        return;
+    }
+    const int xp = (int)(v + 0.5f);
+    const int cap = game::ExeGameSettingInt("iMaxCharacterLevel", 0);
+    char buf[200];
+    if (cap > 0 && level >= cap) {
+        std::snprintf(buf, sizeof(buf),
+                      strings::T("Poziom %d, najwyższy. Doświadczenie %d.",
+                                 "Level %d, the highest. Experience %d."), level, xp);
+    } else {
+        const int next = game::XPForLevel(level + 1);
+        if (xp >= next) {
+            std::snprintf(buf, sizeof(buf),
+                          strings::T("Poziom %d. Doświadczenie %d, nowy poziom czeka.",
+                                     "Level %d. Experience %d, a new level is waiting."), level, xp);
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          strings::T("Poziom %d. Doświadczenie %d z %d, do następnego poziomu brakuje %d.",
+                                     "Level %d. Experience %d of %d, %d to the next level."),
+                          level, xp, next, next - xp);
+        }
+    }
+    F3A_INFO("Level: %d, XP %d, cap %d", level, xp, cap);
+    tolk::Speak(buf, tolk::Priority::Ui, true);
+}
+
 void AnnounceStatus()
 {
     if (!g_status_pending.exchange(false)) return;
     if (!IsGameplayActive()) return;
-    int hp  = (int)(game::GetPlayerAV(16) + 0.5f);   // Health (current)
-    int ap  = (int)(game::GetPlayerAV(12) + 0.5f);   // ActionPoints
-    int rad = (int)(game::GetPlayerAV(54) + 0.5f);   // RadLevel
-    char buf[128];
-    std::snprintf(buf, sizeof(buf),
-                  strings::T("Zdrowie %d, akcja %d, promieniowanie %d",
-                             "Health %d, action points %d, rads %d"), hp, ap, rad);
-    tolk::Speak(buf, tolk::Priority::Ui, true);
+    // What the HUD and the Pip-Boy header show a sighted player, most urgent
+    // first: health and action points with their maximum, radiation, crippled
+    // limbs; then the weapon in hand, its ammo, caps, carry weight, the place.
+    // Actor values (FOSE GameAPI.h): 16 health, 12 AP, 54 rads, 25-30 limbs,
+    // 46 inventory weight, 13 carry weight.
+    auto av    = [](uint32_t c) { return (int)(game::GetPlayerAV(c) + 0.5f); };
+    auto avMax = [](uint32_t c) { return (int)(game::GetPlayerAVMax(c) + 0.5f); };
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), strings::T("Zdrowie %d z %d, akcja %d z %d",
+                                               "Health %d of %d, action points %d of %d"),
+                  av(16), avMax(16), av(12), avMax(12));
+    std::string s = buf;
+    if (int rad = av(54); rad > 0) {
+        std::snprintf(buf, sizeof(buf), strings::T(", promieniowanie %d", ", rads %d"), rad);
+        s += buf;
+    }
+    static const struct { uint32_t code; const char* pl; const char* en; } kLimbs[] = {
+        { 25, "głowa", "head" },         { 26, "tułów", "torso" },
+        { 27, "lewa ręka", "left arm" }, { 28, "prawa ręka", "right arm" },
+        { 29, "lewa noga", "left leg" }, { 30, "prawa noga", "right leg" },
+    };
+    std::string crippled;
+    for (const auto& l : kLimbs) {
+        float v = game::GetPlayerAV(l.code);
+        if (v >= 0.0f && v < 0.5f) {             // crippled at 0
+            if (!crippled.empty()) crippled += ", ";
+            crippled += strings::T(l.pl, l.en);
+        }
+    }
+    if (!crippled.empty()) s += strings::T(", okaleczone: ", ", crippled: ") + crippled;
+    game::EquippedWeaponInfo w;
+    if (game::GetEquippedWeapon(&w)) {
+        s += strings::T(", broń: ", ", weapon: ") + w.name;
+        if (w.condition >= 0) {
+            std::snprintf(buf, sizeof(buf), strings::T(", stan %d procent", ", condition %d percent"),
+                          w.condition);
+            s += buf;
+        }
+        if (!w.ammo.empty() && w.ammo_count >= 0) {
+            std::snprintf(buf, sizeof(buf), ", %d", w.ammo_count);
+            s += strings::T(", amunicja: ", ", ammo: ") + w.ammo + buf;
+        }
+    } else {
+        s += strings::T(", bez broni", ", no weapon");
+    }
+    if (int caps = game::GetPlayerItemCount(0x0000000F); caps >= 0) {
+        std::snprintf(buf, sizeof(buf), strings::T(", kapsle %d", ", caps %d"), caps);
+        s += buf;
+    }
+    std::snprintf(buf, sizeof(buf), strings::T(", udźwig %d z %d", ", carry weight %d of %d"),
+                  av(46), av(13));
+    s += buf;
+    std::string loc = game::GetCurrentLocationName();
+    if (!loc.empty()) s += ", " + loc;
+    // The time, as the Pip-Boy shows it (a sighted player glances at it).
+    if (float h = game::GetGameHour(); h >= 0.0f) {
+        int mins = static_cast<int>(h * 60.0f + 0.5f) % (24 * 60);
+        std::snprintf(buf, sizeof(buf), strings::T(", godzina %d:%02d", ", time %d:%02d"),
+                      mins / 60, mins % 60);
+        s += buf;
+    }
+    tolk::Speak(s, tolk::Priority::Ui, true);
 }
 
 // ---- Full mouse-free aim (the friend's plan) -------------------------------
@@ -1535,19 +1666,96 @@ void PollXpChange()
     if (g_xp_gain.fetch_add(gain) == 0) g_xp_gain_at.store(now);
 }
 
+// Hits and kills, for every enemy around - not only the one the aim is on,
+// and in VATS too. Fallout 3 has no hit event to hook, so the evidence is the
+// enemies' own health, read on this thread (a virtual call per actor) every
+// 100 ms. Who to watch comes from RefreshHostiles; an enemy stays watched
+// until it dies or is gone, since a dying one drops off that list.
+struct HpWatch { const void* refr; uint32_t id; std::string name; float hp; };
+std::vector<HpWatch> g_hp_watch;
+DWORD g_hp_watch_at = 0;
+DWORD g_hit_cue_at  = 0;
+
+void TrackHostileHealth()
+{
+    if (!IsGameplayActive() && !menu::IsOpen(menu::Id::VATS)) { g_hp_watch.clear(); return; }
+    const DWORD now = GetTickCount();
+    if (now - g_hp_watch_at < 100) return;
+    g_hp_watch_at = now;
+    for (const auto& h : game::GetHostileRefs()) {
+        bool known = false;
+        for (auto& w : g_hp_watch)
+            if (w.id == h.id) { w.refr = h.refr; known = true; break; }
+        if (!known && g_hp_watch.size() < 32) g_hp_watch.push_back({ h.refr, h.id, h.name, -1.0f });
+    }
+    const int hz = config::Get().target_cue_hz;
+    bool hit = false;
+    for (size_t i = 0; i < g_hp_watch.size(); ) {
+        HpWatch& w = g_hp_watch[i];
+        game::Vec3 at{};
+        if (!game::GetRefPosition(w.refr, w.id, &at)) {          // gone: unloaded, freed
+            g_hp_watch.erase(g_hp_watch.begin() + i);
+            continue;
+        }
+        const float hp = game::GetRefAV(w.refr, 16);            // 16 = health
+        const bool dead = game::RefDeadState(w.refr) == 1 || (hp >= 0.0f && hp <= 0.0f);
+        if (dead) {
+            if (w.hp > 0.0f) {
+                // Two falling notes, unlike the hit blip and the on-target
+                // tone. The one the player aims at is "target down"; others by
+                // name, so in a crowd it is clear which one is finished.
+                audio::Cue(hz - 300, 90);
+                audio::Cue(hz - 600, 120);
+                const bool mine = w.id == g_hit_watch_id.load();
+                F3A_INFO("Kill: %08X '%s'%s", w.id, w.name.c_str(), mine ? " (aimed at)" : "");
+                if (mine)
+                    tolk::Speak(strings::T("Cel padł.", "Target down."), tolk::Priority::Combat, true);
+                else if (!w.name.empty())
+                    tolk::Speak(w.name + strings::T(" nie żyje.", " is down."),
+                                tolk::Priority::Combat, false);
+            }
+            g_hp_watch.erase(g_hp_watch.begin() + i);
+            continue;
+        }
+        if (hp >= 0.0f) {
+            if (w.hp >= 0.0f && hp < w.hp - 0.5f) hit = true;   // a drop; healing is not a hit
+            w.hp = hp;
+        }
+        ++i;
+    }
+    // A hit: quiet and short, it lands in the middle of a fight. One blip per
+    // burst, not one per pellet.
+    if (hit && now - g_hit_cue_at >= 120) {
+        g_hit_cue_at = now;
+        audio::Cue(hz + 500, 35);
+    }
+}
+
 void MainThreadWork()
 {
     game::NoteMainThread();
+    // The console (~): the line being typed is read through the engine, so
+    // its reader lives here.
+    modules::devconsole::MainThreadTick();
+    // Just after a teleport the game is still moving the player and the
+    // cells round them: nothing here touches the world until it has settled
+    // (see game::WorldSettling). Requests wait.
+    if (game::WorldSettling()) {
+        StopAimTrack();
+        g_hp_watch.clear();
+        return;
+    }
     // Who is fighting the player: a virtual call per actor, so it is worked
     // out here and ScanNearby (poll thread) reads the result.
     {
         static DWORD s_hostile_at = 0;
         DWORD now = GetTickCount();
-        if (IsGameplayActive() && now - s_hostile_at >= 300) {
+        if ((IsGameplayActive() || menu::IsOpen(menu::Id::VATS)) && now - s_hostile_at >= 300) {
             s_hostile_at = now;
             game::RefreshHostiles();
         }
     }
+    if (config::IsEnabled()) TrackHostileHealth();
     if (config::IsEnabled()) {       // F12 off = no unasked-for speech
         PollSpecialChange();
         PollXpChange();
@@ -1580,9 +1788,13 @@ void MainThreadWork()
             }
         }
     }
-    if (g_teleport_pending.exchange(false))
+    if (g_teleport_pending.exchange(false)) {
+        StopAimTrack();               // aimed at the place being left
         game::TeleportPlayerToRef(g_teleport_refr, g_teleport_refid);
+        if (game::WorldSettling()) { g_hp_watch.clear(); return; }
+    }
     AnnounceStatus();
+    AnnounceLevel();
     if (g_menuback_pending.exchange(false)) game::ClickMenuBack();
     if (g_restore_pending.exchange(false)) {
         // Silent unless it actually did something. R is the reload key during
@@ -2000,6 +2212,9 @@ void Tick(float dt)
                 active.count(kMenuType_HUDMain)) {
                 g_system_ready = true;
                 F3A_INFO("System ready (saw Start/HUDMain). Arming dispatch.");
+                // The data is read now: the game's own "Yes" tells its real
+                // language, a translation plugin over Fallout3.esm included.
+                config::ConfirmGameLanguage(game::ExeGameSettingString("sYes"));
                 // Take over the player's movement update now that the engine is
                 // up. Verified against the expected function, so a mismatch just
                 // leaves the key-based walker in place.
@@ -2204,6 +2419,7 @@ void Stop()
 // Called from any thread (the H hotkey); the actual actor-value reads happen on
 // the main thread in AnnounceStatus().
 void RequestStatus() { g_status_pending.store(true); }
+void RequestLevelStatus() { g_level_pending.store(true); }
 
 // Called from any thread (Backspace); ClickMenuBack runs on the main thread.
 void RequestMenuBack() { g_menuback_pending.store(true); }
@@ -2450,12 +2666,20 @@ void RequestAim(bool doYaw, float yawDeg, bool doPitch, float pitchDeg)
 // message; FOSE has no equivalent, so the movement hook is ours.
 void AimTick()
 {
+    // Rides the movement update every frame: not while a teleport settles,
+    // when the player, the camera and the target's 3D are being rebuilt.
+    if (game::WorldSettling()) {
+        if (g_aimtrack_frames.load() != 0) {
+            StopAimTrack();
+            F3A_INFO("AimTrack: stopped - the world is settling after a teleport");
+        }
+        return;
+    }
     // Work the poll thread asked for: a new target's fresh start and the
     // player's trims. Done here because these counters are this thread's.
     if (g_aimtrack_reset_pending.exchange(false)) {
         g_aim_settle = kAimSettleFrames;   // let our own change bed in
         AimTrackReset();                   // a new target: search over
-        g_hit_have = false;                // re-seed the health baseline
     }
     if (int n = g_nudge_units.exchange(0)) {
         g_aim_bias += (float)n;
@@ -2833,47 +3057,6 @@ void AimTick()
             }
         }
 
-        // Did a shot land? There is no hit event to hook here, so the evidence
-        // is the target's own health going down. Checked on this thread because
-        // it calls into the engine, and only while a target is held — the
-        // question is only interesting with a gun pointed at something.
-        {
-            const void* tr = g_hit_watch_refr.load();
-            if (tr && --g_hit_every <= 0) {
-                g_hit_every = 6;
-                // Validate the pointer against the id it had when we started
-                // watching: a cell change frees it and the address is reused.
-                game::Vec3 ignore{};
-                bool alive = game::GetRefPosition(tr, g_hit_watch_id.load(),
-                                                  &ignore);
-                if (!alive) { g_hit_watch_refr.store(nullptr); g_hit_have = false; }
-                // Never return from here: this block sits inside AimTick, and
-                // bailing out of the whole tick over a stale watch pointer
-                // would also skip the per-frame re-aim below it.
-                float hp = alive ? game::GetRefAV(tr, 16) : -1.0f;  // 16 = Health
-                if (hp >= 0.0f) {
-                    float prev = BitsToF(g_hit_last_hp.load());
-                    // A drop, not a change: healing and the first reading must
-                    // not sound like a hit.
-                    if (g_hit_have && hp <= 0.0f && prev > 0.0f) {
-                        // Health reached zero while we were watching. Not a
-                        // guess and not an announcement of our own doing — the
-                        // number came from the game.
-                        g_kill_pending.store(true);
-                        g_hit_watch_refr.store(nullptr);
-                        g_hit_have = false;
-                    }
-                    if (g_hit_have && hp < prev - 0.5f) {
-                        g_hit_pending.store(true);
-                        F3A_INFO("AimHit: %08X health %.0f -> %.0f",
-                                 g_aimtrack_refid.load(), prev, hp);
-                    }
-                    g_hit_last_hp.store(FToBits(hp));
-                    g_hit_have = true;
-                }
-            }
-        }
-
         // Once per target: ask the engine's ray where on this object we can
         // actually put a shot, and aim THERE from then on.
         if (g_aim_solve.exchange(false)) {
@@ -3047,7 +3230,6 @@ void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
     if (refr && refid) {
         g_hit_watch_refr.store(refr);
         g_hit_watch_id.store(refid);
-        g_kill_pending.store(false);
     }
     // Remember where on the reference the point lies (see g_aimtrack_offx).
     // Until now the held aim re-aimed at the bare origin every frame, so a
@@ -3077,18 +3259,16 @@ void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
     g_aimtrack_y.store(FToBits(at.y));
     g_aimtrack_z.store(FToBits(at.z));
     g_aimtrack_up.store(FToBits(up));
-    // The search counters, settle window and health baseline are the main
-    // thread's; from the poll thread (the aim keys) they are reset there, on
-    // the next AimTick, instead of written from here under its feet.
+    // The search counters and settle window are the main thread's; from the
+    // poll thread (the aim keys) they are reset there, on the next AimTick,
+    // instead of written from here under its feet.
     if (game::OnMainThread()) {
         g_aim_settle = kAimSettleFrames;   // let our own change bed in
         AimTrackReset();   // a new target: start the crosshair search over
-        g_hit_have = false;
     } else {
         g_aimtrack_reset_pending.store(true);
     }
     g_aimtrack_frames.store(frames);
-    g_hit_pending.store(false);
     g_block_pending.store(false);
     F3A_INFO("AimTrack: refr=%p refid=%08X at=(%.0f,%.0f,%.0f) up=%.0f frames=%d",
              refr, refid, at.x, at.y, at.z, up, frames);
@@ -3184,8 +3364,6 @@ void RequestRayMap(const game::Vec3& centre)
 }
 
 bool ConsumeAimTargetReacted()  { return g_aim_reacted.exchange(false); }
-bool ConsumeTargetHit()         { return g_hit_pending.exchange(false); }
-bool ConsumeTargetDown()        { return g_kill_pending.exchange(false); }
 
 bool ConsumeNoLineOfFire(float* outDist, float* outHeight)
 {
@@ -3722,6 +3900,8 @@ void DumpActiveMenuTree()
         DumpNavmesh();
     }
 
+    for (const auto& line : modules::devconsole::DumpLines())
+        log::DumpWrite("%s", line.c_str());
     log::DumpWrite("===== End dump =====");
     log::EndDump();
     tolk::Speak(strings::T("Zrzut zapisany w pliku dump.", "Dump saved to the dump file."),

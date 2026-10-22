@@ -3,78 +3,100 @@
 #include "f3a/game_access.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/strings.h"
-#include "f3a/config.h"
 #include "f3a/logger.h"
 
-#include <cstdio>
+#include <windows.h>
 #include <string>
 
 namespace f3a::modules::barter {
 namespace {
 
-std::string g_last_selection;
-int         g_last_net = INT32_MIN;
+// Barter. Its two columns, the arrows and Enter are the container module's
+// (the menus are built alike). Here: who the trade is with, and the deal - the
+// screen shows the caps either side and, in the middle, how many caps the
+// offer moves and which way; a sighted player watches that number while
+// picking items. So it is said whenever it changes, and H (here, not the
+// world status) says both sides' caps with it.
+std::string g_deal;          // the deal last said ("" = none)
+bool        g_opened = false;
+int         g_settle = 0;    // ticks a new deal has to hold before it is said
+std::string g_pending;
 
-void AnnounceSelection()
+std::string DealText(const game::BarterInfo& b)
 {
-    auto bs = game::GetBarterState();
-    if (!bs.valid || !bs.selected) return;
-
-    char vbuf[16];  std::snprintf(vbuf, sizeof(vbuf), "%d", bs.selected->value_caps);
-    char wbuf[16];  std::snprintf(wbuf, sizeof(wbuf), "%.1f", bs.selected->weight);
-
-    char extra[96];
-    std::snprintf(extra, sizeof(extra), "%s, %s",
-                  strings::RenderArgs(strings::Key::ItemWeightFmt, wbuf).c_str(),
-                  strings::RenderArgs(strings::Key::ItemValueFmt, vbuf).c_str());
-
-    std::string line = strings::RenderArgs(strings::Key::SelectionFmt,
-                                           bs.selected->name.c_str(), extra);
-    if (line == g_last_selection) return;
-    g_last_selection = line;
-    tolk::Speak(line, tolk::Priority::Ui, true);
+    if (b.amount.empty() || b.direction == 0) return {};
+    return (b.direction > 0 ? strings::T("Dostajesz ", "You get ")
+                            : strings::T("Płacisz ", "You pay ")) +
+           b.amount + strings::T(" kapsli", " caps");
 }
 
-void AnnounceTotal()
+void OnOpen()
 {
-    auto bs = game::GetBarterState();
-    // The reader is still a stub; its zeros were spoken as a "0 for 0" deal on
-    // every barter and repair screen.
-    if (!bs.valid) return;
-    int net = bs.vendor_total_value - bs.player_total_value;
-    if (net == g_last_net) return;
-    g_last_net = net;
+    g_deal.clear();
+    g_pending.clear();
+    g_opened = false;
+    g_settle = 0;
+}
 
-    char a[16], b[16], c[16];
-    std::snprintf(a, sizeof(a), "%d", bs.player_total_value);
-    std::snprintf(b, sizeof(b), "%d", bs.vendor_total_value);
-    std::snprintf(c, sizeof(c), "%+d", net);
+void OnClose() { OnOpen(); }
 
-    tolk::Speak(
-        strings::RenderArgs(strings::Key::BarterTotalFmt, a, b, c),
-        tolk::Priority::Ui, false);
-
-    const auto& cfg = config::Get();
-    if (net < 0 && -net >= cfg.barter_warn_loss_caps) {
-        char loss[16]; std::snprintf(loss, sizeof(loss), "%d", -net);
-        tolk::Speak(strings::RenderArgs(strings::Key::BarterLossWarn, loss),
-                    tolk::Priority::System, false);
+void OnTick(float)
+{
+    game::BarterInfo b;
+    if (!game::GetBarterState(&b)) return;
+    if (!g_opened) {
+        g_opened = true;
+        std::string s = b.vendor.empty() ? std::string(strings::T("Handel", "Barter"))
+                                         : strings::T("Handel: ", "Barter: ") + b.vendor;
+        if (!b.player_caps.empty()) s += strings::T(". Twoje kapsle: ", ". Your caps: ") + b.player_caps;
+        if (!b.vendor_caps.empty()) s += strings::T(", handlarza: ", ", the vendor's: ") + b.vendor_caps;
+        s += strings::T(". Lewo, prawo zmienia kategorię, Shift ze strzałką albo [ zmienia stronę, "
+                        "Enter dodaje do transakcji.",
+                        ". Left and right change the category, Shift with an arrow or [ switches sides, "
+                        "Enter adds to the deal.");
+        F3A_INFO("Barter with '%s' (caps %s / %s)", b.vendor.c_str(),
+                 b.player_caps.c_str(), b.vendor_caps.c_str());
+        tolk::Speak(s, tolk::Priority::Ui, true);
+        return;
     }
+    // The amount is rewritten as items go in; say it once it has held a moment.
+    std::string deal = DealText(b);
+    if (deal == g_deal) { g_pending = deal; g_settle = 0; return; }
+    if (deal != g_pending) { g_pending = deal; g_settle = 4; return; }
+    if (g_settle > 0 && --g_settle > 0) return;
+    g_deal = deal;
+    tolk::Speak(deal.empty() ? std::string(strings::T("Bez transakcji.", "No deal."))
+                             : deal,
+                tolk::Priority::Ui, false);
 }
-
-void OnOpen()  { g_last_selection.clear(); g_last_net = INT32_MIN; }
-void OnClose() { g_last_selection.clear(); g_last_net = INT32_MIN; }
-void OnTick(float) { AnnounceSelection(); AnnounceTotal(); }
 
 } // namespace
 
+// H in barter: both sides' caps and the deal.
+bool SpeakSummary()
+{
+    if (menu::ActiveMenu() != menu::Id::Barter) return false;
+    game::BarterInfo b;
+    if (!game::GetBarterState(&b)) return false;
+    std::string s = strings::T("Twoje kapsle: ", "Your caps: ") + b.player_caps +
+                    strings::T(", handlarza: ", ", the vendor's: ") + b.vendor_caps;
+    std::string deal = DealText(b);
+    s += ". " + (deal.empty() ? std::string(strings::T("Bez transakcji", "No deal")) : deal);
+    tolk::Speak(s, tolk::Priority::Ui, true);
+    return true;
+}
+
 void Init()
 {
-    menu::RegisterMenu(menu::Id::Barter, &OnOpen, &OnClose, &OnTick);
-    menu::RegisterMenu(menu::Id::Repair, &OnOpen, &OnClose, &OnTick);
-    menu::RegisterMenu(menu::Id::RepairServices, &OnOpen, &OnClose, &OnTick);
+    // Registered after the container module: both get the ticks for Barter,
+    // the dispatcher gives them to the topmost handler - so this is chained
+    // from there (see container.cpp), not registered for Barter itself.
     F3A_INFO("Barter module ready.");
 }
 void Shutdown() {}
+
+void Tick() { OnTick(0.0f); }
+void Open() { OnOpen(); }
+void Close() { OnClose(); }
 
 } // namespace f3a::modules::barter

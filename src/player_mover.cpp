@@ -44,6 +44,7 @@ constexpr uint32_t  kFlagForward = 0x001;
 constexpr uint32_t  kFlagWalking = 0x100;
 constexpr uint32_t  kFlagRunning = 0x200;
 constexpr uint32_t  kFlagMask    = kFlagForward | kFlagWalking | kFlagRunning;
+constexpr float     kSneakSpeedMult = 0.65f;   // crouched walk vs walk (FNV's fMoveSneakMult)
 
 // Turning: cap the rate so the body swings smoothly, and cut speed while a turn
 // is still in progress. An open-loop move vector at full speed through a sharp
@@ -706,6 +707,15 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     float gy = g_goal_y.load();
     float dx = gx - player->posX;
     float dy = gy - player->posY;
+    // A goal that is not a number (a bad read somewhere upstream) must never
+    // reach the player's heading: stop instead.
+    if (!std::isfinite(dx) || !std::isfinite(dy)) {
+        F3A_INFO("Mover: the goal is not a number - stopping.");
+        g_active.store(false);
+        StopNow(mover);
+        if (g_original) g_original(mover, dt);
+        return;
+    }
 
     if (!g_heading_seeded) { g_heading = player->rotZ; g_heading_seeded = true; }
 
@@ -736,8 +746,29 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     }
 
     bool running = g_run.load();
+    // The player's own way of moving holds during a walk, as in the FNV mod:
+    // crouched (the 0x400 posture bit of the movement flags; 0x800 is
+    // swimming) the walk creeps instead of running - running stood the player
+    // up and gave them away - and carrying more than they can (inventory
+    // weight, AV 46, over carry weight, AV 13) it walks, as the game makes
+    // them. The engine picks the crouched variant of the walk animation itself
+    // from the posture bit.
+    const auto* mf = reinterpret_cast<const uint8_t*>(mover);
+    const uint32_t f1 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags1);
+    const uint32_t f2 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags2);
+    const bool sneaking = (f1 & 0xC00) == 0x400 || (f2 & 0xC00) == 0x400;
+    const float carried = game::GetPlayerAV(46), carry = game::GetPlayerAV(13);
+    const bool overloaded = carry > 0.0f && carried > carry;
+    static bool s_said_sneak = false, s_said_load = false;
+    if (sneaking != s_said_sneak || overloaded != s_said_load) {
+        s_said_sneak = sneaking; s_said_load = overloaded;
+        F3A_INFO("Mover: sneaking=%d overloaded=%d (flags %08X / %08X)",
+                 (int)sneaking, (int)overloaded, f1, f2);
+    }
+    if (sneaking || overloaded) running = false;
     float speed = static_cast<float>(config::Get().autowalk_speed);
     if (!running) speed *= 0.5f;
+    if (sneaking) speed *= kSneakSpeedMult;
     speed *= TurnSpeedScale(brake);
 
     // A spot to stand ON (a trigger box a few dozen units across): ease in
