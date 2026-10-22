@@ -652,7 +652,7 @@ if (-not $SkipPatcher) {
 }
 
 if ($script:ExitCode -eq 0) {
-    Write-Step (T "Gotowe. Uruchamiaj grę przez fose_loader.exe, nie Fallout3.exe." "Done. Start the game with fose_loader.exe, not Fallout3.exe.")
+    Write-Step (T "Gotowe. Uruchamiaj grę przez Fallout3.exe." "Done. Start the game with Fallout3.exe.")
 } else {
     Write-Step (T "Zakończono z problemami (kod $($script:ExitCode)) — szczegóły powyżej." "Finished with problems (code $($script:ExitCode)) — details above.")
 }

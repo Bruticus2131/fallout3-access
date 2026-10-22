@@ -93,7 +93,7 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
    - `Tolk.dll`, `nvdaControllerClient32.dll`, `dolapi32.dll`, `SAAPI32.dll` → land next to `Fallout3.exe`,
    - `Data\FOSE\Plugins\fallout3_access.dll` and `Fallout3Access.ini` → the plugin itself,
    - `Data\FOSE\Plugins\Fallout3Access\` → the walk graphs and the door table (`*.dat`, ready made for Fallout 3 and all five DLCs) and the audio descriptions. **Copy all of it**: without this folder, long walks and walks to other places stay off. Nothing has to be generated and no Python is needed.
-5. **Start the game with `fallout3.exe`** (not `fose_loader.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
+5. **Start the game with `Fallout3.exe`** (not `fose_loader.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
 
 ## Keyboard reference  
 
