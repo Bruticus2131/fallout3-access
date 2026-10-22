@@ -9,6 +9,8 @@
 #include "f3a/polling_loop.h"
 #include "f3a/console.h"
 #include "f3a/audio_beacon.h"
+#include "f3a/worlddoors.h"
+#include "f3a/roadnet.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -66,6 +68,52 @@ std::string DoorDesc(const game::WorldEntity& e)
     if (e.kind == game::WorldEntity::Kind::Door && e.open_state == 1)
         return strings::T(", otwarte", ", open");
     return {};
+}
+
+// Where a target's marker stands in the player's own place, as the compass
+// shows it: the target itself when it is here; else the door the way to it
+// goes through - the one the game marks, or the door table's first door.
+// `via` = the place behind that door ("" when the target is here).
+bool MarkerHere(const void* refr, uint32_t form, const game::Vec3& pos,
+                game::Vec3* out, std::string* via)
+{
+    via->clear();
+    if (!refr || game::TargetSharesPlayerSpace(refr)) { *out = pos; return true; }
+    if (game::GetQuestMarkerDoor(refr, out, via)) return true;
+    const uint32_t ps = game::PlayerSpaceId();
+    uint32_t ts = game::RefSpaceId(refr);
+    if (!ts && form) ts = worlddoors::RefSpace(form);
+    if (!ps || !ts || ps == ts || !worlddoors::Loaded()) return false;
+    worlddoors::Hop hop;
+    worlddoors::AreaFn area = [](uint32_t s, const game::Vec3& p) { return roadnet::Area(s, p); };
+    if (!worlddoors::NextDoor(ps, game::GetPlayerPosition(), ts, pos, &hop, nullptr, &area))
+        return false;
+    *out = hop.pos;
+    *via = hop.to_name;
+    return true;
+}
+
+// "Name, in another place: X, marker on the door to Y, 1234 units, 2
+// o'clock" for a target in another place - the real distance to the marker
+// the compass shows - or "" when there is no marker to give.
+std::string MarkerLine(const std::string& name, const void* refr, uint32_t form,
+                       const game::Vec3& pos)
+{
+    game::Vec3 m{};
+    std::string via;
+    if (!MarkerHere(refr, form, pos, &m, &via)) return {};
+    game::WorldEntity me{};
+    me.position = m;
+    auto b = game::ComputeBearing(game::GetPlayerPosition(), game::GetPlayerYaw(), m);
+    std::string line = name;
+    if (refr && !game::TargetSharesPlayerSpace(refr)) {
+        std::string where = game::GetRefPlaceName(refr);
+        if (!where.empty() && where != via)
+            line += strings::T(", w innym miejscu: ", ", in another place: ") + where;
+        line += strings::T(", znacznik na drzwiach do: ", ", marker on the door to: ") +
+                (via.empty() ? where : via);
+    }
+    return line + ", " + DistanceText(me, b) + ", " + strings::ClockDirection(b.relative_yaw);
 }
 
 void Announce(const game::WorldEntity& e, const game::Bearing& b)
@@ -424,10 +472,13 @@ void AnnounceCurrent()
     // a clock bearing to them meant nothing. Where it is, instead; the
     // auto-walk finds the way through the doors.
     if (e.refr && !game::TargetSharesPlayerSpace(e.refr)) {
-        std::string where = game::GetRefPlaceName(e.refr);
-        tolk::Speak(e.name + strings::T(", w innym miejscu", ", in another place") +
-                        (where.empty() ? std::string() : ": " + where) + ", " + idx,
-                    tolk::Priority::Ui, true);
+        std::string line = MarkerLine(e.name, e.refr, e.form_id, e.position);
+        if (line.empty()) {
+            std::string where = game::GetRefPlaceName(e.refr);
+            line = e.name + strings::T(", w innym miejscu", ", in another place") +
+                   (where.empty() ? std::string() : ": " + where);
+        }
+        tolk::Speak(line + ", " + idx, tolk::Priority::Ui, true);
         return;
     }
 
@@ -1458,6 +1509,56 @@ void SayNameAndDistance(const AimTarget& at)
                 tolk::Priority::Ui, true);
 }
 
+// Home during a walk: where the walk is heading now, how far and which way -
+// and no turn. Turning the view fought the walk's own steering: each press
+// swung the player off the route and the walk swung them back.
+void SayWalkHeading()
+{
+    // The target's own marker first: the real distance to it, here or on the
+    // door to the place it is in.
+    // (Only with the target's reference: without one, a far target's
+    // position is in its own place's coordinates - the door below instead.)
+    if (const void* r = autowalk::TargetRefr()) {
+        game::Vec3 tp = autowalk::TargetPos();
+        game::GetRefPosition(r, autowalk::TargetFormId(), &tp);   // live, if it walks
+        std::string line = MarkerLine(autowalk::TargetName(), r, autowalk::TargetFormId(), tp);
+        if (!line.empty()) { tolk::Speak(line, tolk::Priority::Ui, true); return; }
+    }
+    game::Vec3 p{};
+    std::string what;
+    if (!autowalk::HeadingFor(&p, &what)) {
+        tolk::Speak(strings::T("Szukam drogi do: ", "Looking for the way to: ") +
+                        autowalk::TargetName(),
+                    tolk::Priority::Ui, true);
+        return;
+    }
+    auto b = game::ComputeBearing(game::GetPlayerPosition(), game::GetPlayerYaw(), p);
+    game::WorldEntity at{};
+    at.position = p;
+    tolk::Speak(what + ", " + DistanceText(at, b) + ", " + strings::ClockDirection(b.relative_yaw),
+                tolk::Priority::Ui, true);
+}
+
+// A target in another place (inside a building while you stand outside): its
+// position is in that place's coordinates, so a turn toward it pointed
+// nowhere and its distance meant nothing. Where it is, instead.
+bool SayIfElsewhere(const AimTarget& at, bool face = false)
+{
+    if (!at.refr || game::TargetSharesPlayerSpace(at.refr)) return false;
+    game::Vec3 m{};
+    std::string via;
+    if (MarkerHere(at.refr, at.refid, at.pos, &m, &via)) {
+        if (face) AimAtPoint(m, 100.0f);              // the door, as the compass shows it
+        tolk::Speak(MarkerLine(at.name, at.refr, at.refid, at.pos), tolk::Priority::Ui, true);
+        return true;
+    }
+    std::string where = game::GetRefPlaceName(at.refr);
+    tolk::Speak(at.name + strings::T(", w innym miejscu", ", in another place") +
+                    (where.empty() ? std::string() : ": " + where),
+                tolk::Priority::Ui, true);
+    return true;
+}
+
 void CenterCamera()
 {
     if (!GameplayAndHud()) return;
@@ -1510,6 +1611,7 @@ void CenterCamera()
                         tolk::Priority::System, true);
             return;
         }
+        if (SayIfElsewhere(at)) return;
         g_track_on    = true;
         g_track_refr  = at.refr;
         g_track_refid = at.refid;
@@ -1522,6 +1624,7 @@ void CenterCamera()
         return;
     }
     TrackStop(nullptr);   // a plain Home means "aim once" — drop any tracking
+    if (autowalk::IsWalking()) { SayWalkHeading(); return; }
 
     // Home = native "center & aim" (the FNV flow): turn to face the selected
     // scanner target — or the nearest actor — AND pitch onto it, via the engine's
@@ -1538,6 +1641,7 @@ void CenterCamera()
                     tolk::Priority::Ui, true);
         return;
     }
+    if (SayIfElsewhere(at, /*face*/true)) return;
 
     // Aim at the target's BODY, using only mechanisms proven separately:
     //   * the aim POINT comes from the object's own bounds (plain data, so a

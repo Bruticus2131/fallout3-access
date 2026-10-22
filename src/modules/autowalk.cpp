@@ -1364,6 +1364,7 @@ void BeginFarDoorWalk(const worlddoors::Hop& hop)
     g_noimprove = 0;
     PlanLegs(hop.pos);
     g_have_path = BuildOwnPath(LegGoal(), g_waypoints);
+    if (g_have_path) SnapToRoute();
     g_last_probe_dist = ProgressDistance();
     g_probe_timer = 0.0f;
     g_probe_pos = game::GetPlayerPosition();
@@ -2276,6 +2277,27 @@ game::Vec3 TargetPos()
     return g_target_pos;
 }
 bool IsFollowingQuest() { return g_state != State::Idle && g_follow_quest; }
+
+bool HeadingFor(game::Vec3* pos, std::string* what)
+{
+    if (g_state == State::Idle || !pos || !what) return false;
+    if (g_cross) {
+        if (!g_cross_door_refr) return false;
+        *pos  = g_cross_door_pos;
+        *what = g_cross_door_name;
+        return true;
+    }
+    if (g_far_door) {
+        *pos  = g_far_door_pos;
+        *what = strings::T("Wejście: ", "Entrance: ") +
+                (g_far_door_name.empty() ? std::string(strings::T("przejście", "a doorway"))
+                                         : g_far_door_name);
+        return true;
+    }
+    *pos  = g_target_pos;
+    *what = g_target_name;
+    return true;
+}
 
 std::string DiagString()
 {

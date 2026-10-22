@@ -1424,3 +1424,15 @@ ru: "Запись"
 
 en: "Image"
 ru: "Изображение"
+
+en: "Entrance: "
+ru: "Вход: "
+
+en: "Looking for the way to: "
+ru: "Ищу путь к: "
+
+en: ", in another place: "
+ru: ", в другом месте: "
+
+en: ", marker on the door to: "
+ru: ", метка на двери в: "

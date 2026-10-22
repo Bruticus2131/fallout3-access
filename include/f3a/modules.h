@@ -86,6 +86,11 @@ const void*        TargetRefr();
 uint32_t           TargetFormId();
 const std::string& TargetName();
 game::Vec3         TargetPos();          // where the walk is finally going
+// Where the walk leads right now, in the player's own place, and what to call
+// it: the entrance it is making for on the way to another place ("Entrance:
+// Super Dupermarket"), the door of a crossing, else the target itself. False
+// when idle, or while the door to cross by is still being chosen.
+bool               HeadingFor(game::Vec3* pos, std::string* what);
 bool               IsFollowingQuest();   // a walk to the live quest marker
 // One-line diagnostic (F11 dump): current target, player/target positions,
 // Z-delta, whether a navmesh path exists, and a live path-rebuild result — so a

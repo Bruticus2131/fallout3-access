@@ -153,7 +153,7 @@ Explore and travel without sight:
 | Page Up / Page Down | cycle nearby objects (reads "name, distance, clock direction, i of N") |
 | Shift + Page Up / Page Down | change scanner category: all / people / bodies / items / doors / containers / places / quest objects / quests (only those with something in them) |
 | `'` (apostrophe) | turn to face the selected object |
-| Home | centre the view on the selected object (or the nearest actor) |
+| Home | centre the view on the selected object (or the nearest actor) and say how far it is; a target in another place: its marker on the door that leads there, with the real distance. During auto-walk Home only says where the walk is going and how far, without turning you |
 | Shift + Home | keep the camera on a moving target until you press it again |
 | `;` (semicolon) | **beacon guidance**: you walk, the mod plays a positional sonar ping at the target — panned by direction, higher-pitched ahead and lower behind, faster as you close in. Press again to stop. |
 | `.` (period) | beacon guidance to the current quest marker |

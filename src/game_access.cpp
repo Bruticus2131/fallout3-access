@@ -4605,6 +4605,50 @@ bool IsLoadDoor(const void* doorRefr)
     return DoorLinkedRef(doorRefr) != nullptr;
 }
 
+bool GetQuestMarkerDoor(const void* targetRefr, Vec3* out, std::string* via)
+{
+    if (!targetRefr || !out) return false;
+    UInt8* obj = TrackedObjective();
+    if (!obj || IsBadReadPtr(obj + 0x14, 8)) return false;
+    // The objective's targets: a list {Target*, next} from +0x14.
+    struct Node { UInt8* item; Node* next; };
+    const Node* node = reinterpret_cast<const Node*>(obj + 0x14);
+    for (int i = 0; node && i < 16; ++i) {
+        if (IsBadReadPtr((void*)node, sizeof(Node))) break;
+        UInt8* target = node->item;
+        node = node->next;
+        if (!target || IsBadReadPtr(target, 0x20)) continue;
+        if (*reinterpret_cast<void* const*>(target + 0x0C) != targetRefr) continue;
+        // Its teleport links: data +0x14, count +0x18, {door, ?, ?} each.
+        const UInt8* links = *reinterpret_cast<const UInt8* const*>(target + 0x14);
+        const UInt32 n = *reinterpret_cast<const UInt32*>(target + 0x18);
+        static const void* s_logged = nullptr;
+        const bool log = s_logged != targetRefr;
+        s_logged = targetRefr;
+        if (n == 0 || n > 64 || !links || IsBadReadPtr((void*)links, n * 0x0C)) {
+            if (log) F3A_INFO("Marker: the target has no teleport links the game made (%u)", n);
+            return false;
+        }
+        for (UInt32 k = 0; k < n; ++k) {
+            auto* door = *reinterpret_cast<TESObjectREFR* const*>(links + k * 0x0C);
+            if (!door || IsBadReadPtr(door, 0x48) || !door->baseForm ||
+                IsBadReadPtr(door->baseForm, 0x10) || door->baseForm->typeID != kFormType_Door)
+                continue;
+            if (!DoorLinkedRef(door) || !TargetSharesPlayerSpace(door)) continue;
+            *out = { door->posX, door->posY, door->posZ };
+            if (via) *via = DoorDestinationName(door);
+            if (log)
+                F3A_INFO("Marker: the game marks door %08X (link %u of %u) at (%.0f,%.0f,%.0f), to '%s'",
+                         (unsigned)door->refID, k + 1, n, out->x, out->y, out->z,
+                         DoorDestinationName(door).c_str());
+            return true;
+        }
+        if (log) F3A_INFO("Marker: none of the %u teleport links is a door here", n);
+        return false;
+    }
+    return false;
+}
+
 // Would walking through this load door put us in the SAME coordinate frame as
 // the target reference? (I.e. does its far side share the target's cell/world-
 // space.) Lets cross-worldspace autowalk prefer the door that actually leads

@@ -752,6 +752,14 @@ std::string GetRefPlaceName(const void* refr);
 std::string GetRefSpaceLabel(const void* refr);
 
 bool IsLoadDoor(const void* doorRefr);
+
+// The tracked objective's compass marker for a target in another place: the
+// door the game puts it on, in the player's own place - the first of the
+// target's teleport links (BGSQuestObjective::Target + 0x10, the New Vegas
+// layout), each checked: a load door, in the player's place. `via` = the place
+// behind that door. False when the target is not the tracked objective's, or
+// the links do not read right. Plain data reads.
+bool GetQuestMarkerDoor(const void* targetRefr, Vec3* out, std::string* via);
 bool DoorLeadsToTargetSpace(const void* doorRefr, const void* targetRefr);
 bool DoorLeadsToCellSpace(const void* doorRefr, const void* cellPtr);
 bool DoorLeadsToExterior(const void* doorRefr);
