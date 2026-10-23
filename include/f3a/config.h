@@ -194,7 +194,7 @@ struct Settings {
     // the game's language (pl -> 1250, otherwise the system ANSI code page).
     int game_text_codepage = 0;
 
-    // Tolk
+    // Speech: Windows' SAPI voice even with a screen reader running.
     bool prefer_sapi = false;
 
     Hotkeys hotkeys;

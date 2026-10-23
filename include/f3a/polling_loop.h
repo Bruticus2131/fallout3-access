@@ -143,10 +143,10 @@ void RequestMapMarkerClick(const void* markerTile);
 // Drop the item selected in the inventory (clicks the menu's own Drop button).
 void RequestDropItem();
 
-// Hacking: put the game's cursor on a UI point, and enter what its highlight
-// holds (game::ClickHackingSelection). Both run on the main thread.
-void RequestHackCursorTo(float x, float y);
-void RequestHackGuess();
+// Hacking: enter candidate `idx` (game::EnterHackingCandidate) once the game's
+// highlight holds `want`; finish the type-out at once. Main thread.
+void RequestHackEnter(int idx, const std::string& want);
+void RequestHackSkipIntro();
 
 // Lockpicking: move the bobby pin by `units` (accumulated, applied on the main
 // thread through game::NudgeLockpick).

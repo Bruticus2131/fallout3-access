@@ -6,7 +6,7 @@
 
 namespace f3a {
 
-// Called once at FOSE_Load. Initializes Tolk, config, hotkeys, and registers
+// Called once at FOSE_Load. Initializes speech, config, hotkeys, and registers
 // menu / event dispatch.
 void OnPluginLoad();
 

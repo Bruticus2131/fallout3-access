@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.21)
 #     issues when the game loads us.
 
 project(Fallout3Access
-    VERSION 0.5.7
+    VERSION 0.5.8
     DESCRIPTION "Fallout 3 accessibility mod (screen reader integration)"
     LANGUAGES CXX
 )
@@ -51,14 +51,28 @@ if(NOT EXISTS "${FOSE_SDK_PATH}/fose/fose/PluginAPI.h")
     )
 endif()
 
-# ---- Tolk (third_party/tolk) -------------------------------------------------
+# ---- Prism (screen readers and speech) ---------------------------------------
+#
+# github.com/ethindp/prism (MPL-2.0): NVDA, JAWS, ZoomText, System Access, ZDSR
+# and others behind one C API, with Windows' own voices (OneCore, SAPI) when no
+# screen reader runs. Built here as a static library and linked into the
+# plugin, so nothing has to lie beside the game (Tolk needed four DLLs there).
+# Its JAWS, SAPI and ZoomText backends need the MSVC "C++ ATL" component.
 
-set(TOLK_DIR "${CMAKE_SOURCE_DIR}/third_party/tolk")
-if(NOT EXISTS "${TOLK_DIR}/include/Tolk.h")
-    message(STATUS "Tolk headers not found in ${TOLK_DIR}/include. "
-                   "We load Tolk.dll dynamically at runtime, so the header is "
-                   "only required to compile the wrapper. See third_party/tolk/README.txt.")
-endif()
+include(FetchContent)
+set(PRISM_ENABLE_TESTS            OFF     CACHE BOOL   "" FORCE)
+set(PRISM_ENABLE_DEMOS            OFF     CACHE BOOL   "" FORCE)
+set(PRISM_ENABLE_SHIMS            OFF     CACHE BOOL   "" FORCE)
+set(PRISM_ENABLE_GDEXTENSION      OFF     CACHE BOOL   "" FORCE)
+set(PRISM_ENABLE_LEGACY_BACKENDS  ON      CACHE BOOL   "" FORCE)
+set(PRISM_DEPENDENCY_PROVIDER     BUNDLED CACHE STRING "" FORCE)
+set(BUILD_SHARED_LIBS OFF)
+FetchContent_Declare(prism
+    GIT_REPOSITORY https://github.com/ethindp/prism.git
+    GIT_TAG        v0.18.3
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(prism)
 
 # ---- The plugin DLL ----------------------------------------------------------
 
@@ -113,7 +127,6 @@ add_library(Fallout3Access SHARED ${F3A_SOURCES})
 target_include_directories(Fallout3Access
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/third_party/tolk/include
         ${FOSE_SDK_PATH}        # enables  #include "common/IPrefix.h"
         ${FOSE_SDK_PATH}/fose   # enables  #include "fose/PluginAPI.h"
                                 #         and "fose_common/SafeWrite.h"
@@ -154,6 +167,7 @@ target_compile_options(Fallout3Access PRIVATE
 
 target_link_libraries(Fallout3Access PRIVATE
     user32 kernel32 shell32 advapi32 shlwapi version winmm gdi32 gdiplus ole32
+    prism::prism
 )
 
 set_target_properties(Fallout3Access PROPERTIES

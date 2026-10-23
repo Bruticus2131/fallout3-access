@@ -89,8 +89,10 @@ static bool SuppressOpenAnnouncement(Id id)
     case Id::Message:
     case Id::Book:
     case Id::LevelUp:
+    case Id::Tutorial:
         // The message module reads the actual popup text (and the LevelUp
-        // line); announcing "Wiadomość otwarte" on top would be noise.
+        // line); announcing "Wiadomość otwarte" on top would be noise. A
+        // tutorial's text it begins with "Samouczek".
         return true;
     case Id::Dialog:
         // The dialog module says who: "Rozmowa z Moirą".

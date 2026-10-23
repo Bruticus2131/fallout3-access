@@ -1,6 +1,7 @@
 #include "f3a/polling_loop.h"
 #include "f3a/player_mover.h"
 #include "f3a/fose_runtime.h"
+#include "f3a/engine_hooks.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/game_access.h"
 #include "f3a/modules.h"
@@ -266,6 +267,10 @@ void PollActiveTile()
     // The level-up screen too: its module reads the row with its value and
     // description, and this reader would say the row a second time.
     if (menu::ActiveMenu() == menu::Id::LevelUp) return;
+    // The hacking screen: its module reads the words and the log. The tile
+    // under the cursor there is a row of the memory dump, read out as
+    // "0xF9A8 -"-;\*%`CUTT", or the backdrop.
+    if (menu::ActiveMenu() == menu::Id::HackingShort) return;
     // The Pip-Boy's pages: the Pip-Boy module reads the row (the arrows' highlight
     // and the mouse's), so this reader would say it a second time.
     {
@@ -1517,12 +1522,18 @@ std::string       g_special_desc[7];
 bool              g_special_desc_tried = false;   // main thread only
 // The aim key is held: widen the engine's bullet correction (main thread).
 std::atomic<bool> g_engine_aim_want{ false };
+// The point the held aim is on this frame (lead and offsets in), for the shot.
+std::atomic<int>   g_shot_x{ 0 }, g_shot_y{ 0 }, g_shot_z{ 0 };
+std::atomic<DWORD> g_shot_at{ 0 };
 
 // Press the inventory's "Upuść" button (HandleClick → main thread only).
 std::atomic<bool> g_drop_pending{ false };
-std::atomic<bool>  g_hack_cursor_pending{ false };
-std::atomic<float> g_hack_cursor_x{ 0.0f }, g_hack_cursor_y{ 0.0f };
-std::atomic<bool>  g_hack_guess_pending{ false };
+// Hacking: the candidate to enter (its number and text), and the type-out to skip.
+std::mutex         g_hack_mx;
+int                g_hack_idx = -1;
+std::string        g_hack_want;
+std::atomic<bool>  g_hack_enter_pending{ false };
+std::atomic<bool>  g_hack_skip_pending{ false };
 std::atomic<int>   g_lockpick_nudge{ 0 };
 // Track the quest highlighted in the Pip-Boy (clicks its row; main thread only).
 std::atomic<bool> g_track_quest_pending{ false };
@@ -1693,7 +1704,9 @@ void TrackHostileHealth()
     for (size_t i = 0; i < g_hp_watch.size(); ) {
         HpWatch& w = g_hp_watch[i];
         game::Vec3 at{};
-        if (!game::GetRefPosition(w.refr, w.id, &at)) {          // gone: unloaded, freed
+        // Gone: unloaded, freed. The id and position of a freed one stay a
+        // while, so IsLiveRef too - reading its health crashed the game.
+        if (!game::IsLiveRef(w.refr, w.id) || !game::GetRefPosition(w.refr, w.id, &at)) {
             g_hp_watch.erase(g_hp_watch.begin() + i);
             continue;
         }
@@ -1734,6 +1747,9 @@ void TrackHostileHealth()
 void MainThreadWork()
 {
     game::NoteMainThread();
+    // A game bug, not ours, but it leaves menus unusable: after Alt+Tab the
+    // game still holds Alt, and Enter chooses nothing. Always, mod on or off.
+    game::ReleaseStuckMenuModifiers();
     // The console (~): the line being typed is read through the engine, so
     // its reader lives here.
     modules::devconsole::MainThreadTick();
@@ -1756,6 +1772,15 @@ void MainThreadWork()
         }
     }
     if (config::IsEnabled()) TrackHostileHealth();
+    // The real levels of leveled locks, for the scanner and the walk.
+    {
+        static DWORD s_locks_at = 0;
+        DWORD now = GetTickCount();
+        if (IsGameplayActive() && now - s_locks_at >= 1500) {
+            s_locks_at = now;
+            game::RefreshLockLevels();
+        }
+    }
     if (config::IsEnabled()) {       // F12 off = no unasked-for speech
         PollSpecialChange();
         PollXpChange();
@@ -1943,18 +1968,25 @@ void MainThreadWork()
             tolk::Speak(strings::T("Najpierw wybierz notatkę na liście.", "First select a note in the list."),
                         tolk::Priority::System, true);
     }
-    // Hacking: the game's cursor onto a word, then the guess through the
-    // menu's own click (modules/hacking.cpp says when).
-    if (g_hack_cursor_pending.exchange(false)) {
-        float x = g_hack_cursor_x.load(), y = g_hack_cursor_y.load();
-        if (!game::MoveEngineCursorTo(x, y))
-            F3A_INFO("Hacking: could not move the cursor to (%.0f,%.0f)", x, y);
-    }
-    if (g_hack_guess_pending.exchange(false)) {
-        if (!game::ClickHackingSelection())
+    // Hacking: a word or a bracket pair entered through the menu's own
+    // highlight and click (modules/hacking.cpp asks).
+    if (g_hack_enter_pending.exchange(false)) {
+        int idx;
+        std::string want;
+        {
+            std::lock_guard<std::mutex> lk(g_hack_mx);
+            idx = g_hack_idx;
+            want = g_hack_want;
+        }
+        const int r = game::EnterHackingCandidate(idx, want);
+        if (r == 0)
+            tolk::Speak(strings::T("Nie mogę trafić w słowo.", "Can't reach the word."),
+                        tolk::Priority::System, true);
+        else if (r < 0)
             tolk::Speak(strings::T("Nie udało się wpisać słowa.", "Could not enter the word."),
                         tolk::Priority::System, true);
     }
+    if (g_hack_skip_pending.exchange(false)) game::SkipHackingIntro();
     // Lockpicking: the bobby pin, moved by the arrow keys.
     if (int units = g_lockpick_nudge.exchange(0)) {
         bool edge = false;
@@ -2363,6 +2395,31 @@ void Tick(float dt)
     }
 }
 
+// "Fallout 3 Access loaded" - confirms speech works before the main menu.
+// Said a moment after the game's window has come to the front, so the screen
+// reader's own announcement of that window ("unknown") does not cut it off;
+// after 20 s anyway, if the window never does.
+void AnnounceLoadedOnce()
+{
+    static bool s_done = false;
+    static DWORD s_start = 0, s_front_at = 0;
+    if (s_done) return;
+    const DWORD now = GetTickCount();
+    if (!s_start) s_start = now;
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid == GetCurrentProcessId()) {
+        if (!s_front_at) s_front_at = now;
+    } else {
+        s_front_at = 0;
+    }
+    const bool settled = s_front_at && now - s_front_at >= 1200;
+    if (!settled && now - s_start < 20000) return;
+    s_done = true;
+    tolk::Speak(strings::Render(strings::Key::ModLoaded), tolk::Priority::System, true);
+}
+
 void ThreadProc()
 {
     using clock = std::chrono::steady_clock;
@@ -2374,6 +2431,7 @@ void ThreadProc()
         float dt = std::chrono::duration<float>(now - last).count();
         last = now;
 
+        AnnounceLoadedOnce();
         try { Tick(dt); }
         catch (...) { F3A_ERROR("Exception in polling tick."); }
 
@@ -2383,6 +2441,8 @@ void ThreadProc()
 }
 
 } // namespace
+
+namespace { bool ShotAimPoint(float out[3]); }   // below, with the aim key's state
 
 void Start()
 {
@@ -2404,6 +2464,9 @@ void Start()
     for (auto& c : g_state) c = {};
     // Run SPECIAL/status reads (which call game functions) on the main thread.
     game::SetMainThreadCallback(&MainThreadWork);
+    engine::SetShotAimProvider(&ShotAimPoint);
+    // The hacking screen answers Enter itself (modules/hacking.cpp).
+    engine::SetMenuEnterFilter([]() { return config::IsEnabled() && game::HackingTakesEnter(); });
     g_thread = std::thread(&ThreadProc);
 }
 
@@ -2513,13 +2576,16 @@ void RequestFacePoint(const game::Vec3& p)
 void RequestMapTravel() { g_map_travel_pending.store(true); }
 
 void RequestDropItem() { g_drop_pending.store(true); }
-void RequestHackCursorTo(float x, float y)
+void RequestHackEnter(int idx, const std::string& want)
 {
-    g_hack_cursor_x.store(x);
-    g_hack_cursor_y.store(y);
-    g_hack_cursor_pending.store(true);
+    {
+        std::lock_guard<std::mutex> lk(g_hack_mx);
+        g_hack_idx = idx;
+        g_hack_want = want;
+    }
+    g_hack_enter_pending.store(true);
 }
-void RequestHackGuess() { g_hack_guess_pending.store(true); }
+void RequestHackSkipIntro() { g_hack_skip_pending.store(true); }
 void RequestLockpickNudge(int units) { g_lockpick_nudge.fetch_add(units); }
 
 bool QuantityState(int* amount, int* maximum)
@@ -2568,6 +2634,24 @@ bool VatsPickState(game::VatsPick* out)
 }
 
 void SetEngineAimAssist(bool on) { g_engine_aim_want.store(on); }
+
+namespace {
+// The shot's point (see engine::PrepareShot): only while the aim key holds a
+// live enemy, and only a point worked out a moment ago.
+bool ShotAimPoint(float out[3])
+{
+    if (!g_engine_aim_want.load() || !config::IsEnabled() || config::Get().engine_aim_deg <= 0)
+        return false;
+    const uint32_t id = g_aimtrack_refid.load();
+    const void* r = g_aimtrack_refr.load();
+    if (!id || !r || !game::IsLiveRef(r, id) || game::IsKnownDead(id)) return false;
+    if (GetTickCount() - g_shot_at.load() > 250) return false;
+    out[0] = BitsToF(g_shot_x.load());
+    out[1] = BitsToF(g_shot_y.load());
+    out[2] = BitsToF(g_shot_z.load());
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+} // namespace
 
 std::string SpecialDescription(int i)
 {
@@ -2825,6 +2909,40 @@ void AimTick()
                 F3A_INFO("AimLOS: %s %08X (the ray hits %08X at %.0f units)",
                          g_los_on ? "ON" : "off", want, hit, dist);
             }
+            // Something that is not a person stands between the aim and the
+            // enemy - a car, a wall's edge, a rock: the shots go into it. The
+            // fight with the raiders at the Super Duper Mart was lost to cover
+            // the player could not see. Said once it has held a moment, and
+            // again only after a clear look.
+            {
+                static int  s_blocked = 0, s_clear = 0;
+                static bool s_said = false;
+                float range = 0.0f;
+                if (auto* pl = fose_rt::Player()) {
+                    const float ax = BitsToF(g_aimtrack_x.load()) - pl->posX;
+                    const float ay = BitsToF(g_aimtrack_y.load()) - pl->posY;
+                    range = std::sqrt(ax * ax + ay * ay);
+                }
+                const bool blocked = ok && hit && hit != want && dist > 0.0f &&
+                                     range > 300.0f && dist < range - 150.0f &&
+                                     !game::IsKnownHostile(hit) && g_fire_warned != hit;
+                if (blocked) {
+                    s_clear = 0;
+                    if (++s_blocked == 8 && !s_said) {
+                        s_said = true;
+                        char buf[160];
+                        std::snprintf(buf, sizeof(buf),
+                                      strings::T("Cel zasłonięty, przeszkoda %s przed tobą.",
+                                                 "Target blocked, cover %s ahead."),
+                                      strings::FormatDistance(dist).c_str());
+                        F3A_INFO("AimLOS: cover %08X at %.0f units, the enemy at %.0f", hit, dist, range);
+                        tolk::Speak(buf, tolk::Priority::Combat, false);
+                    }
+                } else {
+                    s_blocked = 0;
+                    if (now_on && ++s_clear >= 10) s_said = false;
+                }
+            }
         }
     }
 
@@ -3018,6 +3136,13 @@ void AimTick()
         tp.x += BitsToF(g_aim_ox.load());
         tp.y += BitsToF(g_aim_oy.load());
         tp.z += BitsToF(g_aim_oz.load());
+
+        // For the shot (engine::PrepareShot): where it should go, the same
+        // point the view is held on.
+        g_shot_x.store(FToBits(tp.x));
+        g_shot_y.store(FToBits(tp.y));
+        g_shot_z.store(FToBits(tp.z + BitsToF(g_aimtrack_up.load())));
+        g_shot_at.store(GetTickCount());
 
         game::AimPlayerAtPoint(tp, BitsToF(g_aimtrack_up.load()), g_aim_bias);
         if (trackFrames > 0) g_aimtrack_frames.store(trackFrames - 1);
@@ -3853,6 +3978,13 @@ void DumpActiveMenuTree()
                 log::DumpWrite("  log: %s", e.c_str());
             for (const auto& s : game::DebugHackingTraits())
                 log::DumpWrite("  %s", s.c_str());
+        }
+        int stage = -1;
+        const auto intro = game::GetHackingIntro(&stage);
+        if (stage >= 0) {
+            log::DumpWrite("hacking stage=%d, %u line(s) shown in full, highlight '%s'",
+                           stage, (unsigned)intro.size(), game::GetHackingSelection().c_str());
+            for (const auto& l : intro) log::DumpWrite("  line %d: %s", l.first, l.second.c_str());
         }
     }
     log::DumpWrite("IFM=%p menuRoot=%p activeTile=%p cursor=%p",

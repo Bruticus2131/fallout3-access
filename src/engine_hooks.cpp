@@ -84,6 +84,140 @@ bool RedirectCall(uintptr_t site, uintptr_t expected, const void* hook)
     return true;
 }
 
+// --- The player's shot --------------------------------------------------------
+//
+// The shot direction 0x00773570 (thiscall on the player, three callers, all
+// player shots) bends a ranged, non-VATS shot onto a target by at most
+// fAutoAimMaxDegrees: onto the actor at PlayerCharacter+0x8E4 when there is
+// one with 3D, else onto the point at +0x8E8 (x, y, z) when that is not zero
+// (0x0077399E / 0x00773A76: direction = point - the view's origin). Which
+// actor is there the game decides each frame (0x007794B0): only one the
+// compass marks hostile, in a narrow window round the crosshair, with a clear
+// ray - and in a whole fight with raiders it never chose one (log 2026-10-23).
+// So while the aim key holds an enemy the point is set right before the shot
+// to the spot the mod aims at - on the body, found by rays, led for a moving
+// target - and the game's own correction carries the shot there.
+constexpr uintptr_t kShotDirection = 0x00773570;
+constexpr uintptr_t kShotSites[] = { 0x00778C3A, 0x007B794A, 0x007CA29B };
+
+ShotAimProvider g_shot_provider = nullptr;
+uintptr_t       g_shot_original = kShotDirection;
+int             g_shot_patched  = 0;
+
+void __cdecl PrepareShot(unsigned char* player)
+{
+    float p[3];
+    ShotAimProvider prov = g_shot_provider;
+    if (!player || !prov || !prov(p)) return;
+    if (IsBadWritePtr(player + 0x8E4, 0x10)) return;
+    *reinterpret_cast<void**>(player + 0x8E4) = nullptr;
+    float* at = reinterpret_cast<float*>(player + 0x8E8);
+    at[0] = p[0]; at[1] = p[1]; at[2] = p[2];
+    static DWORD s_logged = 0;
+    if (GetTickCount() - s_logged > 1000) {
+        s_logged = GetTickCount();
+        F3A_INFO("ShotAim: the shot is carried to (%.0f,%.0f,%.0f)", p[0], p[1], p[2]);
+    }
+}
+
+void (__cdecl* g_prepare_shot)(unsigned char*) = &PrepareShot;
+
+// Runs in place of the game's call: everything kept as it came (ecx = the
+// player, the seven arguments on the stack), our point set, then on into the
+// game's function, which returns to its caller.
+__declspec(naked) void ShotDirection_Thunk()
+{
+    __asm {
+        pushad
+        pushfd
+        push ecx
+        call dword ptr [g_prepare_shot]
+        add esp, 4
+        popfd
+        popad
+        jmp dword ptr [g_shot_original]
+    }
+}
+
+void PatchShotDirection()
+{
+    // The function itself, before any call is pointed away from it:
+    // push ebp / mov ebp,esp / and esp,-8 / sub esp,0xC4.
+    const uint8_t want[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0xC4, 0x00 };
+    auto* fn = reinterpret_cast<const uint8_t*>(kShotDirection);
+    if (IsBadReadPtr(fn, sizeof(want)) || std::memcmp(fn, want, sizeof(want)) != 0) {
+        F3A_WARN("engine_hooks: the shot direction code is not the expected one - shot aim off");
+        return;
+    }
+    for (uintptr_t site : kShotSites)
+        if (RedirectCall(site, kShotDirection, reinterpret_cast<const void*>(&ShotDirection_Thunk)))
+            ++g_shot_patched;
+    F3A_INFO("engine_hooks: shot aim installed at %d of 3 call sites.", g_shot_patched);
+}
+
+// --- Enter in a menu ----------------------------------------------------------
+//
+// With keyboard and mouse the game takes Enter in a menu as a click on the
+// tile under the mouse (0x00628D01 makes it key code -2; 0x00626070 then
+// clicks InterfaceManager+0xBC, else the active tile +0xCC). On the hacking
+// screen that tile is whatever row the resting mouse is over, and the click
+// enters the symbol or word highlighted there: the player pressed Enter to
+// guess the word the mod had chosen, and the game had already spent an
+// attempt on a stray "(" (log 2026-10-23 20:14: 3 -> 2 -> 1 attempts with no
+// guess of theirs). While the mod answers Enter itself, the game's is held
+// back - at its one call for the typed keys (0x00628BF5).
+constexpr uintptr_t kMenuKey     = 0x00626070;
+constexpr uintptr_t kMenuKeySite = 0x00628BF5;
+
+EnterFilter g_enter_filter = nullptr;
+uintptr_t   g_menu_key_original = kMenuKey;
+bool        g_menu_key_patched = false;
+
+bool __cdecl HoldEnter(int code)
+{
+    EnterFilter f = g_enter_filter;
+    if (code != -2 || !f || !f()) return false;
+    static DWORD s_logged = 0;
+    if (GetTickCount() - s_logged > 2000) {
+        s_logged = GetTickCount();
+        F3A_INFO("engine_hooks: the game's Enter held back (the mod answers it)");
+    }
+    return true;
+}
+
+bool (__cdecl* g_hold_enter)(int) = &HoldEnter;
+
+// In place of the call: ecx = the interface manager, the key code on the stack.
+__declspec(naked) void MenuKey_Thunk()
+{
+    __asm {
+        push ecx
+        push dword ptr [esp + 8]
+        call dword ptr [g_hold_enter]
+        add esp, 4
+        pop ecx
+        test al, al
+        jnz held
+        jmp dword ptr [g_menu_key_original]
+    held:
+        ret 4
+    }
+}
+
+void PatchMenuEnter()
+{
+    // push eax / mov ecx,esi / call 0x00626070, and the function's own start.
+    const uint8_t site[] = { 0x50, 0x8B, 0xCE, 0xE8 };
+    const uint8_t fn[]   = { 0x6A, 0xFF, 0x68, 0x48, 0x3F, 0xC6, 0x00 };
+    const auto* s = reinterpret_cast<const uint8_t*>(kMenuKeySite - 3);
+    const auto* f = reinterpret_cast<const uint8_t*>(kMenuKey);
+    g_menu_key_patched = !IsBadReadPtr(s, sizeof(site)) && std::memcmp(s, site, sizeof(site)) == 0 &&
+                         !IsBadReadPtr(f, sizeof(fn)) && std::memcmp(f, fn, sizeof(fn)) == 0 &&
+                         RedirectCall(kMenuKeySite, kMenuKey, reinterpret_cast<const void*>(&MenuKey_Thunk));
+    F3A_INFO("engine_hooks: menu Enter hold %s.",
+             g_menu_key_patched ? "installed" : "NOT installed (code differs)");
+}
+
 // --- Up and Down in a text field ---------------------------------------------
 //
 // The text-edit control (0x00625640) turns keys into special codes, 0x80000000
@@ -135,8 +269,13 @@ bool InstallHooks()
 {
     PatchDropQuantity();
     PatchTextEditArrows();
-    return g_drop_patched && g_edit_arrows_patched;
+    PatchShotDirection();
+    PatchMenuEnter();
+    return g_drop_patched && g_edit_arrows_patched && g_shot_patched == 3 && g_menu_key_patched;
 }
+
+void SetShotAimProvider(ShotAimProvider provider) { g_shot_provider = provider; }
+void SetMenuEnterFilter(EnterFilter filter) { g_enter_filter = filter; }
 
 void RemoveHooks() {}
 

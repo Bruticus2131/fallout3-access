@@ -495,6 +495,14 @@ bool IsAimControlHeld();
 // 6 aim. False when the control has no key.
 bool IsControlKeyHeld(uint32_t control);
 
+// Release a modifier key the game still holds after Alt+Tab. The menus keep
+// Alt, Ctrl and Shift as flags of their own, set and cleared by the keyboard's
+// down and up events; the Alt up of an Alt+Tab happens in another window, so
+// for the game Alt stays down, and Enter in every menu becomes Alt+Enter,
+// which chooses nothing - until the game is restarted. A flag the keyboard
+// has not backed for a moment is cleared. Main thread, every pump.
+void ReleaseStuckMenuModifiers();
+
 // Is a weapon drawn?
 bool IsWeaponOut();
 
@@ -752,6 +760,27 @@ std::string GetRefPlaceName(const void* refr);
 std::string GetRefSpaceLabel(const void* refr);
 
 bool IsLoadDoor(const void* doorRefr);
+
+// A lock's level as the game rates it (0x0041CDA0 over the iLockLevelMax*
+// settings): 0 very easy (up to 0), 1 easy (25), 2 average (50), 3 hard (75),
+// 4 very hard (100), 5 only with its key. And the Lockpick skill a rating
+// needs (0, 25, 50, 75, 100; -1 = the key only).
+int LockTier(int level);
+int LockSkillNeeded(int tier);
+
+// The real level of every "leveled" lock near the player (one whose level
+// grows with the place's level: 25 plus that level for the Super-Duper Mart's
+// pharmacy, which the game then rates average, skill 50 - the record's 25
+// had the mod call it easy). Asked of the game's own GetLockLevel; the lock
+// readers use it from then on. Main thread, about once a second.
+void RefreshLockLevels();
+
+// Is this still the live reference it was (the id it had, if given)? A freed
+// one keeps its id and position for a while, so those prove nothing: here its
+// vtable must be the game's and the game's form table must not name another
+// object by that id. Checked before every virtual call made on a reference
+// the mod has been holding. Plain data reads, any thread.
+bool IsLiveRef(const void* refr, uint32_t id = 0);
 
 // The tracked objective's compass marker for a target in another place: the
 // door the game puts it on, in the player's own place - the first of the
@@ -1156,7 +1185,7 @@ struct HackingInfo {
     std::vector<std::string> words;           // candidate passwords (all same length)
     // Bracket pairs on one line with no letter between them, "[!#]": entered
     // like a word, one takes out a wrong word or gives the attempts back.
-    // GetHackWordTarget numbers them after the words.
+    // EnterHackingCandidate numbers them after the words.
     std::vector<std::string> brackets;
     std::string              highlighted;     // word under the cursor, "" if none
 };
@@ -1179,17 +1208,36 @@ std::vector<std::string> DebugHackingTraits();
 
 // Guessing a word as a click does (with keyboard and mouse the minigame has
 // no keys; the gamepad's are off then):
-//   GetHackWordTarget     - the UI point of a candidate's middle letter, and
-//                           the width of one letter there (to step sideways);
-//   GetHackingSelection   - the text the game's cursor highlight holds now,
-//                           what a click would enter (a word, a bracket pair,
-//                           a symbol); plain data read;
-//   ClickHackingSelection - enter it, as the mouse button does. MAIN THREAD.
+//   GetHackingSelection   - the text the game's highlight holds now, what a
+//                           click would enter (a word, a bracket pair, a
+//                           symbol); plain data read;
+//   EnterHackingCandidate - enter candidate `idx` (the words, then the bracket
+//                           pairs, as GetHackingInfo lists them) through the
+//                           menu's own highlight and click, once the game's
+//                           highlight holds `want`. 1 entered, 0 the game
+//                           highlighted something else (*got), -1 not now
+//                           (not the board, the game's code not the one
+//                           expected). MAIN THREAD.
 // IsPauseMenuOpen: the pause menu is up (hacking input stops).
-bool GetHackWordTarget(int idx, float* x, float* y, float* charWidth = nullptr);
 std::string GetHackingSelection();
-bool ClickHackingSelection();
+int EnterHackingCandidate(int idx, const std::string& want, std::string* got = nullptr);
 bool IsPauseMenuOpen();
+
+// The lines the hacking screen types out before the board ("WITAMY W
+// TERMINALU ROBCO INDUSTRIES (TM)", "USTAW TERMINAL/ZAPYTANIE"...), each once
+// it shows in full, with its slot (0..45). The menu keeps them as HackingText
+// objects at [menu+0x28]: the line's text at +0x00, "shown in full" at +0x29.
+// *stage = the menu's stage [menu+0x1C4]: 0 and 1 typing, 2 the board, 3
+// locked, 4 opened; -1 = no hacking screen.
+std::vector<std::pair<int, std::string>> GetHackingIntro(int* stage);
+// Finish the typing at once, as a click does then. MAIN THREAD.
+bool SkipHackingIntro();
+// A tutorial popup is up (the first hacking, lockpicking...).
+bool IsTutorialOpen();
+// The hacking screen is the one taking keys - typing out or the board, with
+// no pause menu, tutorial or message over it: the mod answers Enter there, and
+// the game's own (a click under the mouse) is held back. MAIN THREAD.
+bool HackingTakesEnter();
 
 // The hacking attempt log joined (guesses + likeness / denied / granted).
 std::string GetHackingLog();

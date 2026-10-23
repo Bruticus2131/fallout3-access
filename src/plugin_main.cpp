@@ -120,7 +120,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 
     // Bring up TTS bridge.
     if (!tolk::Init()) {
-        F3A_ERROR("Tolk init failed; the mod will be silent.");
+        F3A_ERROR("Speech init failed; the mod will be silent.");
     }
 
     f3a::menu::Init();
@@ -132,8 +132,9 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
     // Kick off the worker thread that polls InterfaceManager visibility.
     f3a::poll::Start();
 
-    // First spoken line — confirms TTS is working before the main menu loads.
-    tolk::Speak(str::Render(str::Key::ModLoaded), tolk::Priority::System, true);
+    // The first spoken line, "Fallout 3 Access loaded", is said by the poll
+    // thread once the game's window has come up: said now, NVDA's own
+    // announcement of the new window ("unknown") cut it off.
     return true;
 }
 

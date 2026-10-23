@@ -60,6 +60,10 @@ KIND_OF_BASE = {b'ACTI': K_ACTIVATOR, b'TACT': K_ACTIVATOR, b'TERM': K_TERMINAL,
 INTERACT_BLOCKS = {'onactivate', 'onadd', 'onequip'}
 TRIGGER_BLOCKS = {'ontriggerenter', 'ontrigger'}
 SETSTAGE = re.compile(r'(?i)\bsetstage\s+(\w+)\s+(\d+)')
+# A quest moved on by its objective instead of a stage: the Wasteland Survival
+# Guide's pantry and pharmacy supplies in the Super-Duper Mart complete
+# "find food" / "find medicine" with SetObjectiveCompleted MS03 10 / 12.
+SETOBJECTIVE = re.compile(r'(?i)\bsetobjectivecompleted\s+(\w+)\s+(\d+)')
 BLOCK = re.compile(r'(?ims)^\s*begin\s+(\w+)(.*?)^\s*end\b')
 
 
@@ -220,11 +224,18 @@ def main():
         d.read(os.path.join(args.data, m), i)
         print('%-18s read' % m)
 
-    # What each script does: quest stages set in interaction / trigger blocks.
+    # What each script does: quest stages set in interaction / trigger blocks,
+    # and the objectives completed there.
     interact, trigger, sit = {}, {}, set()
+    interact_obj, trigger_obj = {}, {}
     for sid, src in d.scripts.items():
         for name, body in BLOCK.findall(src):
             name = name.lower()
+            objs = SETOBJECTIVE.findall(body)
+            if objs and name in INTERACT_BLOCKS:
+                interact_obj.setdefault(sid, []).extend(objs)
+            elif objs and name in TRIGGER_BLOCKS:
+                trigger_obj.setdefault(sid, []).extend(objs)
             sets = SETSTAGE.findall(body)
             if not sets:
                 continue
@@ -242,6 +253,11 @@ def main():
         if q is not None:
             entries[(ref, q, int(stage) & 0xFFFF, -1, kind)] = True
 
+    def add_obj(ref, qedid, objective, kind):
+        q = d.quest_edid.get(qedid.lower())
+        if q is not None:
+            entries[(ref, q, 0, int(objective), kind)] = True
+
     by_base = {}
     for rid, r in d.refs.items():
         by_base.setdefault(r[0], []).append(rid)
@@ -257,6 +273,11 @@ def main():
         for rid in by_base.get(bid, []):
             for q, st in sets:
                 add(rid, q, st, kind)
+            for q, obj in interact_obj.get(sid, []):
+                add_obj(rid, q, obj, kind)
+            if d.refs[rid][5] is not None:
+                for q, obj in trigger_obj.get(sid, []):
+                    add_obj(rid, q, obj, K_TRIGGER)
             if sid in trigger and d.refs[rid][5] is not None:
                 for q, st in trigger[sid]:
                     add(rid, q, st, K_TRIGGER)

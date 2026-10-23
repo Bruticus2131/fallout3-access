@@ -1436,3 +1436,18 @@ ru: ", в другом месте: "
 
 en: ", marker on the door to: "
 ru: ", метка на двери в: "
+
+en: "Target blocked, cover %s ahead."
+ru: "Цель закрыта, укрытие в %s перед вами."
+
+en: " is dead. No living enemy nearby."
+ru: " мёртв. Живых врагов рядом нет."
+
+en: "%s, lockpick %d"
+ru: "%s, взлом %d"
+
+en: ", lockpick %d"
+ru: ", взлом %d"
+
+en: "Careful: the target is behind a locked door, and that door is the only way out. Alt Home again teleports anyway."
+ru: "Осторожно: цель за запертой дверью, и выйти оттуда можно только через неё. Alt Home ещё раз - телепорт всё равно."

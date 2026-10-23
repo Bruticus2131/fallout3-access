@@ -352,13 +352,18 @@ bool LockedDoorOnRoute(const std::vector<game::Vec3>& wp, game::WorldEntity* out
 // What the lock on a door is, in words.
 std::string LockWords(int level)
 {
-    if (level >= 250 || level < 0) return strings::T("potrzebny klucz", "requires a key");
-    const int i = (level < 25) ? 0 : (level < 50) ? 1 : (level < 75) ? 2 : (level < 100) ? 3 : 4;
+    // The game's own rating (up to 25 easy, up to 50 average...) and the
+    // Lockpick skill it needs, as the game's own message says it.
+    const int i = level < 0 ? 5 : game::LockTier(level);
+    if (i >= 5) return strings::T("potrzebny klucz", "requires a key");
     static const char* const kPl[] = { "zamek bardzo łatwy", "zamek łatwy", "zamek średni",
                                        "zamek trudny", "zamek bardzo trudny" };
     static const char* const kEn[] = { "very easy lock", "easy lock", "average lock",
                                        "hard lock", "very hard lock" };
-    return strings::T(kPl[i], kEn[i]);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), strings::T("%s, wytrychy %d", "%s, lockpick %d"),
+                  strings::T(kPl[i], kEn[i]), game::LockSkillNeeded(i));
+    return buf;
 }
 
 constexpr float kArriveDist = 90.0f;   // ~1.4 m — close enough to activate

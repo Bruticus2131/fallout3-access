@@ -11,6 +11,7 @@
 #include "f3a/audio_beacon.h"
 #include "f3a/worlddoors.h"
 #include "f3a/roadnet.h"
+#include "f3a/navmesh.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -26,15 +27,19 @@ namespace {
 std::string LockDesc(const game::WorldEntity& e)
 {
     if (!e.locked) return "";
-    if (e.lock_level >= 250)
+    // The game's own rating (up to 25 easy, up to 50 average...) and the
+    // Lockpick skill it needs, as the game's own message says it.
+    const int t = e.lock_level < 0 ? 5 : game::LockTier(e.lock_level);
+    if (t >= 5)
         return strings::T(", zamknięte na klucz", ", locked, requires a key");
-    int L = e.lock_level;
-    const char* d = (L < 25)  ? strings::T("bardzo łatwy", "very easy lock") :
-                    (L < 50)  ? strings::T("łatwy", "easy lock") :
-                    (L < 75)  ? strings::T("średni", "average lock") :
-                    (L < 100) ? strings::T("trudny", "hard lock") :
-                                strings::T("bardzo trudny", "very hard lock");
-    return std::string(strings::T(", zamknięte, zamek ", ", locked, ")) + d;
+    static const char* const kPl[] = { "bardzo łatwy", "łatwy", "średni", "trudny", "bardzo trudny" };
+    static const char* const kEn[] = { "very easy lock", "easy lock", "average lock",
+                                       "hard lock", "very hard lock" };
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), strings::T(", wytrychy %d", ", lockpick %d"),
+                  game::LockSkillNeeded(t));
+    return std::string(strings::T(", zamknięte, zamek ", ", locked, ")) +
+           strings::T(kPl[t], kEn[t]) + buf;
 }
 
 // A body is something to search, not someone to talk to: Dad's last
@@ -1085,6 +1090,12 @@ bool ActorAtQuestMarker(const game::Vec3& marker, game::WorldEntity* out)
     float bestd = kQuestActorReach * kQuestActorReach;
     for (const auto& a : actors) {
         if (!a.refr) continue;
+        // A person, not a creature or a robot: "talk to" objectives are about
+        // people. In the Super-Duper Mart the find-food marker (an invisible
+        // XMarker) was taken for the Protectron standing switched off in its
+        // pod 220 units away, and Home and End led the player to a robot
+        // that has nothing to do with the quest.
+        if (game::RefIsCreature(a.refr) || a.dead) continue;
         float dx = a.position.x - marker.x, dy = a.position.y - marker.y,
               dz = a.position.z - marker.z;
         float d2 = dx * dx + dy * dy + dz * dz;
@@ -1331,8 +1342,12 @@ void LockNearestEnemy()
 // tell the player when nothing was taken.
 bool PickCombatTarget(AimTarget* out, std::string* why = nullptr)
 {
-    auto host = game::ScanNearby(config::Get().nearby_scan_radius * 2, 8,
-                                 /*actors_only=*/true, /*hostiles_only=*/true);
+    // As far as a rifle reaches and the game's correction is opened (5000):
+    // at twice NearbyScanRadius, 2400, raiders shooting from further off were
+    // not there for the aim key at all, and it took the body at the
+    // player's feet instead. The nearest enemy still comes first.
+    const int reach = (std::max)(config::Get().nearby_scan_radius * 2, 6000);
+    auto host = game::ScanNearby(reach, 8, /*actors_only=*/true, /*hostiles_only=*/true);
     if (!host.empty()) {
         if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size()) {
             uint32_t sel = g_scan_list[g_scan_index].form_id;
@@ -1357,6 +1372,12 @@ bool PickCombatTarget(AimTarget* out, std::string* why = nullptr)
         F3A_INFO("AimTarget: '%s' is a creature the objective points at - taken",
                  out->name.c_str());
         return true;
+    }
+    if (out->actor && game::IsKnownDead(out->refid)) {
+        F3A_INFO("AimTarget: '%s' is dead - nothing to aim at", out->name.c_str());
+        if (why) *why = out->name + strings::T(" nie żyje. Brak żywego wroga w pobliżu.",
+                                               " is dead. No living enemy nearby.");
+        return false;
     }
     if (out->actor && !out->hostile) {
         F3A_INFO("AimTarget: '%s' is not an enemy - the aim key leaves them alone",
@@ -1559,6 +1580,26 @@ bool SayIfElsewhere(const AimTarget& at, bool face = false)
     return true;
 }
 
+// Is the target shut in behind a locked door - a room the navmesh reaches
+// only through one? Teleported into the Super-Duper Mart's pharmacy, the
+// player stood behind its locked door with no way out but another teleport.
+// The way there is worked out twice: as it is, and with the locked doors
+// near it walled off; when only the first finds it, the door is the only way.
+bool BehindLockedDoor(const game::Vec3& target, const void* refr)
+{
+    if (refr && !game::TargetSharesPlayerSpace(refr)) return false;   // another place: no mesh to ask
+    std::vector<game::Vec3> doors;
+    for (const auto& e : game::ScanNearby(8000, 400, false, false))
+        if (e.kind == game::WorldEntity::Kind::Door && e.locked && e.load_door != 1)
+            doors.push_back(e.position);
+    if (doors.empty()) return false;
+    const auto pp = game::GetPlayerPosition();
+    std::vector<game::Vec3> wp;
+    if (!navmesh::BuildPath(pp, target, wp) || wp.empty()) return false;   // no mesh answer
+    wp.clear();
+    return !navmesh::BuildPath(pp, target, wp, &doors);
+}
+
 void CenterCamera()
 {
     if (!GameplayAndHud()) return;
@@ -1572,6 +1613,36 @@ void CenterCamera()
     // happens again the log says so instead of looking like magic.
     if (hotkeys::AltActive()) {
         F3A_INFO("CenterCamera: Alt held -> TELEPORT branch.");
+        // Into a room behind a locked door: said first, done on a second
+        // press within a few seconds.
+        {
+            static DWORD    s_warned_at = 0;
+            static uint32_t s_warned_id = 0;
+            const void* tr = nullptr;
+            uint32_t tid = 0;
+            game::Vec3 tpos{};
+            if (autowalk::IsWalking() && autowalk::TargetRefr()) {
+                tr = autowalk::TargetRefr(); tid = autowalk::TargetFormId(); tpos = autowalk::TargetPos();
+            } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
+                       g_scan_list[g_scan_index].refr) {
+                tr = g_scan_list[g_scan_index].refr; tid = g_scan_list[g_scan_index].form_id;
+                tpos = g_scan_list[g_scan_index].position;
+            }
+            const DWORD now = GetTickCount();
+            const bool confirmed = tid && tid == s_warned_id && now - s_warned_at < 6000;
+            if (tr && !confirmed && BehindLockedDoor(tpos, tr)) {
+                s_warned_id = tid;
+                s_warned_at = now;
+                F3A_INFO("Teleport: %08X is behind a locked door - asked to confirm", tid);
+                tolk::Speak(strings::T("Uwaga: cel jest za zamkniętymi drzwiami, a wyjść stamtąd "
+                                       "można tylko przez nie. Alt Home jeszcze raz teleportuje mimo to.",
+                                       "Careful: the target is behind a locked door, and that door "
+                                       "is the only way out. Alt Home again teleports anyway."),
+                            tolk::Priority::System, true);
+                return;
+            }
+            s_warned_id = 0;
+        }
         // Prefer WHERE YOU'RE WALKING: if autowalk is active, teleport to its
         // destination — not the scanner selection, which drifts as DLC quests
         // auto-start/track (that's how Alt+Home landed on the Megaton bomb quest

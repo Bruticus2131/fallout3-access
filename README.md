@@ -2,7 +2,7 @@
 
 An accessibility mod that makes **Fallout 3** playable for blind and visually impaired players.
 
-It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interface aloud through your screen reader — NVDA, JAWS, Dolphin, System Access (via [Tolk](https://github.com/dkager/tolk)) — with Windows SAPI as a fallback when no screen reader is running.
+It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interface aloud through your screen reader — NVDA, JAWS, ZoomText, System Access, ZDSR and others (via [Prism](https://github.com/ethindp/prism)) — with Windows' own voices as a fallback when no screen reader is running. Everything is in the one plugin DLL; no other libraries are needed. Windows 10 or later.
 
 ## Features
 
@@ -49,7 +49,8 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   would hit; every hit and every kill is heard, for any enemy.
 - **Terminals and the hacking minigame** — screen text is read as it types out,
   candidate passwords and bracket pairs are listed and spelled, Enter enters
-  the chosen one, and after a wrong guess you hear which words still fit.
+  the chosen one, each answer is read as the terminal writes it, and after a
+  wrong guess you hear which words still fit. Tutorial popups are read whole.
 - **Lockpicking** — Left / Right move the bobby pin, an audio cue guides it to
   the sweet spot.
 - **Player status** on **H** (health and AP with their maximum, radiation,
@@ -90,7 +91,6 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 2. **Downgrade the game to 1.7.0.3 (Steam only).** The current Steam build (1.7.0.4, "Anniversary" update) is not supported by FOSE. Download the **[Fallout Anniversary Patcher](https://www.nexusmods.com/fallout3/mods/24913)** from Nexus Mods (free account required), extract its contents into your Fallout 3 folder (where `Fallout3.exe` is) and run `Patcher.exe`. Wait until it reports success, then press Enter.
 3. **Install FOSE.** Download *FOSE v1.3 beta 2* from <https://fose.silverlock.org>, open the archive and copy `fose_loader.exe` and all `fose_*.dll` files into the Fallout 3 folder, next to `Fallout3.exe`.
 4. **Install this mod.** The easiest way is the installer, `fallout3-access-setup-<version>.exe` from the [Releases page](../../releases). To install by hand instead, download `fallout3-access-v<version>.zip` from the same page and extract it **into the Fallout 3 folder**. The archive already has the right layout:
-   - `Tolk.dll`, `nvdaControllerClient32.dll`, `dolapi32.dll`, `SAAPI32.dll` → land next to `Fallout3.exe`,
    - `Data\FOSE\Plugins\fallout3_access.dll` and `Fallout3Access.ini` → the plugin itself,
    - `Data\FOSE\Plugins\Fallout3Access\` → the walk graphs and the door table (`*.dat`, ready made for Fallout 3 and all five DLCs) and the audio descriptions. **Copy all of it**: without this folder, long walks and walks to other places stay off. Nothing has to be generated and no Python is needed.
 5. **Start the game with `Fallout3.exe`** (not `fose_loader.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
@@ -216,7 +216,7 @@ caps.
 | Key | Action |
 | --- | --- |
 | Up / Down | hacking: the candidate words (spelled), then the bracket pairs; a word ruled out by your earlier guesses is marked |
-| Enter | hacking: enter the chosen word or bracket pair |
+| Enter | hacking: while the terminal types out, finish the typing; then enter the chosen word or bracket pair (the game's own Enter, a click under the mouse, is held back there) |
 | Left / Right | hacking: read the screen; lockpicking: move the bobby pin |
 
 ### Console (~, the game's own key)
@@ -276,7 +276,7 @@ Useful `[Voice]` settings:
 
 ## Troubleshooting
 
-- **No speech at all:** make sure NVDA is running *before* the game starts, and that `Tolk.dll` sits next to `Fallout3.exe`. Without a screen reader the mod falls back to SAPI.
+- **No speech at all:** the log says which voice the mod chose ("Speech: speaking through NVDA"). A screen reader started after the game is found within a few seconds; without one the mod speaks with Windows' own voice. `PreferSAPI = 1` in the INI forces the Windows SAPI voice.
 - **Logs:** `Documents\My Games\Fallout3\FOSE\fallout3_access.log` (rolling log) and `fallout3_access_dump.txt` (written when you press F11).
 - **Reporting a menu that doesn't read:** open that menu, press F11, and attach `fallout3_access_dump.txt` to your issue.
 
@@ -291,7 +291,7 @@ cmake --build build --config Release
 
 - Requires VS 2022 Build Tools + Windows SDK. FOSE plugins are 32-bit (`-A Win32` is mandatory).
 - The FOSE source tree is **not** bundled (licensing); download it from <https://fose.silverlock.org> and point `FOSE_SDK_PATH` at it (the folder containing `common/` and `fose/`).
-- Tolk headers/binaries are bundled under `third_party/tolk/`.
+- Speech: [Prism](https://github.com/ethindp/prism) v0.18.3 is fetched by CMake (FetchContent) and built as a static library into the plugin. Its JAWS, SAPI and ZoomText backends need the MSVC **C++ ATL** component of the Build Tools.
 - The walk graphs and the door table (`data/roadnet/*.dat`) are generated from
   the game's own data files and are not kept in git (35 MB); they ship ready
   made in the release archive and the installer, so **players never need
@@ -314,8 +314,7 @@ cmake --build build --config Release
 ## Credits & licenses
 
 - Mod code — MIT (see `LICENSE`).
-- [Tolk](https://github.com/dkager/tolk) by Davy Kager — LGPL; bundled binaries unmodified.
-- `nvdaControllerClient32.dll` — NV Access, LGPL.
+- [Prism](https://github.com/ethindp/prism) by Ethin Probst — MPL-2.0, built unmodified into the plugin; its source is at that link. Prism's notices and the licenses of the libraries it contains (simdutf, {fmt}, Highway, concurrentqueue, Moderncom, dr_wav, the NVDA controller definitions) ship in `Data\FOSE\Plugins\Fallout3Access\licenses\prism`.
 - Parts of the auto-walk design (engine pathfinding via the player's mover,
   turn-speed scaling and look-ahead braking, waypoint advance, the final-leg
   height guard, stopping the walk animation), the aiming recipes (native aim

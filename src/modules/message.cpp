@@ -45,7 +45,12 @@ void TryAnnounce()
     g_last   = text;
     g_spoken = true;
     // Same control markers as the HUD hints — expand them to real key names.
-    tolk::Speak(game::ExpandControlTokens(text), tolk::Priority::System, true);
+    // A tutorial says what it is first (its open is not announced).
+    std::string say = game::ExpandControlTokens(text);
+    if (menu::ActiveMenu() == menu::Id::Tutorial)
+        say = std::string(strings::T("Samouczek", "Tutorial")) + ". " + say;
+    F3A_DEBUG("Message: %u characters read", (unsigned)say.size());
+    tolk::Speak(say, tolk::Priority::System, true);
     // Then the button the selection is on, after the message (the keyboard
     // reader holds it back until now).
     if (auto sel = game::GetKeyboardSelectionText(/*withPosition*/ true))
@@ -169,6 +174,9 @@ bool Announced() { return g_spoken; }
 void Init()
 {
     menu::RegisterMenu(menu::Id::Message, &OnOpen, &OnClose, &OnTick);
+    // A tutorial popup (the first hacking, lockpicking...) is read the same way:
+    // its whole text, then its button.
+    menu::RegisterMenu(menu::Id::Tutorial, &OnOpen, &OnClose, &OnTick);
     // LevelUp: the levelup module reads the screen (headline included).
     menu::RegisterMenu(menu::Id::Book, &OnOpen, &OnClose, &OnTick);
     menu::RegisterMenu(menu::Id::TextEdit, &OnTextEditOpen, &OnTextEditClose,

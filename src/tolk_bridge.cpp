@@ -3,193 +3,284 @@
 #include "f3a/config.h"
 
 #include <windows.h>
-#include <sapi.h>
-// Note: we avoid <atlbase.h> (not in MSVC Build Tools without ATL workload)
-// and <wrl/client.h> (requires NTDDI_VISTA, while FOSE forces NTDDI_WIN2K).
-// Raw ISpVoice* with manual Release is fine for our two call sites.
+#include <objbase.h>
+
+#include <prism.h>
 
 #include <atomic>
 #include <chrono>
-#include <vector>
+#include <cstdio>
+#include <cstring>
+#include <condition_variable>
+#include <deque>
+#include <future>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
-// Tolk has a stable C ABI. We dynamically load Tolk.dll so the mod still works
-// (degraded, via SAPI) if Tolk.dll is absent.
+// Speech goes through Prism (github.com/ethindp/prism, MPL-2.0): one C API in
+// front of NVDA, JAWS, ZoomText, System Access, ZDSR and the rest, with
+// Windows' own voices (OneCore, SAPI) when no screen reader runs. It is built
+// into this DLL - nothing beside the game, where Tolk needed four DLLs.
+//
+// Prism's backends are not thread-safe, several of them talk COM, and the mod
+// speaks from the poll thread, the game's thread and the hotkey thread. So
+// every Prism call is made on one thread of our own, which owns COM; Speak()
+// only queues. That also keeps the game's thread from ever waiting on a
+// screen reader.
 
 namespace f3a::tolk {
 namespace {
 
-// ---- Tolk function pointers -------------------------------------------------
+using Clock = std::chrono::steady_clock;
 
-using PFN_Tolk_Load             = void  (*)();
-using PFN_Tolk_Unload           = void  (*)();
-using PFN_Tolk_IsLoaded         = bool  (*)();
-using PFN_Tolk_TrySAPI          = void  (*)(bool);
-using PFN_Tolk_PreferSAPI       = void  (*)(bool);
-using PFN_Tolk_DetectScreenReader = const wchar_t* (*)();
-using PFN_Tolk_HasSpeech        = bool  (*)();
-using PFN_Tolk_Output           = bool  (*)(const wchar_t*, bool);
-using PFN_Tolk_Speak            = bool  (*)(const wchar_t*, bool);
-using PFN_Tolk_Silence          = bool  (*)();
-using PFN_Tolk_IsSpeaking       = bool  (*)();
-
-struct TolkAPI {
-    HMODULE                       dll = nullptr;
-    PFN_Tolk_Load                 Load = nullptr;
-    PFN_Tolk_Unload               Unload = nullptr;
-    PFN_Tolk_IsLoaded             IsLoaded = nullptr;
-    PFN_Tolk_TrySAPI              TrySAPI = nullptr;
-    PFN_Tolk_PreferSAPI           PreferSAPI = nullptr;
-    PFN_Tolk_DetectScreenReader   Detect = nullptr;
-    PFN_Tolk_HasSpeech            HasSpeech = nullptr;
-    PFN_Tolk_Output               Output = nullptr;
-    PFN_Tolk_Speak                Speak = nullptr;
-    PFN_Tolk_Silence              Silence = nullptr;
-    PFN_Tolk_IsSpeaking           IsSpeaking = nullptr;
+struct Cmd {
+    enum Kind { Say, Stop } kind = Say;
+    std::string text;
+    bool interrupt = false;
 };
 
-TolkAPI            g_tolk;
-ISpVoice*  g_sapi;          // SAPI fallback
-std::mutex         g_mutex;
-std::atomic<int>   g_current_prio{ -1 };
+// Front end: what Speak() decides, and the queue it feeds. g_mutex guards all
+// of it; the speech thread takes it only to pick commands up.
+std::mutex              g_mutex;
+std::condition_variable g_cv;
+std::deque<Cmd>         g_queue;
+std::atomic<int>        g_current_prio{ -1 };
 // When the last accepted utterance was issued. g_current_prio is only meaningful
 // while that utterance is still playing; we use this (with IsSpeaking) to clear
-// a stale priority once the reader goes idle. Touched only under g_mutex.
-std::chrono::steady_clock::time_point g_last_speak_at{};
-// When the last utterance is likely to have finished: NVDA's controller cannot
-// say whether it is still talking (Tolk_IsSpeaking is false throughout), so
-// the length of what was sent gives an estimate. Touched only under g_mutex.
-std::chrono::steady_clock::time_point g_speech_ends_at{};
-std::wstring       g_reader_name;   // cached detected reader
-std::string        g_reader_name_a;
-std::string        g_last_text;     // most recent utterance (for RepeatLast)
+// a stale priority once the reader goes idle.
+Clock::time_point       g_last_speak_at{};
+// When the last utterance is likely to have finished, from its length - for a
+// reader that cannot say whether it is still talking (NVDA's cannot).
+Clock::time_point       g_speech_ends_at{};
+std::string             g_last_text;      // most recent utterance (for RepeatLast)
 
-bool ResolveTolk(HMODULE dll, TolkAPI& api)
+// The speech thread and what it found.
+std::thread             g_worker;
+std::atomic<bool>       g_quit{ false };
+std::atomic<bool>       g_done{ false };           // the speech thread has finished
+std::atomic<bool>       g_ready{ false };          // a backend is up
+std::atomic<bool>       g_reported_speaking{ false };
+std::atomic<bool>       g_can_report{ false };     // the backend says when it talks
+std::atomic<bool>       g_screen_reader{ false };  // a screen reader, not a bare voice
+std::atomic<bool>       g_recheck{ false };        // availability changed: choose again
+std::atomic<long long>  g_said_at_ms{ 0 };         // last Say handed to the backend
+char                    g_name[64] = "none";       // the backend's name, for the log
+
+// Owned by the speech thread alone.
+PrismContext*           g_ctx = nullptr;
+PrismBackend*           g_backend = nullptr;
+uint64_t                g_features = 0;
+
+long long NowMs()
 {
-    api.dll      = dll;
-    #define RESOLVE(field, name) \
-        api.field = reinterpret_cast<decltype(api.field)>(GetProcAddress(dll, name)); \
-        if (!api.field) { F3A_WARN("Tolk: missing export '%s'", name); return false; }
-
-    RESOLVE(Load,        "Tolk_Load");
-    RESOLVE(Unload,      "Tolk_Unload");
-    RESOLVE(IsLoaded,    "Tolk_IsLoaded");
-    RESOLVE(TrySAPI,     "Tolk_TrySAPI");
-    RESOLVE(PreferSAPI,  "Tolk_PreferSAPI");
-    RESOLVE(Detect,      "Tolk_DetectScreenReader");
-    RESOLVE(HasSpeech,   "Tolk_HasSpeech");
-    RESOLVE(Output,      "Tolk_Output");
-    RESOLVE(Speak,       "Tolk_Speak");
-    RESOLVE(Silence,     "Tolk_Silence");
-    RESOLVE(IsSpeaking,  "Tolk_IsSpeaking");
-    #undef RESOLVE
-    return true;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               Clock::now().time_since_epoch()).count();
 }
 
-bool InitSapiFallback()
+bool IsBareVoice(PrismBackendId id)
 {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-        F3A_ERROR("SAPI fallback: CoInitializeEx failed (hr=0x%08x)", hr);
-        return false;
-    }
-    hr = CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_INPROC_SERVER,
-                          IID_ISpVoice, (void**)&g_sapi);
-    if (FAILED(hr) || !g_sapi) {
-        F3A_ERROR("SAPI fallback: failed to create SpVoice (hr=0x%08x)", hr);
-        return false;
-    }
-    F3A_INFO("SAPI fallback ready.");
-    return true;
+    return id == PRISM_BACKEND_SAPI || id == PRISM_BACKEND_ONE_CORE;
 }
 
-std::wstring Utf8ToWide(std::string_view s)
+// Prism's own warnings in our log: which reader it tried and why one failed.
+void PRISM_CALL OnPrismLog(void*, PrismLogLevel level, const char* source, const char* message)
 {
-    if (s.empty()) return {};
-    int needed = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(),
-                                     nullptr, 0);
-    std::wstring w(needed, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(),
-                        w.data(), needed);
-    return w;
+    if (level >= PRISM_LOG_LEVEL_WARN)
+        F3A_WARN("Prism %s: %s", source ? source : "", message ? message : "");
+    else
+        F3A_INFO("Prism %s: %s", source ? source : "", message ? message : "");
 }
 
-std::string WideToUtf8(const wchar_t* s)
+// A screen reader started or stopped (NVDA launched after the game): choose
+// the backend again on the speech thread.
+void PRISM_CALL OnAvailability(void*, PrismBackendId, const char* name, bool available)
 {
-    if (!s) return {};
-    int needed = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
-    std::string a(needed > 0 ? needed - 1 : 0, '\0');
-    if (needed > 1) {
-        WideCharToMultiByte(CP_UTF8, 0, s, -1, a.data(), needed, nullptr, nullptr);
+    F3A_INFO("Speech: %s %s", name ? name : "?", available ? "is available" : "went away");
+    g_recheck.store(true);
+    g_cv.notify_all();
+}
+
+// The best backend now: [General] PreferSAPI = 1 asks for SAPI even with a
+// screen reader running; else the screen reader first, Windows' voices last.
+PrismBackend* ChooseBackend()
+{
+    if (config::Get().prefer_sapi) {
+        if (PrismBackend* b = prism_registry_acquire(g_ctx, PRISM_BACKEND_SAPI)) {
+            PrismError e = prism_backend_initialize(b);
+            if (e == PRISM_OK || e == PRISM_ERROR_ALREADY_INITIALIZED) return b;
+            prism_backend_free(b);
+            F3A_WARN("Speech: SAPI asked for but did not start (%s)", prism_error_string(e));
+        }
     }
-    return a;
+    return prism_registry_acquire_best(g_ctx);
+}
+
+void UseBackend(PrismBackend* b)
+{
+    g_backend  = b;
+    g_features = b ? prism_backend_get_features(b) : 0;
+    const char* nm = b ? prism_backend_name(b) : nullptr;
+    char was[sizeof(g_name)];
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        std::snprintf(was, sizeof(was), "%s", g_name);
+        std::snprintf(g_name, sizeof(g_name), "%s", nm && *nm ? nm : "none");
+    }
+    PrismBackendId id = PRISM_BACKEND_INVALID;
+    if (nm) id = prism_registry_id(g_ctx, nm);
+    g_screen_reader.store(b && !IsBareVoice(id));
+    g_can_report.store(b && (g_features & PRISM_BACKEND_SUPPORTS_IS_SPEAKING));
+    g_reported_speaking.store(false);
+    g_ready.store(b != nullptr);
+    if (std::strcmp(was, g_name) == 0) return;     // chosen again, the same one
+    if (b)
+        F3A_INFO("Speech: speaking through %s (%s)", g_name,
+                 g_screen_reader.load() ? "screen reader" : "Windows voice");
+    else
+        F3A_ERROR("Speech: no screen reader and no Windows voice could be started");
+}
+
+// Choose again from scratch. The old handle goes first: Prism hands back a
+// cached instance, and NVDA's, kept alive by us, would be chosen again after
+// NVDA itself had quit.
+void Rechoose()
+{
+    if (g_backend) { prism_backend_free(g_backend); g_backend = nullptr; }
+    UseBackend(ChooseBackend());
+}
+
+void Run(const Cmd& c)
+{
+    if (!g_backend) return;
+    PrismError e = PRISM_OK;
+    if (c.kind == Cmd::Stop) {
+        if (g_features & PRISM_BACKEND_SUPPORTS_STOP) e = prism_backend_stop(g_backend);
+    } else {
+        // Output = speech and braille, where the reader has braille.
+        if (g_features & PRISM_BACKEND_SUPPORTS_OUTPUT)
+            e = prism_backend_output(g_backend, c.text.c_str(), c.interrupt);
+        else
+            e = prism_backend_speak(g_backend, c.text.c_str(), c.interrupt);
+        g_said_at_ms.store(NowMs());
+    }
+    if (e != PRISM_OK && e != PRISM_ERROR_NOT_SPEAKING) {
+        F3A_WARN("Speech: %s failed (%s) - choosing the backend again",
+                 c.kind == Cmd::Stop ? "stop" : "speak", prism_error_string(e));
+        g_recheck.store(true);           // the reader went away under us
+    }
+}
+
+void Worker(std::promise<bool> started)
+{
+    // COM for the backends that use it (JAWS, UIA, ZoomText); free-threaded,
+    // as this thread pumps no messages.
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool com = SUCCEEDED(hr);
+
+    prism_set_log_handler(PrismLogHandler{ &OnPrismLog, nullptr });
+    prism_set_log_level(PRISM_LOG_LEVEL_WARN);
+    PrismConfig cfg = prism_config_init();
+    cfg.availability_callback = &OnAvailability;
+    g_ctx = prism_init(&cfg);
+    if (!g_ctx) {
+        F3A_ERROR("Speech: Prism did not start");
+        started.set_value(false);
+        if (com) CoUninitialize();
+        g_done.store(true);
+        return;
+    }
+    UseBackend(ChooseBackend());
+    started.set_value(g_backend != nullptr);
+
+    std::unique_lock<std::mutex> lk(g_mutex);
+    while (!g_quit.load()) {
+        g_cv.wait_for(lk, std::chrono::milliseconds(50),
+                      [] { return g_quit.load() || !g_queue.empty() || g_recheck.load(); });
+        while (!g_queue.empty() && !g_quit.load()) {
+            Cmd c = std::move(g_queue.front());
+            g_queue.pop_front();
+            lk.unlock();
+            Run(c);
+            lk.lock();
+        }
+        lk.unlock();
+        if (g_recheck.exchange(false)) Rechoose();
+        if (g_backend && g_can_report.load()) {
+            bool speaking = false;
+            if (prism_backend_is_speaking(g_backend, &speaking) == PRISM_OK)
+                g_reported_speaking.store(speaking);
+        }
+        lk.lock();
+    }
+    lk.unlock();
+    if (g_backend) { prism_backend_free(g_backend); g_backend = nullptr; }
+    prism_shutdown(g_ctx);
+    g_ctx = nullptr;
+    if (com) CoUninitialize();
+    g_done.store(true);
+}
+
+// Under g_mutex. Still talking, as far as anyone can tell: what the backend
+// reports (with a moment's grace, as it is asked every 50 ms), else the
+// estimate from the length of what was sent.
+bool SpeakingLocked()
+{
+    const auto now = Clock::now();
+    if (!g_queue.empty()) return true;
+    if (g_can_report.load())
+        return g_reported_speaking.load() || NowMs() - g_said_at_ms.load() < 250;
+    return now < g_speech_ends_at;
 }
 
 } // namespace
 
 bool Init()
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-
-    HMODULE dll = LoadLibraryW(L"Tolk.dll");
-    if (dll && ResolveTolk(dll, g_tolk)) {
-        g_tolk.Load();
-        g_tolk.TrySAPI(true);     // SAPI as last resort inside Tolk
-        // [General] PreferSAPI = 1 forces SAPI even with NVDA/JAWS running.
-        if (g_tolk.PreferSAPI) g_tolk.PreferSAPI(config::Get().prefer_sapi);
-        const wchar_t* name = g_tolk.Detect();
-        if (name) {
-            g_reader_name = name;
-            g_reader_name_a = WideToUtf8(name);
-            F3A_INFO("Tolk loaded. Active reader: %s", g_reader_name_a.c_str());
-        } else {
-            F3A_INFO("Tolk loaded. No screen reader detected; will use SAPI via Tolk.");
-        }
+    if (g_worker.joinable()) return g_ready.load();
+    g_quit.store(false);
+    std::promise<bool> started;
+    std::future<bool> result = started.get_future();
+    g_worker = std::thread(&Worker, std::move(started));
+    // Wait for the first choice, so the log line after this names the reader.
+    // A slow screen reader keeps starting in the background.
+    if (result.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        F3A_WARN("Speech: still looking for a screen reader after 5 s");
         return true;
     }
-
-    if (dll) FreeLibrary(dll);
-    g_tolk = TolkAPI{};
-    F3A_WARN("Tolk.dll not available — falling back to direct SAPI.");
-    return InitSapiFallback();
+    return result.get();
 }
 
 void Shutdown()
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    if (g_tolk.dll) {
-        if (g_tolk.Unload) g_tolk.Unload();
-        FreeLibrary(g_tolk.dll);
-        g_tolk = TolkAPI{};
+    if (!g_worker.joinable()) return;
+    g_quit.store(true);
+    g_cv.notify_all();
+    // A reader stuck in a call must not hold the game up on its way out.
+    for (int i = 0; i < 200 && !g_done.load(); ++i) Sleep(10);
+    if (g_done.load()) {
+        g_worker.join();
+    } else {
+        F3A_WARN("Speech: the speech thread did not stop within 2 s - leaving it");
+        g_worker.detach();
     }
-    if (g_sapi) { g_sapi->Release(); g_sapi = nullptr; }
 }
 
 bool HasActiveScreenReader()
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    if (g_tolk.HasSpeech) return g_tolk.HasSpeech();
-    return (bool)g_sapi;
+    return g_ready.load() && g_screen_reader.load();
 }
 
 void Refresh()
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    if (!g_tolk.Detect) return;
-    const wchar_t* name = g_tolk.Detect();
-    if (name) {
-        g_reader_name = name;
-        g_reader_name_a = WideToUtf8(name);
-    } else {
-        g_reader_name.clear();
-        g_reader_name_a.clear();
-    }
+    g_recheck.store(true);
+    g_cv.notify_all();
 }
 
 const char* ActiveReaderName()
 {
-    return g_reader_name_a.empty() ? "SAPI" : g_reader_name_a.c_str();
+    return g_name;
 }
 
 // Recently spoken, for suppressing ambient repetition.
@@ -204,9 +295,8 @@ const char* ActiveReaderName()
 // suppressed. Anything the player asked for by pressing a key interrupts, and
 // pressing a key twice to hear the same thing twice must always work. (The FNV
 // accessibility mod does the same at its own notification hook, with a
-// two-second window; ambient hints here recur for far longer than that, so the
-// window is minutes rather than seconds.)
-struct RecentLine { std::string text; std::chrono::steady_clock::time_point at; };
+// two-second window.)
+struct RecentLine { std::string text; Clock::time_point at; };
 std::vector<RecentLine> g_recent;
 constexpr int kRecentKeep = 32;
 // Two seconds, as in the FNV mod: only the SAME line arriving twice in a
@@ -218,7 +308,7 @@ const auto kRepeatAfter = std::chrono::seconds(2);
 
 bool SaidRecently(std::string_view text)
 {
-    auto now = std::chrono::steady_clock::now();
+    auto now = Clock::now();
     for (const auto& r : g_recent)
         if (r.text == text && now - r.at < kRepeatAfter) return true;
     return false;
@@ -226,7 +316,7 @@ bool SaidRecently(std::string_view text)
 
 void RememberSaid(std::string_view text)
 {
-    auto now = std::chrono::steady_clock::now();
+    auto now = Clock::now();
     for (auto& r : g_recent)
         if (r.text == text) { r.at = now; return; }
     if ((int)g_recent.size() >= kRecentKeep) g_recent.erase(g_recent.begin());
@@ -246,10 +336,9 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
     // completion, so without this a single System/Ui line would permanently
     // suppress every later Background line (e.g. the world-scan list read on X/C
     // went silent after the first quest/menu announce). Clear it once the reader
-    // is idle — by IsSpeaking when available, plus a wall-clock fallback for the
-    // SAPI path / a flaky IsSpeaking.
-    auto now = std::chrono::steady_clock::now();
-    bool idle = (g_tolk.IsSpeaking && !g_tolk.IsSpeaking());
+    // is idle — as the backend reports it, plus a wall-clock fallback.
+    auto now = Clock::now();
+    bool idle = !SpeakingLocked();
     if (now - g_last_speak_at > std::chrono::milliseconds(2500)) idle = true;
     if (idle) g_current_prio.store(-1);
 
@@ -273,27 +362,16 @@ void Speak(std::string_view text, Priority prio, bool interrupt)
         g_speech_ends_at = start + std::chrono::milliseconds(300 + 45 * (long long)text.size());
     }
 
-    std::wstring w = Utf8ToWide(text);
-
-    if (g_tolk.Output) {
-        // Output() queues; Speak() interrupts. Map by `interrupt`.
-        if (interrupt) g_tolk.Speak(w.c_str(), true);
-        else           g_tolk.Output(w.c_str(), false);
-        return;
-    }
-
-    if (g_sapi) {
-        DWORD flags = SPF_ASYNC | SPF_IS_NOT_XML;
-        if (interrupt) flags |= SPF_PURGEBEFORESPEAK;
-        g_sapi->Speak(w.c_str(), flags, nullptr);
-    }
+    // An interrupting line cuts off whatever was still waiting to be said.
+    if (interrupt) g_queue.clear();
+    g_queue.push_back({ Cmd::Say, std::string(text), interrupt });
+    g_cv.notify_all();
 }
 
 bool IsSpeaking()
 {
     std::lock_guard<std::mutex> lk(g_mutex);
-    if (g_tolk.IsSpeaking && g_tolk.IsSpeaking()) return true;
-    return std::chrono::steady_clock::now() < g_speech_ends_at;
+    return SpeakingLocked();
 }
 
 void Silence()
@@ -301,8 +379,9 @@ void Silence()
     std::lock_guard<std::mutex> lk(g_mutex);
     g_current_prio.store(-1);
     g_speech_ends_at = {};
-    if (g_tolk.Silence) { g_tolk.Silence(); return; }
-    if (g_sapi)         { g_sapi->Speak(nullptr, SPF_PURGEBEFORESPEAK, nullptr); }
+    g_queue.clear();
+    g_queue.push_back({ Cmd::Stop, {}, true });
+    g_cv.notify_all();
 }
 
 void RepeatLast()

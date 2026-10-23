@@ -9,7 +9,7 @@
 ; Build:  "C:\Users\<you>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\fallout3-access.iss
 
 #define AppName      "Fallout 3 Access"
-#define AppVersion   "0.5.7"
+#define AppVersion   "0.5.8"
 #define AppPublisher "Maciej Krynicki"
 #define AppURL       "https://github.com/Bruticus2131/fallout3-access"
 ; Nexus Mods SSO application id ("slug"), issued by Nexus staff. While it is

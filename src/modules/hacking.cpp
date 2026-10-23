@@ -18,18 +18,18 @@ namespace {
 
 // Accessible terminal hacking. With keyboard and mouse the minigame is mouse
 // only (hover a word, click), so a blind player can't select. So we:
+//   * read the lines the terminal types out before the board, as each shows
+//     in full; Enter then finishes the typing at once, as a click does,
 //   * read the candidate words; UP/DOWN browse them (+ spelled),
-//   * ENTER guesses the chosen word: the GAME's cursor is put on the word's
-//     middle letter, and once the game's own highlight holds that word - the
-//     text a click enters - the click is made through the menu itself
-//     (game::ClickHackingSelection). Geometry alone can land a letter off and
-//     waste an attempt on the wrong word, so nothing is entered before the
-//     game confirms it; off by a letter, the cursor steps sideways.
-//     (It used to shove the real mouse and send the button down and up in one
-//     batch - the game never saw that click - steering by the blinking text
-//     cursor, which does not follow the mouse at all.)
+//   * ENTER guesses the chosen word: the menu's own highlight code is handed
+//     the word's row and letter, and only once the game's highlight holds
+//     that word - the text a click enters - is the click made, through the
+//     menu itself (game::EnterHackingCandidate). Nothing is entered that the
+//     game does not confirm. (Steering the game's cursor onto the word never
+//     got it highlighted in play.)
 //   * LEFT/RIGHT browse every readable line of the screen (header + attempt log),
 //   * read the attempt log live (the response after a guess), entry by entry.
+// While a tutorial popup is over the screen, its keys are its own.
 std::vector<std::string> g_words;   // the candidate passwords
 std::vector<std::string> g_list;    // what Up/Down browse: the words, then bracket pairs
 size_t      g_nwords  = 0;          // how many of g_list are words
@@ -48,24 +48,23 @@ bool        g_locked_said = false;
 std::vector<std::string> g_lines;   // current screen text lines (left/right)
 int         g_line_index = -1;
 
-// Attempt-log reading: entries arrive across several frames, so let the COUNT
-// settle, then diff by content against what we've already spoken.
+// Attempt-log reading: the log as last said, and as last read (it has to hold
+// still for a poll - rows land across several frames).
 std::vector<std::string> g_spoken_log;
-int  g_log_count   = 0;
-int  g_log_pending = 0;        // non-zero = settle in progress
+std::vector<std::string> g_log_seen;
 
-// Guess state.
-bool  g_guessing = false;
-int   g_gindex   = -1;         // word being guessed
-float g_gtx = 0, g_gty = 0;    // its middle letter, UI units
-float g_gcw = 0;               // one letter's width there
-int   g_gstep    = 0;          // cursor placings so far: the middle letter, then ±1, ±2...
-int   g_gwait    = 0;          // ticks for the game to move its cursor before checking
+// A guess just asked for: Enter again waits this long, so one press held a
+// moment, or pressed twice, can't spend two attempts.
+DWORD g_enter_quiet_until = 0;
 
 std::string g_hl;              // last announced highlighted word
 
-constexpr float kHackCharWidth = 17.0f;   // the grid's letter width (0x0063FF10 divides by 17)
-constexpr int   kSettleTicks   = 3;
+// The typed-out lines before the board, said once each (by slot).
+std::vector<std::string> g_intro_said;
+bool g_intro_seen = false;     // the screen has been open (to reset on close)
+
+// When a tutorial popup was last over the screen.
+DWORD g_tutorial_at = 0;
 
 bool g_up = false, g_down = false, g_left = false, g_right = false, g_enter = false;
 
@@ -103,16 +102,45 @@ std::string Attempts(int n)
     static const char* const kRu[] = { "попытка", "попытки", "попыток" };
     return strings::Counted(n, kPl, kRu, "attempt", "attempts");
 }
-void EndGuess() { g_guessing = false; g_gindex = -1; g_gstep = 0; g_gwait = 0; }
-
 void Reset()
 {
     g_key.clear(); g_pending.clear(); g_words.clear(); g_lines.clear();
     g_list.clear(); g_nwords = 0; g_possible.clear(); g_last_guess.clear();
     g_spoken_log.clear(); g_hl.clear();
     g_index = -1; g_line_index = -1; g_attempts = 0;
-    g_log_count = 0; g_log_pending = 0; g_locked_said = false;
-    EndGuess();
+    g_log_seen.clear(); g_locked_said = false;
+    g_enter_quiet_until = 0;
+}
+
+// A typed-out line worth saying: not a row of the memory dump ("0xF4E0 ..."),
+// not the bare ">" prompt, with a letter in it. The prompt in front is dropped.
+std::string IntroLine(const std::string& raw)
+{
+    size_t b = raw.find_first_not_of("> \t");
+    if (b == std::string::npos) return {};
+    std::string s = raw.substr(b);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    if (s.size() > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) return {};
+    for (unsigned char c : s)
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0x80) return s;
+    return {};
+}
+
+// Before the board: each line the terminal types out, once it shows in full,
+// in order. One line a tick, so a burst (the typing finished at once) is
+// queued in order rather than run together.
+void ReadIntro(const std::vector<std::pair<int, std::string>>& lines)
+{
+    for (const auto& l : lines) {
+        if (l.first < 0) continue;
+        if (g_intro_said.size() <= static_cast<size_t>(l.first)) g_intro_said.resize(l.first + 1);
+        if (g_intro_said[l.first] == l.second) continue;
+        g_intro_said[l.first] = l.second;
+        const std::string s = IntroLine(l.second);
+        if (s.empty()) continue;
+        tolk::Speak(s, tolk::Priority::Ui, false);
+        return;
+    }
 }
 
 // Read newly-appended log entries once the count has settled.
@@ -167,87 +195,84 @@ void RefreshList(const game::HackingInfo& h)
     if (g_index >= static_cast<int>(g_list.size())) g_index = static_cast<int>(g_list.size()) - 1;
 }
 
-void PollLog()
+// What the log adds, oldest first: the entries of `cur` after the longest run
+// that ends `old` and begins `cur`. The log keeps only so many rows: once it
+// is full the oldest drop off the top as new ones come in, and their COUNT
+// stays the same - the second and third answers went unsaid that way.
+std::vector<std::string> LogAdded(const std::vector<std::string>& old,
+                                  const std::vector<std::string>& cur)
 {
-    std::vector<std::string> log = game::GetHackingLogEntries();
-    if (g_log_pending > 0) {
-        if (static_cast<int>(log.size()) > g_log_pending) {
-            g_log_pending = static_cast<int>(log.size());   // still arriving
-            return;
-        }
-        int grew = static_cast<int>(log.size()) - g_log_count;
-        std::string add;
-        for (auto& e : log) {
-            if (std::find(g_spoken_log.begin(), g_spoken_log.end(), e) != g_spoken_log.end())
-                continue;
-            if (!add.empty()) add += ", ";
-            add += e;
-            g_spoken_log.push_back(e);
-        }
-        // A repeat of earlier text (a second "Wpis odrzucony") is invisible to
-        // the content diff — fall back to reading the newest `grew` rows.
-        if (add.empty() && grew > 0) {
-            for (size_t i = log.size() - grew; i < log.size(); ++i) {
-                if (!add.empty()) add += ", ";
-                add += log[i];
-            }
-        }
-        g_log_count   = static_cast<int>(log.size());
-        g_log_pending = 0;
-        if (!add.empty()) add += LikenessHint(add);
-        if (!add.empty()) tolk::Speak(add, tolk::Priority::Ui, false);
-    } else if (static_cast<int>(log.size()) > g_log_count) {
-        g_log_pending = static_cast<int>(log.size());
-    }
+    for (size_t n = (std::min)(old.size(), cur.size()); n > 0; --n)
+        if (std::equal(old.end() - n, old.end(), cur.begin()))
+            return std::vector<std::string>(cur.begin() + n, cur.end());
+    return cur;
 }
 
-// Put the game's cursor on the word being guessed and enter it once the game
-// highlights it. One step per call; done when entered or given up.
-void TickGuess()
+// A log row as said: the ">" the terminal prints in front dropped.
+std::string LogText(const std::string& e)
 {
-    const std::string want = (g_gindex >= 0 && g_gindex < static_cast<int>(g_list.size()))
-                             ? g_list[g_gindex] : std::string();
-    const bool bracket = g_gindex >= static_cast<int>(g_nwords);
-    if (want.empty()) { EndGuess(); return; }
-    if (g_gwait > 0) { --g_gwait; return; }
+    size_t b = e.find_first_not_of("> \t");
+    return b == std::string::npos ? std::string() : e.substr(b);
+}
 
-    if (g_gstep > 0) {               // the last placing has had time to land
-        const std::string sel = game::GetHackingSelection();
-        const std::string hl  = game::GetHackingHighlightedWord();
-        F3A_INFO("Hacking guess: want %s, try %d, selection '%s', highlight '%s'",
-                 want.c_str(), g_gstep, sel.c_str(), hl.c_str());
-        if (sel == want || (!bracket && hl == want)) {
-            poll::RequestHackGuess();
-            if (!bracket) { g_hl = want; g_last_guess = want; }   // its answer narrows the rest
-            EndGuess();
-            return;
-        }
+void PollLog()
+{
+    // Rows land across several frames: read once the log has held still for a
+    // poll, then say what it gained since it was last said.
+    std::vector<std::string> log = game::GetHackingLogEntries();
+    if (log != g_log_seen) { g_log_seen = log; return; }
+    if (log == g_spoken_log) return;
+    std::string add;
+    for (const auto& e : LogAdded(g_spoken_log, log)) {
+        const std::string t = LogText(e);
+        if (t.empty()) continue;
+        if (!add.empty()) add += ", ";
+        add += t;
     }
-    // The middle letter, then a letter to the right, to the left, two right...
-    // A pair is taken on its opening bracket only: a letter either way at most.
-    if (g_gstep > (bracket ? 2 : static_cast<int>(want.size()) + 1)) {
-        EndGuess();
-        tolk::Speak(strings::T("Nie mogę trafić w słowo.", "Can't reach the word."),
-                    tolk::Priority::System, true);
-        return;
-    }
-    int k = (g_gstep + 1) / 2;
-    if (g_gstep % 2 == 0) k = -k;
-    poll::RequestHackCursorTo(g_gtx + k * g_gcw, g_gty);
-    ++g_gstep;
-    g_gwait = kSettleTicks;
+    g_spoken_log = log;
+    if (!add.empty()) add += LikenessHint(add);
+    if (!add.empty()) tolk::Speak(add, tolk::Priority::Ui, false);
+}
+
+// A tutorial popup is over the screen - or was a moment ago: the Enter that
+// closes it is still held when the screen under it is read again, and must
+// not also guess or skip.
+bool TutorialUp()
+{
+    if (game::IsTutorialOpen()) { g_tutorial_at = GetTickCount(); return true; }
+    return GetTickCount() - g_tutorial_at < 400;
 }
 
 } // namespace
 
 void Tick(float)
 {
+    // Before the board: the lines being typed out. Enter finishes the typing.
+    int stage = -1;
+    const auto intro = game::GetHackingIntro(&stage);
+    if (stage < 0) {
+        if (g_intro_seen) { g_intro_seen = false; g_intro_said.clear(); }
+    } else {
+        if (!g_intro_seen) SeedKeyEdges();   // a key still held from before: not a press
+        g_intro_seen = true;
+        if (stage <= 1) {
+            const bool enter = KeyEdge(VK_RETURN, &g_enter);
+            if (game::IsPauseMenuOpen() || TutorialUp()) return;
+            ReadIntro(intro);
+            if (enter) poll::RequestHackSkipIntro();
+            return;
+        }
+    }
+
     auto h = game::GetHackingInfo();
     if (!h.active) {
         if (!g_key.empty() || g_locked_said) Reset();
         return;
     }
     if (game::IsPauseMenuOpen()) return;   // pause menu over hacking — ignore input
+    // A tutorial popup over the board: the keys are its own (Enter closes it,
+    // and must not also guess).
+    if (TutorialUp()) { SeedKeyEdges(); return; }
 
     // Locked out: nothing left to guess, just read the lock-out screen once.
     if (h.locked && h.words.empty()) {
@@ -299,18 +324,15 @@ void Tick(float)
             "Up and down choose a word, Enter guesses, left and right read the screen."),
             Attempts(h.attempts).c_str(), static_cast<int>(g_words.size()), L,
             static_cast<int>(h.brackets.size()));
-        tolk::Speak(buf, tolk::Priority::Ui, true);
+        tolk::Speak(buf, tolk::Priority::Ui, false);   // after the typed-out lines
         SeedKeyEdges();
         g_spoken_log = game::GetHackingLogEntries();   // don't replay an old log
-        g_log_count = static_cast<int>(g_spoken_log.size());
-        g_log_pending = 0;
+        g_log_seen = g_spoken_log;
         g_line_index = -1;
         g_hl.clear();
         return;
     }
 
-    // ---- Mouse-driven guess in progress ----
-    if (g_guessing) { TickGuess(); return; }   // no other input while guessing
     RefreshList(h);                            // a used bracket pair is gone
 
     // ---- Live: the attempt log (guess responses) ----
@@ -325,7 +347,11 @@ void Tick(float)
 
     // The engine tells us which word the cursor is on, so the player can also
     // sweep the grid with their own mouse and hear what they're pointing at.
-    if (!h.highlighted.empty()) {
+    // Right after a guess the highlight is the guess's own, then the mouse's
+    // again: not news.
+    if (GetTickCount() < g_enter_quiet_until) {
+        if (!h.highlighted.empty()) g_hl = h.highlighted;
+    } else if (!h.highlighted.empty()) {
         if (h.highlighted != g_hl) {
             g_hl = h.highlighted;
             tolk::Speak(g_hl + ", " + Spell(g_hl), tolk::Priority::Ui, true);
@@ -360,7 +386,13 @@ void Tick(float)
         }
     }
     if (left || right) {
-        g_lines = game::GetHackingTextLines();
+        // The header lines, then the log in the order it was written.
+        const auto log = game::GetHackingLogEntries();
+        g_lines.clear();
+        for (const auto& l : game::GetHackingTextLines())
+            if (std::find(log.begin(), log.end(), l) == log.end()) g_lines.push_back(l);
+        for (const auto& e : log)
+            if (!LogText(e).empty()) g_lines.push_back(LogText(e));
         if (!g_lines.empty()) {
             int n = static_cast<int>(g_lines.size());
             if (g_line_index < 0) g_line_index = right ? 0 : n - 1;
@@ -368,18 +400,19 @@ void Tick(float)
             tolk::Speak(g_lines[g_line_index], tolk::Priority::Ui, true);
         }
     }
-    if (enter && g_index >= 0 && g_index < static_cast<int>(g_list.size())) {
-        float tx, ty, cw = 0.0f;
-        if (game::GetHackWordTarget(g_index, &tx, &ty, &cw)) {
-            g_gtx = tx; g_gty = ty;
-            g_gcw = cw > 1.0f ? cw : kHackCharWidth;
-            g_gindex = g_index; g_guessing = true;
-            g_gstep = 0; g_gwait = 0;
-            tolk::Speak((g_index >= static_cast<int>(g_nwords)
-                             ? strings::T("Nawiasy: ", "Brackets: ")
-                             : strings::T("Zgaduję: ", "Guessing: ")) + g_list[g_index],
-                        tolk::Priority::Ui, true);
-        }
+    if (enter && GetTickCount() < g_enter_quiet_until) {
+        // the last guess is still being entered and answered
+    } else if (enter && g_index >= 0 && g_index < static_cast<int>(g_list.size())) {
+        const std::string& want = g_list[g_index];
+        const bool bracket = g_index >= static_cast<int>(g_nwords);
+        g_enter_quiet_until = GetTickCount() + 1200;
+        poll::RequestHackEnter(g_index, want);
+        // The game then highlights it: not said a second time. A word's
+        // answer narrows the rest down.
+        if (!bracket) { g_hl = want; g_last_guess = want; }
+        tolk::Speak((bracket ? strings::T("Nawiasy: ", "Brackets: ")
+                             : strings::T("Zgaduję: ", "Guessing: ")) + want,
+                    tolk::Priority::Ui, true);
     } else if (enter) {
         tolk::Speak(strings::T("Najpierw wybierz słowo strzałkami góra, dół.",
                                "First choose a word with up and down."),

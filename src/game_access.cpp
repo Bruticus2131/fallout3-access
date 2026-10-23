@@ -29,6 +29,8 @@ namespace f3a::game {
 
 namespace rt = fose_rt;
 
+TESForm* FormById(uint32_t id);        // below: the game's form table, any thread
+
 // The game's own UI text (tile labels, item names) is stored in the
 // localization's ANSI code page — Polish FO3 uses Windows-1250, English 1252.
 // Our internal pipeline is UTF-8, so convert game strings on the way out.
@@ -530,6 +532,12 @@ bool Readable(const void* p, size_t n) { return p && !IsBadReadPtr(p, n); }
 // otherwise the lock level (0 Very Easy .. 100 Very Hard, 255 = requires key).
 // Layout: TESObjectREFR+0x40 = BaseExtraList; +0x04 = list head; BSExtraData has
 // type@+0x04, next@+0x08; ExtraLock (type 0x2A) has Data*@+0x0C → lockLevel@0.
+namespace {
+// Leveled locks' real levels, by reference id (RefreshLockLevels).
+std::mutex                        g_lock_mx;
+std::unordered_map<uint32_t, int> g_lock_real;
+}
+
 int ReadLockLevel(const TESObjectREFR* r, int* out_flags)
 {
     if (out_flags) *out_flags = -1;
@@ -544,6 +552,13 @@ int ReadLockLevel(const TESObjectREFR* r, int* out_flags)
                 // flags bit 0 = locked: what the game's own GetLocked tests
                 // (0x50F380 -> [lock+8] & 1).
                 if (out_flags) *out_flags = data[0x08];
+                // A leveled lock (flags bit 2): its real level, as the game
+                // worked it out, when that is known.
+                if (data[0x08] & 0x04) {
+                    std::lock_guard<std::mutex> lk(g_lock_mx);
+                    auto it = g_lock_real.find(r->refID);
+                    if (it != g_lock_real.end()) return it->second;
+                }
                 // The level is ONE byte. The three after it are copied
                 // unchanged from the plugin's record, where they are padding
                 // full of leftovers — read as a whole word they turned a
@@ -950,7 +965,7 @@ bool IsHostileToPlayer(const void* refr)
     if (!OnMainThread()) return false;
     if (!refr || !config::Get().hostile_from_combat) return false;
     auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
-    if (IsBadReadPtr(r, 0x70)) return false;
+    if (IsBadReadPtr(r, 0x70) || !IsLiveRef(r)) return false;
     auto* bf = r->baseForm;
     if (!bf || IsBadReadPtr(bf, 0x10)) return false;
     if (KindOf(bf->typeID) != WorldEntity::Kind::Actor) return false;
@@ -1222,7 +1237,7 @@ std::vector<HostileRef> g_hostile_refs;   // under g_hostile_mx
 int ActorDeadState(const void* refr)
 {
     auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
-    if (!Readable(r, 0x40)) return -1;
+    if (!IsLiveRef(r)) return -1;
     void** vt = *reinterpret_cast<void***>(r);
     if (!Readable(vt, 0x230)) return -1;
     void* isActor = vt[0x100 / 4];
@@ -1396,6 +1411,40 @@ TESForm* FormById(uint32_t id)
         e = *reinterpret_cast<UInt8**>(e);
     }
     return nullptr;
+}
+
+namespace {
+// Inside Fallout3.exe: where every vtable of the game's lives.
+bool InGameImage(const void* p)
+{
+    static UINT_PTR s_lo = 0, s_hi = 0;
+    if (!s_lo) {
+        auto* base = reinterpret_cast<const UInt8*>(GetModuleHandleW(nullptr));
+        auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        s_hi = reinterpret_cast<UINT_PTR>(base) + nt->OptionalHeader.SizeOfImage;
+        s_lo = reinterpret_cast<UINT_PTR>(base);
+    }
+    const UINT_PTR a = reinterpret_cast<UINT_PTR>(p);
+    return a >= s_lo && a < s_hi;
+}
+} // namespace
+
+// The crash this answers (2026-10-23): an enemy left behind in a cell the
+// walk had moved away from was freed; the game's allocator wrote over its
+// first word - the vtable - while its id and position stayed, so the old
+// checks passed, and reading its health through the vtable crashed the game
+// (Fallout3.exe+0x2F4DE1, in the actor-value call).
+bool IsLiveRef(const void* refr, uint32_t id)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x40)) return false;
+    if (id && r->refID != id) return false;
+    if (!InGameImage(*reinterpret_cast<void* const*>(r))) return false;
+    // The form table: a reference created again for a reloaded cell takes
+    // its id to a new address. One the table does not know (yet) passes.
+    const TESForm* f = FormById(r->refID);
+    return !f || f == reinterpret_cast<const TESForm*>(r);
 }
 
 std::string SpaceDisplayName(uint32_t formId)
@@ -2275,6 +2324,10 @@ bool ActivateRefNative(const void* refr, uint32_t expectedRefID)
     if (!refr || IsBadReadPtr(refr, 0x40)) return false;
     if (reinterpret_cast<const TESObjectREFR*>(refr)->refID != expectedRefID)
         return false;                                  // stale / reused pointer
+    if (!IsLiveRef(refr, expectedRefID)) {
+        F3A_INFO("Activate: %08X is no longer a live reference - not activated", expectedRefID);
+        return false;
+    }
     auto* player = rt::Player();
     if (!player) return false;
     reinterpret_cast<ActivateFn>(addr)(const_cast<void*>(refr), player, 0, 0, 1);
@@ -2570,7 +2623,7 @@ float GetPlayerAVMax(uint32_t avCode)
 float GetRefAV(const void* refr, uint32_t avCode)
 {
     auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
-    if (!r || IsBadReadPtr(r, 0xA0)) return -1.0f;
+    if (!r || IsBadReadPtr(r, 0xA0) || !IsLiveRef(r)) return -1.0f;
     // Only an ACTOR has actor values. Everything else — a door, a quest marker,
     // a crate — has something else entirely at +0x9C, and calling through it
     // would be the same mistake that crashed this game on the skeleton path:
@@ -2581,7 +2634,8 @@ float GetRefAV(const void* refr, uint32_t avCode)
     UInt8* avOwner = reinterpret_cast<UInt8*>(r) + 0x9C;
     if (IsBadReadPtr(avOwner, 4)) return -1.0f;
     void** vtbl = *reinterpret_cast<void***>(avOwner);
-    if (!vtbl || IsBadReadPtr(vtbl, 0x10) || IsBadReadPtr(vtbl[3], 1)) return -1.0f;
+    if (!vtbl || !InGameImage(vtbl) || IsBadReadPtr(vtbl, 0x10) || !InGameImage(vtbl[3]))
+        return -1.0f;
     typedef float (__thiscall* GetAVFn)(void* thisptr, UInt32 code);
     float v = reinterpret_cast<GetAVFn>(vtbl[3])(avOwner, avCode);
     return std::isfinite(v) ? v : -1.0f;
@@ -3561,7 +3615,7 @@ constexpr float  kHavokToGame          = 6.999125f;
 // and then writes the rotation matrix into the result at +0x34.
 void* RefNiNode(TESObjectREFR* refr)
 {
-    if (!refr || IsBadReadPtr(refr, 0x40)) return nullptr;
+    if (!refr || IsBadReadPtr(refr, 0x40) || !IsLiveRef(refr)) return nullptr;
     void** vtable = *reinterpret_cast<void***>(refr);
     if (!vtable || IsBadReadPtr(vtable, 0x1D4)) return nullptr;
     using GetNiNodeFn = void* (__thiscall*)(void* self, int flag);
@@ -3997,6 +4051,42 @@ bool IsControlKeyHeld(uint32_t control)
     if (!globs || IsBadReadPtr(globs, 0x1BC0)) return false;
     if (control >= OSInputGlobals::kMaxControlBinds) return false;
     return BoundKeyHeld(globs, control);
+}
+
+// InterfaceManager+0x14C: 1 Alt, 2 Ctrl, 4 Shift (+0x149: the Shift byte the
+// typing uses), set on a key's down event and cleared on its up event by the
+// menus' key translator 0x00620960. InterfaceManager::Update turns Enter into
+// "choose" only with no modifier: with Alt it sends 0xC instead (0x00628D01),
+// with Shift 0xB.
+void ReleaseStuckMenuModifiers()
+{
+    auto* ifm = reinterpret_cast<UInt8*>(rt::IFM());
+    if (!ifm) return;
+    static const UInt8* s_checked = nullptr;        // runs on every message: check once
+    if (ifm != s_checked) {
+        if (IsBadWritePtr(ifm + 0x149, 0x08)) return;
+        s_checked = ifm;
+    }
+    UInt32& flags = *reinterpret_cast<UInt32*>(ifm + 0x14C);
+    struct Mod { UInt32 bit; int vk; const char* name; };
+    static const Mod kMods[] = { { 1, VK_MENU, "Alt" }, { 2, VK_CONTROL, "Ctrl" },
+                                 { 4, VK_SHIFT, "Shift" } };
+    // Since when each one has been held by the game but not by the keyboard.
+    // The game takes a key's events a frame or so after Windows has them, so
+    // a mismatch is only believed after a while.
+    static DWORD s_since[3] = {};
+    const DWORD now = GetTickCount();
+    for (int i = 0; i < 3; ++i) {
+        const Mod& m = kMods[i];
+        const bool stuck = (flags & m.bit) && !(GetAsyncKeyState(m.vk) & 0x8000);
+        if (!stuck) { s_since[i] = 0; continue; }
+        if (!s_since[i]) { s_since[i] = now ? now : 1; continue; }
+        if (now - s_since[i] < 400) continue;
+        flags &= ~m.bit;
+        if (m.bit == 4) ifm[0x149] = 0;
+        s_since[i] = 0;
+        F3A_INFO("Keys: the game still held %s with the key up (Alt+Tab) - released it", m.name);
+    }
 }
 
 // Does the player have a weapon out? Aim assistance has no business running
@@ -4444,7 +4534,7 @@ void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID)
     {
         auto* t = reinterpret_cast<const TESObjectREFR*>(targetRefr);
         if (IsBadReadPtr(t, 0x40) || (expectedRefID && t->refID != expectedRefID) ||
-            !SanePos(t->posX, t->posY, t->posZ)) {
+            !SanePos(t->posX, t->posY, t->posZ) || !IsLiveRef(t, expectedRefID)) {
             F3A_INFO("Teleport: target %p is gone or reused (want %08X) - aborted",
                      targetRefr, expectedRefID);
             return;
@@ -4603,6 +4693,68 @@ const TESObjectREFR* DoorLinkedRef(const void* doorRefr)
 bool IsLoadDoor(const void* doorRefr)
 {
     return DoorLinkedRef(doorRefr) != nullptr;
+}
+
+int LockTier(int level)
+{
+    // iLockLevelMaxVeryEasy .. iLockLevelMaxVeryHard, as the game has them.
+    static const int kMax[] = { 0, 25, 50, 75, 100 };
+    for (int t = 0; t < 5; ++t)
+        if (level <= kMax[t]) return t;
+    return 5;
+}
+
+int LockSkillNeeded(int tier)
+{
+    return tier >= 0 && tier < 5 ? tier * 25 : -1;
+}
+
+void RefreshLockLevels()
+{
+    if (!OnMainThread()) return;
+    // GetLockLevel 0x004E7630 (thiscall on the reference): the lock's level,
+    // plus fLeveledLockMult x the place's level for a leveled one (0x0041CCC0).
+    static int s_ok = -1;
+    if (s_ok < 0) {
+        const UInt8 want[] = { 0x53, 0x56, 0x57, 0x8B, 0xF9, 0x8D, 0x77, 0x40 };
+        auto* fn = reinterpret_cast<const UInt8*>(0x004E7630);
+        s_ok = Readable(fn, sizeof(want)) && std::memcmp(fn, want, sizeof(want)) == 0 ? 1 : 0;
+        F3A_INFO("Locks: the game's GetLockLevel %s", s_ok ? "verified" : "does not match - leveled locks read as stored");
+    }
+    if (!s_ok) return;
+    using GetLockLevelFn = int(__thiscall*)(void*);
+    auto* p = rt::Player();
+    if (!p || !p->parentCell) return;
+    std::unordered_map<uint32_t, int> found;
+    for (TESObjectCELL* cell : NearbyCells(p->parentCell)) {
+        if (!Readable(cell, 0xB4)) continue;
+        struct Node { TESObjectREFR* item; Node* next; };
+        auto* node = reinterpret_cast<Node*>(&cell->objectList);
+        for (int safety = 0; node && safety < 8192; ++safety) {
+            if (!Readable(node, 8)) break;
+            TESObjectREFR* r = node->item;
+            node = node->next;
+            if (!r || !Readable(r, 0x48) || (r->flags & 0x820)) continue;
+            TESForm* base = r->baseForm;
+            if (!Readable(base, 0x08)) continue;
+            const WorldEntity::Kind k = KindOf(base->typeID);
+            if (k != WorldEntity::Kind::Door && k != WorldEntity::Kind::Container) continue;
+            const UInt8* x = FindExtra(r, 0x2A);           // kExtraData_Lock
+            if (!x || x == kExtraUnreadable) continue;
+            const UInt8* data = *reinterpret_cast<const UInt8* const*>(x + 0x0C);
+            if (!Readable(data, 0x0C) || !(data[0x08] & 0x04) || !(data[0x08] & 0x01)) continue;
+            if (!IsLiveRef(r)) continue;
+            const int lvl = reinterpret_cast<GetLockLevelFn>(0x004E7630)(r);
+            if (lvl >= 0 && lvl <= 255) found[r->refID] = lvl;
+        }
+    }
+    static size_t s_logged = (size_t)-1;
+    if (found.size() != s_logged) {
+        s_logged = found.size();
+        F3A_INFO("Locks: %u leveled lock(s) nearby, their real levels read", (unsigned)found.size());
+    }
+    std::lock_guard<std::mutex> lk(g_lock_mx);
+    g_lock_real.swap(found);
 }
 
 bool GetQuestMarkerDoor(const void* targetRefr, Vec3* out, std::string* via)
@@ -6670,8 +6822,10 @@ std::string GetSelectedItemInfo()
 std::string GetActiveMessageText()
 {
     // The plain notification / yes-no / gender-choice popups are Message
-    // menus. Read the whole thing: title, body, and button labels.
+    // menus. Read the whole thing: title, body, and button labels. A
+    // tutorial popup (the first hacking...) the same way.
     Tile* m = FindVisibleMenuTile(kMenuType_Message);
+    if (!m) m = FindVisibleMenuTile(kMenuType_Tutorial);
     if (!m) return {};
     std::string out;
     CollectAllVisibleText(m, 0, out);
@@ -7073,7 +7227,10 @@ bool NudgeLockpick(float delta, bool* atEdge)
 
 namespace {
 struct HackRow { unsigned long addr; std::string chars; Tile* row; int prefix; };
-struct HackWord { std::string text; float tx; float ty; float cw; bool bracket = false; };
+// A candidate and where a click takes it: the row tile, and the letter's place
+// in that row's text ("0xADDR " counted) - the middle letter of a word, the
+// opening bracket of a pair.
+struct HackWord { std::string text; Tile* row = nullptr; int col = -1; bool bracket = false; };
 
 void CollectHackRows(Tile* t, int depth, std::vector<HackRow>& rows)
 {
@@ -7108,37 +7265,30 @@ int CountTilesNamed(Tile* t, int depth, const char* needle)
     }
     return n;
 }
-// Candidate words + the grid tile to "click" to guess each. Words are maximal
-// A-Z runs in the address-ordered char stream (they span rows); a word's click
-// target is the row tile where its first letter lives.
+// Candidate words + where a click on each lands. Words are maximal A-Z runs in
+// the address-ordered char stream (they span rows); a word is clicked on its
+// middle letter.
 void BuildHackWords(Tile* m, std::vector<HackWord>& out)
 {
     std::vector<HackRow> rows;
     CollectHackRows(m, 0, rows);
     std::sort(rows.begin(), rows.end(),
               [](const HackRow& a, const HackRow& b) { return a.addr < b.addr; });
-    struct Loc { Tile* row; int ci; float cw; };   // per content char
+    struct Loc { Tile* row; int ci; };   // per content char
     std::string stream;
     std::vector<Loc> loc;
     for (auto& r : rows) {
-        int fullLen = r.prefix + (int)r.chars.size();
-        float cw = fullLen > 0 ? TileNum(r.row, kTileValue_width) / fullLen : 0.0f;
         for (size_t k = 0; k < r.chars.size(); ++k) {
             stream += r.chars[k];
-            loc.push_back({ r.row, r.prefix + (int)k, cw });
+            loc.push_back({ r.row, r.prefix + (int)k });
         }
     }
     std::string run;
     auto flush = [&](size_t end) {
         if (run.size() >= 4) {
             size_t s = end - run.size(), mid = s + run.size() / 2;
-            HackWord w{ run, 0.0f, 0.0f, 0.0f };
-            if (mid < loc.size()) {
-                Loc& l = loc[mid];
-                w.tx = TileAbsX(l.row) + l.ci * l.cw + l.cw * 0.5f;
-                w.ty = TileAbsY(l.row) + TileNum(l.row, kTileValue_height) * 0.5f;
-                w.cw = l.cw;
-            }
+            HackWord w{ run };
+            if (mid < loc.size()) { w.row = loc[mid].row; w.col = loc[mid].ci; }
             out.push_back(w);
         }
         run.clear();
@@ -7152,9 +7302,27 @@ void BuildHackWords(Tile* m, std::vector<HackWord>& out)
     // Bracket pairs: an opening ( [ { < and its own closing mate later on the
     // SAME line, nothing but symbols between them. The click goes on the
     // opening one - that is where the game highlights the pair.
+    // One used already stays on screen, but the game takes it as a lone
+    // symbol after that (the player heard "can't reach the word"): the menu
+    // keeps the places of the used ones in a list at [menu+0x188] (node: next
+    // +0x00, place +0x08; added by the click, 0x00643A10), a place being
+    // (column * 17 + row) * 12 + the letter in the row - without "0xADDR ".
+    std::vector<int> used;
+    if (auto* mb = reinterpret_cast<const UInt8*>(FindMenuByType(kMenuType_Hacking));
+        Readable(mb, 0x194)) {
+        const UInt8* node = *reinterpret_cast<const UInt8* const*>(mb + 0x188);
+        for (int k = 0; node && k < 64 && Readable(node, 0x0C); ++k) {
+            used.push_back(*reinterpret_cast<const int*>(node + 0x08));
+            node = *reinterpret_cast<const UInt8* const*>(node);
+        }
+    }
+    auto placeOf = [](Tile* row, int letter) {
+        Tile* t = row ? row->parent : nullptr;   // the row's target tile holds its place
+        if (!t) return -1;
+        return (static_cast<int>(TileNum(t, kTileValue_user0)) * 17 +
+                static_cast<int>(TileNum(t, kTileValue_listindex))) * 12 + letter;
+    };
     for (auto& r : rows) {
-        int fullLen = r.prefix + (int)r.chars.size();
-        float cw = fullLen > 0 ? TileNum(r.row, kTileValue_width) / fullLen : 0.0f;
         for (size_t i = 0; i < r.chars.size(); ++i) {
             const char o = r.chars[i];
             const char c = o == '(' ? ')' : o == '[' ? ']' : o == '{' ? '}' : o == '<' ? '>' : 0;
@@ -7163,16 +7331,15 @@ void BuildHackWords(Tile* m, std::vector<HackWord>& out)
                 const char ch = r.chars[j];
                 if (ch >= 'A' && ch <= 'Z') break;
                 if (ch != c) continue;
-                HackWord b{ r.chars.substr(i, j - i + 1), 0.0f, 0.0f, cw, true };
-                b.tx = TileAbsX(r.row) + (r.prefix + (int)i) * cw + cw * 0.5f;
-                b.ty = TileAbsY(r.row) + TileNum(r.row, kTileValue_height) * 0.5f;
-                out.push_back(b);
+                const int place = placeOf(r.row, static_cast<int>(i));
+                if (std::find(used.begin(), used.end(), place) == used.end())
+                    out.push_back({ r.chars.substr(i, j - i + 1), r.row, r.prefix + (int)i, true });
                 break;
             }
         }
     }
     // Words first, brackets after: the order the module's list and
-    // GetHackWordTarget's numbering share.
+    // EnterHackingCandidate's numbering share.
     std::stable_partition(out.begin(), out.end(), [](const HackWord& w) { return !w.bracket; });
 }
 } // namespace
@@ -7247,11 +7414,10 @@ std::string GetHackingHighlightedWord()
 // HackingMenu::HandleClick (vtable 0x00E05354 slot 3, 0x00643780), while the
 // grid takes guesses (stage [menu+0x1C4] == 2), enters the text of the
 // highlight object at menu+0xE0 - the word, bracket pair or symbol under the
-// game's cursor, worked out each frame from the tile under it
+// game's cursor, worked out each frame (0x00641310) from the tile under it
 // (InterfaceManager::activeTile) and the cursor's x. It does so only for a tile
 // of the grid (parent == [menu+0x114], hacking_password_file_rect) and reads
-// that tile's row for a bracket pair - so the click goes to the tile under the
-// cursor, as the mouse's does.
+// that tile's row for a bracket pair.
 std::string GetHackingSelection()
 {
     Menu* menu = FindMenuByType(kMenuType_Hacking);
@@ -7263,25 +7429,159 @@ std::string GetHackingSelection()
     return out;
 }
 
-bool ClickHackingSelection()
+// A candidate entered as a click on it enters it, with no cursor to steer.
+// The menu's own highlight code (0x00641310, run each frame on the tile under
+// the cursor) is handed the grid row the candidate lies on and the letter's
+// column. It works out the text a click there would enter - a word, a bracket
+// pair, a symbol - as it does under the mouse, and only when that is the
+// wanted text does HandleClick enter it.
+// The column (0x0063FF10: (x - the row's x) / 17) comes from the gamepad's own
+// x ([menu+0x1CC], UI units) on its own row ([menu+0x1C8]) when one is in use;
+// with the mouse from one of two cursors (IFM+0x2C, or IFM+0x4AC while
+// IFM+0x168 is set or a Pip-Boy page counts as open) - and in play the first
+// gave -1, out of the row (log 2026-10-23 20:08). So for this one call the menu
+// is told a gamepad is in use (0x01075B28 set, 0x01075CAC clear): then row and
+// x are only ours. All of it is put back before returning; nothing else runs
+// in between (main thread). (Moving the game's cursor onto the word never got
+// it highlighted either: the rows' x had been summed over every enclosing
+// tile, while the game counts only the "locus" ones - 0x00BECFB0.)
+int EnterHackingCandidate(int idx, const std::string& want, std::string* got)
 {
-    Menu* menu = FindMenuByType(kMenuType_Hacking);
-    auto* mb = reinterpret_cast<UInt8*>(menu);
-    if (!mb || IsBadReadPtr(mb, 0x1C8)) return false;
-    const UInt32 stage = *reinterpret_cast<UInt32*>(mb + 0x1C4);
-    Tile* grid = *reinterpret_cast<Tile**>(mb + 0x114);
-    auto* ifm = rt::IFM();
-    Tile* hit = ifm ? ifm->activeTile : nullptr;
-    if (stage != 2 || !grid || !hit || IsBadReadPtr(hit, 0x40) || hit->parent != grid) {
-        F3A_INFO("ClickHackingSelection: not on the grid (stage %u, tile %p, grid %p)",
-                 stage, (void*)hit, (void*)grid);
-        return false;
+    if (got) got->clear();
+    if (!OnMainThread()) return -1;
+    using ColumnFn    = int   (__thiscall*)(Menu*);
+    using HighlightFn = void  (__thiscall*)(Menu*);
+    using AbsXFn      = float (__thiscall*)(Tile*);
+    constexpr uintptr_t kColumn = 0x0063FF10, kHighlight = 0x00641310, kAbsX = 0x00BECFB0;
+    constexpr uintptr_t kClearHighlight = 0x00640CF0;   // frees [menu+0xE0], the grid's marks off
+    static const UInt8 clear[] = { 0x56, 0x57, 0x8B, 0xF9, 0x8B, 0x87, 0xE0, 0x00, 0x00, 0x00 };
+    static int s_ok = -1;
+    if (s_ok < 0) {
+        const UInt8 col[]  = { 0x51, 0x80, 0x3D, 0x28, 0x5B, 0x07, 0x01, 0x00, 0x56, 0x57 };
+        const UInt8 high[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x83, 0xEC, 0x54 };
+        const UInt8 absx[] = { 0x83, 0xEC, 0x08, 0x56, 0x68, 0xA1, 0x0F, 0x00, 0x00 };
+        auto same = [](uintptr_t at, const UInt8* want, size_t n) {
+            auto* p = reinterpret_cast<const UInt8*>(at);
+            return Readable(p, n) && std::memcmp(p, want, n) == 0;
+        };
+        s_ok = same(kColumn, col, sizeof(col)) && same(kHighlight, high, sizeof(high)) &&
+               same(kAbsX, absx, sizeof(absx)) ? 1 : 0;
+        F3A_INFO("Hacking: the menu's highlight code %s",
+                 s_ok ? "verified" : "does not match - guessing off");
     }
-    const UInt32 id = static_cast<UInt32>(TileNum(hit, kTileValue_id));
-    F3A_INFO("ClickHackingSelection: '%s' (tile %p, id %u)",
-             GetHackingSelection().c_str(), (void*)hit, id);
-    menu->HandleClick(id, hit);
+    if (!s_ok) return -1;
+    Menu* menu = FindMenuByType(kMenuType_Hacking);
+    Tile* m = FindVisibleMenuTile(kMenuType_Hacking);
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    // The interface manager as this menu's code reaches it.
+    auto* eng = *reinterpret_cast<UInt8* const*>(0x010761D0);
+    if (!m || !Readable(mb, 0x1E0) || !Readable(eng, 0xD0)) return -1;
+    if (*reinterpret_cast<UInt32*>(mb + 0x1C4) != 2) return -1;   // not taking guesses
+    Tile* grid = *reinterpret_cast<Tile**>(mb + 0x114);
+    std::vector<HackWord> words;
+    BuildHackWords(m, words);
+    if (!grid || idx < 0 || idx >= (int)words.size() || words[idx].text != want) return -1;
+    // The tile a click lands on: the row's, the one right under the grid.
+    Tile* row = words[idx].row;
+    for (int d = 0; row && d < 4 && row->parent != grid; ++d) row = row->parent;
+    const int col = words[idx].col;
+    if (!row || row->parent != grid || col < 0) return -1;
+    const float ax = reinterpret_cast<AbsXFn>(kAbsX)(row);
+    if (!(std::isfinite(ax) && std::fabs(ax) < 20000.0f)) return -1;
+
+    auto* padOn  = reinterpret_cast<UInt8*>(0x01075B28);
+    auto* padOff = reinterpret_cast<UInt8*>(0x01075CAC);
+    Tile** active = reinterpret_cast<Tile**>(eng + 0xCC);
+    Tile** padRow = reinterpret_cast<Tile**>(mb + 0x1C8);
+    int*   padX   = reinterpret_cast<int*>(mb + 0x1CC);
+    const UInt8 savedOn = *padOn, savedOff = *padOff;
+    Tile* const savedActive = *active;
+    Tile* const savedRow = *padRow;
+    const int   savedX = *padX;
+    *padOn = 1;
+    *padOff = 0;
+    *active = row;
+    *padRow = row;
+    const int x0 = static_cast<int>(ax) + col * 17 + 8;   // the middle of the letter
+    *padX = x0;
+    const int c = reinterpret_cast<ColumnFn>(kColumn)(menu);
+    int result = 0;
+    std::string sel;
+    if (c == col) {
+        mb[0x1D8] = 0;                                    // as the game's own moves do
+        *reinterpret_cast<Tile**>(mb + 0x1C0) = nullptr;  // work it out afresh
+        reinterpret_cast<HighlightFn>(kHighlight)(menu);
+        sel = GetHackingSelection();
+        if (sel == want) {
+            menu->HandleClick(static_cast<UInt32>(TileNum(row, kTileValue_id)), row);
+            result = 1;
+        } else if (Readable(reinterpret_cast<const void*>(kClearHighlight), sizeof(clear)) &&
+                   std::memcmp(reinterpret_cast<const void*>(kClearHighlight), clear, sizeof(clear)) == 0) {
+            // Not the wanted text: no highlight left behind for a click to enter.
+            reinterpret_cast<HighlightFn>(kClearHighlight)(menu);
+        }
+    }
+    *padOn = savedOn;
+    *padOff = savedOff;
+    if (!(savedOn && !savedOff)) {   // a gamepad's selection would have gone there anyway
+        *padRow = savedRow;
+        *padX = savedX;
+        if (*active == row) *active = savedActive;
+    }
+    F3A_INFO("Hacking: '%s' -> row %p at x %.0f, column %d (the game's %d), highlight '%s'%s",
+             want.c_str(), (void*)row, ax, col, c, sel.c_str(),
+             result == 1 ? " - entered" : " - not entered");
+    if (got) *got = sel;
+    return result;
+}
+
+std::vector<std::pair<int, std::string>> GetHackingIntro(int* stage)
+{
+    std::vector<std::pair<int, std::string>> out;
+    if (stage) *stage = -1;
+    if (!FindVisibleMenuTile(kMenuType_Hacking)) return out;
+    auto* mb = reinterpret_cast<const UInt8*>(FindMenuByType(kMenuType_Hacking));
+    if (!Readable(mb, 0x1C8)) return out;
+    if (stage) *stage = static_cast<int>(*reinterpret_cast<const UInt32*>(mb + 0x1C4));
+    for (int i = 0; i < 46; ++i) {
+        const UInt8* ht = *reinterpret_cast<const UInt8* const*>(mb + 0x28 + i * 4);
+        if (!ht || !Readable(ht, 0x2C) || !ht[0x29]) continue;
+        const char* s = *reinterpret_cast<const char* const*>(ht);
+        if (!Readable(s, 1)) continue;
+        std::string line;
+        for (int k = 0; k < 200 && s[k]; ++k) {
+            if (((reinterpret_cast<uintptr_t>(s + k + 1)) & 0xFFF) == 0 && !Readable(s + k + 1, 1)) break;
+            line += s[k];
+        }
+        if (!line.empty()) out.push_back({ i, GameStrToUtf8(line.c_str()) });
+    }
+    return out;
+}
+
+bool SkipHackingIntro()
+{
+    if (!OnMainThread()) return false;
+    Menu* menu = FindMenuByType(kMenuType_Hacking);
+    auto* mb = reinterpret_cast<const UInt8*>(menu);
+    if (!FindVisibleMenuTile(kMenuType_Hacking) || !Readable(mb, 0x1C8)) return false;
+    const UInt32 stage = *reinterpret_cast<const UInt32*>(mb + 0x1C4);
+    if (stage > 1) return false;
+    // As a click anywhere does then (and the gamepad's button, 0x006400F0).
+    menu->HandleClick(0xFFFFFFFF, nullptr);
+    F3A_INFO("Hacking: the type-out skipped (stage %u)", stage);
     return true;
+}
+
+bool IsTutorialOpen() { return FindVisibleMenuTile(kMenuType_Tutorial) != nullptr; }
+
+bool HackingTakesEnter()
+{
+    if (!FindVisibleMenuTile(kMenuType_Hacking)) return false;
+    if (FindVisibleMenuTile(kMenuType_Start) || FindVisibleMenuTile(kMenuType_Tutorial) ||
+        FindVisibleMenuTile(kMenuType_Message))
+        return false;
+    auto* mb = reinterpret_cast<const UInt8*>(FindMenuByType(kMenuType_Hacking));
+    return Readable(mb, 0x1C8) && *reinterpret_cast<const UInt32*>(mb + 0x1C4) <= 2;
 }
 
 namespace {
@@ -7364,7 +7664,9 @@ void CollectHackLogEntries(Tile* t, int depth, std::vector<HackLogEntry>& out)
 } // namespace
 
 // The attempt log split into entries, oldest first. The tile tree hands them
-// back in arbitrary order, so sort by `listindex` — the row order on screen.
+// back in arbitrary order, so sort by `listindex`: the log fills from the
+// bottom up, 0 the newest ("3/7 prawidłowe." came before "Wpis odrzucony"
+// and the guessed word when read the other way).
 std::vector<std::string> GetHackingLogEntries()
 {
     Tile* m = FindVisibleMenuTile(kMenuType_Hacking);
@@ -7372,7 +7674,7 @@ std::vector<std::string> GetHackingLogEntries()
     std::vector<HackLogEntry> es;
     CollectHackLogEntries(m, 0, es);
     std::stable_sort(es.begin(), es.end(),
-                     [](const HackLogEntry& a, const HackLogEntry& b) { return a.index < b.index; });
+                     [](const HackLogEntry& a, const HackLogEntry& b) { return a.index > b.index; });
     std::vector<std::string> out;
     out.reserve(es.size());
     for (auto& e : es) out.push_back(e.text);
@@ -7855,21 +8157,6 @@ std::vector<std::string> GetHackingTextLines()
     Tile* m = FindVisibleMenuTile(kMenuType_Hacking);
     if (m) CollectHackTextLines(m, 0, out);
     return out;
-}
-
-// UI screen position of the idx-th candidate word's middle letter (for the
-// mouse-driven guess). Returns false if not open / index invalid.
-bool GetHackWordTarget(int idx, float* x, float* y, float* charWidth)
-{
-    Tile* m = FindVisibleMenuTile(kMenuType_Hacking);
-    if (!m || idx < 0) return false;
-    std::vector<HackWord> words;
-    BuildHackWords(m, words);
-    if (idx >= (int)words.size()) return false;
-    if (x) *x = words[idx].tx;
-    if (y) *y = words[idx].ty;
-    if (charWidth) *charWidth = words[idx].cw;
-    return true;
 }
 
 // True while the pause menu (Start) is up — hacking keys must stop then.

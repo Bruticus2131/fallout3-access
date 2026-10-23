@@ -5,7 +5,8 @@ dist/
 *.vs/
 *.vcxproj.filters
 CMakeUserPresets.json
-third_party/tolk/include/Tolk.h
+# Tolk (speech up to 0.5.7) - replaced by Prism, fetched by CMake
+third_party/tolk/
 third_party/fose/
 xFOSE-main/
 xFOSE-main.zip
