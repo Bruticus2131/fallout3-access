@@ -2,6 +2,7 @@
 #include "f3a/player_mover.h"
 #include "f3a/fose_runtime.h"
 #include "f3a/engine_hooks.h"
+#include "f3a/navmesh.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/game_access.h"
 #include "f3a/modules.h"
@@ -137,6 +138,10 @@ bool IsMainMenuBackdrop(UInt32 menuType)
 
 // DumpActiveMenuTree lives outside the anonymous namespace so the public
 // header can forward-declare it — see below after Stop().
+// F11 in a menu the main thread frees on a key press (VATS, the quantity
+// prompt): the dump is written there instead, by MainThreadWork, where the
+// menu cannot go away under it.
+std::atomic<bool> g_dump_on_main{ false };
 
 // Need this many consecutive ticks of the new value before we report it.
 constexpr int kDebounceTicks = 2;
@@ -1149,9 +1154,14 @@ int  g_aim_reapply = 0;         // passes until the held aim is re-applied
 // "target down"; any other enemy's is said by name (TrackHostileHealth).
 std::atomic<const void*> g_hit_watch_refr{ nullptr };
 std::atomic<uint32_t>    g_hit_watch_id{ 0 };
-// No line of fire: how far the blocker is, and how high off the floor.
-std::atomic<uint32_t> g_block_dist{ 0 }, g_block_up{ 0 };
+// No line of fire: how far the blocker is, and how high off the floor; where
+// to step for a clear shot (side -1 left, 1 right, 0 none near, and how far).
+std::atomic<uint32_t> g_block_dist{ 0 }, g_block_up{ 0 }, g_block_step{ 0 };
+std::atomic<int>      g_block_side{ 0 };
 std::atomic<bool>     g_block_pending{ false };
+// The target whose cover was already reported, so the solver's report and the
+// line-of-sight watch's do not both say it.
+uint32_t g_cover_said_id = 0;
 int g_rayrefine_delay = 0;
 std::atomic<int>  g_raymap_x{ 0 }, g_raymap_y{ 0 }, g_raymap_z{ 0 };
 // What the ray found, kept as an OFFSET from the reference's origin rather than
@@ -1503,7 +1513,9 @@ game::LootMenuInfo    g_loot_snapshot;
 // Which limb the cursor is being steered to (-1 = idle), and whether to click
 // once it arrives.
 std::atomic<bool> g_vats_attack{ false };   // queue a shot on the next pass
-std::atomic<int>  g_vats_cursor_to{ -1 };   // limb to put the menu cursor on
+// The game's date and time (GameClockNow), read on the main thread.
+std::atomic<int>   g_clock_ymd{ 0 };          // year * 10000 + (month + 1) * 100 + day; 0 = none
+std::atomic<int>   g_clock_hour_bits{ 0 };
 int   g_vats_click_hold = 0;     // frames left holding the attack button down
 // Which limb VATS is aimed at, sampled on the main thread. Carries text, so it
 // uses the same sequence guard as the loot overlay.
@@ -1523,11 +1535,24 @@ bool              g_special_desc_tried = false;   // main thread only
 // The aim key is held: widen the engine's bullet correction (main thread).
 std::atomic<bool> g_engine_aim_want{ false };
 // The point the held aim is on this frame (lead and offsets in), for the shot.
+std::atomic<bool>  g_aimtrack_face{ false };   // the held aim is Home's (RequestFaceTrack)
+std::atomic<bool>  g_home_reset{ false };      // a new Home aim: its search starts over
+std::atomic<uint32_t> g_home_missed{ 0 };      // Home could not put the crosshair on this ref
+std::atomic<bool>  g_home_say_miss{ true };    // ...and that is to be said (not for the walk's own aim)
 std::atomic<int>   g_shot_x{ 0 }, g_shot_y{ 0 }, g_shot_z{ 0 };
 std::atomic<DWORD> g_shot_at{ 0 };
+// What the game's Aim holds (world_scan): the only thing a shot is bent onto.
+// The held view may be on something else for a moment - the walk's look at
+// what it reached, Home - and that is not a target.
+std::atomic<uint32_t> g_shot_target{ 0 };
 
 // Press the inventory's "Upuść" button (HandleClick → main thread only).
 std::atomic<bool> g_drop_pending{ false };
+// Ledges on a walk's route, asked about on the main thread (a wall there?).
+std::mutex g_ledge_mx;
+std::vector<std::pair<game::Vec3, game::Vec3>> g_ledge_ask;
+std::vector<char> g_ledge_open;
+std::atomic<int>  g_ledge_state{ 0 };   // 0 none, 1 asked, 2 answered
 // Hacking: the candidate to enter (its number and text), and the type-out to skip.
 std::mutex         g_hack_mx;
 int                g_hack_idx = -1;
@@ -1682,7 +1707,12 @@ void PollXpChange()
 // enemies' own health, read on this thread (a virtual call per actor) every
 // 100 ms. Who to watch comes from RefreshHostiles; an enemy stays watched
 // until it dies or is gone, since a dying one drops off that list.
-struct HpWatch { const void* refr; uint32_t id; std::string name; float hp; };
+// Only the PLAYER's hits and kills are heard: the game records who dealt the
+// last hit and who killed (game::LastHitByPlayer, KilledByPlayer). In the
+// vault a guard's swings at a radroach that was after the player played the
+// hit and "down" sounds as if they were the player's own.
+struct HpWatch { const void* refr; uint32_t id; std::string name; float hp;
+                 bool other_logged = false; };
 std::vector<HpWatch> g_hp_watch;
 DWORD g_hp_watch_at = 0;
 DWORD g_hit_cue_at  = 0;
@@ -1713,7 +1743,11 @@ void TrackHostileHealth()
         const float hp = game::GetRefAV(w.refr, 16);            // 16 = health
         const bool dead = game::RefDeadState(w.refr) == 1 || (hp >= 0.0f && hp <= 0.0f);
         if (dead) {
-            if (w.hp > 0.0f) {
+            const int byPlayer = w.hp > 0.0f ? game::KilledByPlayer(w.refr) : -1;
+            if (w.hp > 0.0f && byPlayer != 1)
+                F3A_INFO("Kill: %08X '%s' - not by the player (%d), not said", w.id,
+                         w.name.c_str(), byPlayer);
+            if (w.hp > 0.0f && byPlayer == 1) {
                 // Two falling notes, unlike the hit blip and the on-target
                 // tone. The one the player aims at is "target down"; others by
                 // name, so in a crowd it is clear which one is finished.
@@ -1731,7 +1765,26 @@ void TrackHostileHealth()
             continue;
         }
         if (hp >= 0.0f) {
-            if (w.hp >= 0.0f && hp < w.hp - 0.5f) hit = true;   // a drop; healing is not a hit
+            if (w.hp >= 0.0f && hp < w.hp - 0.5f) {             // a drop; healing is not a hit
+                const int byPlayer = game::LastHitByPlayer(w.refr);
+                // No record of who hit it (a mirelurk's three hits read none):
+                // the player's if the player fired a moment ago.
+                const DWORD shot = engine::LastPlayerShotAt();
+                const bool justShot = shot && now - shot < 1500;
+                if (byPlayer == 1 || (byPlayer < 0 && justShot)) {
+                    hit = true;
+                    if (byPlayer < 0 && !w.other_logged) {
+                        w.other_logged = true;
+                        F3A_INFO("Hit on %08X '%s' - no record of who (%d), the player fired "
+                                 "%u ms ago: counted as the player's", w.id, w.name.c_str(),
+                                 byPlayer, (unsigned)(now - shot));
+                    }
+                } else if (!w.other_logged) {
+                    w.other_logged = true;
+                    F3A_INFO("Hit on %08X '%s' - not by the player (%d), no sound", w.id,
+                             w.name.c_str(), byPlayer);
+                }
+            }
             w.hp = hp;
         }
         ++i;
@@ -1753,6 +1806,8 @@ void MainThreadWork()
     // The console (~): the line being typed is read through the engine, so
     // its reader lives here.
     modules::devconsole::MainThreadTick();
+    // F11 pressed in VATS or the quantity prompt (see DumpActiveMenuTree).
+    if (g_dump_on_main.exchange(false)) DumpActiveMenuTree();
     // Just after a teleport the game is still moving the player and the
     // cells round them: nothing here touches the world until it has settled
     // (see game::WorldSettling). Requests wait.
@@ -1772,6 +1827,19 @@ void MainThreadWork()
         }
     }
     if (config::IsEnabled()) TrackHostileHealth();
+    // The game's date and time, for the Pip-Boy's Data page (pipboy.cpp).
+    {
+        static DWORD s_clock_at = 0;
+        const DWORD now = GetTickCount();
+        if (now - s_clock_at >= 1000) {
+            s_clock_at = now;
+            game::GameClock c;
+            if (game::ReadGameClock(&c)) {
+                g_clock_hour_bits.store(FToBits(c.hour));
+                g_clock_ymd.store(c.year * 10000 + (c.month + 1) * 100 + c.day);
+            }
+        }
+    }
     // The real levels of leveled locks, for the scanner and the walk.
     {
         static DWORD s_locks_at = 0;
@@ -1815,7 +1883,20 @@ void MainThreadWork()
     }
     if (g_teleport_pending.exchange(false)) {
         StopAimTrack();               // aimed at the place being left
-        game::TeleportPlayerToRef(g_teleport_refr, g_teleport_refid);
+        // Onto walkable ground beside the target when there is some loaded
+        // round it (a target here), not into it: MoveTo puts the player on
+        // its origin - inside a mailbox, from where no walk got anywhere.
+        game::Vec3 at{}, spot{}, off{};
+        const bool beside = g_teleport_refr &&
+            game::TargetSharesPlayerSpace(g_teleport_refr) &&
+            game::GetRefPosition(g_teleport_refr, g_teleport_refid, &at) &&
+            navmesh::StandingSpotNear(at, 56.0f, 260.0f, &spot);
+        if (beside) {
+            off = { spot.x - at.x, spot.y - at.y, spot.z - at.z + 4.0f };
+            F3A_INFO("Teleport: beside the target, %.0f units off its origin",
+                     std::sqrt(off.x * off.x + off.y * off.y));
+        }
+        game::TeleportPlayerToRef(g_teleport_refr, g_teleport_refid, beside ? &off : nullptr);
         if (game::WorldSettling()) { g_hp_watch.clear(); return; }
     }
     AnnounceStatus();
@@ -1987,6 +2068,20 @@ void MainThreadWork()
                         tolk::Priority::System, true);
     }
     if (g_hack_skip_pending.exchange(false)) game::SkipHackingIntro();
+    if (g_ledge_state.load() == 1) {
+        std::vector<std::pair<game::Vec3, game::Vec3>> ask;
+        {
+            std::lock_guard<std::mutex> lk(g_ledge_mx);
+            ask = g_ledge_ask;
+        }
+        std::vector<char> open;
+        for (const auto& l : ask) open.push_back(game::LedgeLooksOpen(l.first, l.second) ? 1 : 0);
+        {
+            std::lock_guard<std::mutex> lk(g_ledge_mx);
+            g_ledge_open = std::move(open);
+        }
+        g_ledge_state.store(2);
+    }
     // Lockpicking: the bobby pin, moved by the arrow keys.
     if (int units = g_lockpick_nudge.exchange(0)) {
         bool edge = false;
@@ -2083,32 +2178,6 @@ void MainThreadWork()
     // What is genuinely needed is the attack BUTTON, which queues a shot at
     // whatever is currently selected. A button is not a movement: nothing on
     // screen and nothing outside the game moves because of this.
-    // Move the ENGINE's cursor onto a body-part marker. Done here because it
-    // calls into the game, and this block runs on the game's own thread — the
-    // lesson from the aim-point crash, which did the same kind of work from the
-    // polling thread and took the game down.
-    if (menu::IsOpen(menu::Id::VATS)) {
-        int want = g_vats_cursor_to.exchange(-1);
-        if (want >= 0) {
-            auto limbs = game::GetVatsLimbs();
-            if (want < (int)limbs.size()) {
-                // The CENTRE of the body-part marker, and through the engine's
-                // own cursor position. Writing only the cursor tile (the old
-                // way) moved a picture: the engine went on testing its real
-                // cursor, which stayed wherever the mouse was — so VATS kept
-                // picking the torso or the right leg whatever W and S said.
-                const auto& L = limbs[want];
-                float cx = L.x + (L.w > 0.0f ? L.w * 0.5f : 0.0f);
-                float cy = L.y + (L.h > 0.0f ? L.h * 0.5f : 0.0f);
-                bool moved = game::MoveEngineCursorTo(cx, cy);
-                if (!moved) game::SetMenuCursorPos(cx, cy);   // old way, harmless
-                F3A_INFO("VATS cursor: -> %s at (%.0f,%.0f) size %.0fx%.0f | "
-                         "engine cursor moved=%d",
-                         L.name.c_str(), cx, cy, L.w, L.h, (int)moved);
-            }
-        }
-    }
-
     if (g_vats_attack.exchange(false) && menu::IsOpen(menu::Id::VATS)) {
         // The game samples input once per frame, so a press and a release
         // delivered together can land inside one sample and register as no
@@ -2312,6 +2381,9 @@ void Tick(float dt)
                 // A game loaded (not just a door): the audio description and
                 // exploration start afresh.
                 bool gameLoad = g_game_load_pending.exchange(false);
+                // Also after a door: a walk that went through it is stopped
+                // during the load, and must not walk on in the new place.
+                mover::OnGameLoaded();
                 modules::audiodesc::OnLoadingClosed(gameLoad);
                 if (gameLoad) modules::explore::ResetSession();
                 g_pov_announced.store(-1);
@@ -2586,6 +2658,27 @@ void RequestHackEnter(int idx, const std::string& want)
     g_hack_enter_pending.store(true);
 }
 void RequestHackSkipIntro() { g_hack_skip_pending.store(true); }
+
+void RequestLedgeCheck(const std::vector<std::pair<game::Vec3, game::Vec3>>& legs)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_ledge_mx);
+        g_ledge_ask = legs;
+        g_ledge_open.clear();
+    }
+    g_ledge_state.store(1);
+}
+
+bool LedgeCheckAnswer(std::vector<char>* open)
+{
+    if (g_ledge_state.load() != 2) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_ledge_mx);
+        if (open) *open = g_ledge_open;
+    }
+    g_ledge_state.store(0);
+    return true;
+}
 void RequestLockpickNudge(int units) { g_lockpick_nudge.fetch_add(units); }
 
 bool QuantityState(int* amount, int* maximum)
@@ -2617,7 +2710,17 @@ bool LootMenuState(game::LootMenuInfo* out)
 
 
 void RequestVatsAttack() { g_vats_attack.store(true); }
-void RequestVatsCursorTo(int limbIndex) { g_vats_cursor_to.store(limbIndex); }
+
+bool GameClockNow(game::GameClock* out)
+{
+    const int ymd = g_clock_ymd.load();
+    if (!out || ymd <= 0) return false;
+    out->year  = ymd / 10000;
+    out->month = (ymd / 100) % 100 - 1;
+    out->day   = ymd % 100;
+    out->hour  = BitsToF(g_clock_hour_bits.load());
+    return true;
+}
 
 bool VatsPickState(game::VatsPick* out)
 {
@@ -2635,6 +2738,8 @@ bool VatsPickState(game::VatsPick* out)
 
 void SetEngineAimAssist(bool on) { g_engine_aim_want.store(on); }
 
+void SetShotTarget(uint32_t refid) { g_shot_target.store(refid); }
+
 namespace {
 // The shot's point (see engine::PrepareShot): only while the aim key holds a
 // live enemy, and only a point worked out a moment ago.
@@ -2644,7 +2749,8 @@ bool ShotAimPoint(float out[3])
         return false;
     const uint32_t id = g_aimtrack_refid.load();
     const void* r = g_aimtrack_refr.load();
-    if (!id || !r || !game::IsLiveRef(r, id) || game::IsKnownDead(id)) return false;
+    if (!id || !r || id != g_shot_target.load() || g_aimtrack_face.load()) return false;
+    if (!game::IsLiveRef(r, id) || game::IsKnownDead(id)) return false;
     if (GetTickCount() - g_shot_at.load() > 250) return false;
     out[0] = BitsToF(g_shot_x.load());
     out[1] = BitsToF(g_shot_y.load());
@@ -2748,6 +2854,148 @@ void RequestAim(bool doYaw, float yawDeg, bool doPitch, float pitchDeg)
 //
 // The FNV accessibility mod sidesteps this by running from NVSE's main-loop
 // message; FOSE has no equivalent, so the movement hook is ours.
+//
+// Where to step for a clear shot past cover. A mirelurk 1200 units off stood
+// behind a cave rock the player could not see: "move or go round" left them
+// guessing which way. So: walkable ground beside the player, left or right of
+// the line to the target, nothing in the way of stepping there, and from
+// there the engine's ray reaches the target - the nearest such step. Returns
+// the side (-1 left, 1 right, 0 none within reach). Main thread (rays).
+namespace {
+int FindFiringSpot(const game::Vec3& target, uint32_t want, float* outStep)
+{
+    auto* pl = fose_rt::Player();
+    if (!pl || !outStep) return 0;
+    const game::Vec3 feet{ pl->posX, pl->posY, pl->posZ };
+    game::Vec3 eye{ feet.x, feet.y, feet.z + 100.0f };
+    game::GetCameraPos(&eye);
+    float fx = target.x - feet.x, fy = target.y - feet.y;
+    const float len = std::sqrt(fx * fx + fy * fy);
+    if (!(len > 64.0f)) return 0;
+    fx /= len; fy /= len;
+    static const float kSteps[] = { 48.0f, 96.0f, 144.0f, 192.0f, 256.0f, 320.0f };
+    for (float step : kSteps) {
+        for (int side : { -1, 1 }) {
+            const float sx = fy * side, sy = -fx * side;    // side 1 = right of the line
+            const float x = feet.x + sx * step, y = feet.y + sy * step;
+            float gz = 0.0f;
+            if (!navmesh::GroundZ(x, y, feet.z, &gz) || !(std::fabs(gz - feet.z) <= 48.0f))
+                continue;
+            uint32_t id = 0;
+            float    d = 0.0f;
+            if (game::RayCastView({ feet.x, feet.y, feet.z + 50.0f }, { sx, sy, 0.0f },
+                                  step + 16.0f, &id, &d) && d > 0.0f && d < step + 16.0f)
+                continue;                                   // a wall on the way there
+            const game::Vec3 e{ eye.x + sx * step, eye.y + sy * step, eye.z + (gz - feet.z) };
+            const game::Vec3 dir{ target.x - e.x, target.y - e.y, target.z - e.z };
+            const float range = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+            if (!game::RayCastView(e, dir, range + 200.0f, &id, &d)) continue;
+            if ((want && id == want) || std::fabs(d - range) <= 60.0f) {
+                F3A_INFO("AimCover: a clear shot at %08X %.0f units to the %s (the ray "
+                         "reaches %08X at %.0f of %.0f)", want, step,
+                         side < 0 ? "left" : "right", id, d, range);
+                *outStep = step;
+                return side;
+            }
+        }
+    }
+    F3A_INFO("AimCover: no clear shot at %08X within %.0f units either side", want,
+             kSteps[sizeof(kSteps) / sizeof(kSteps[0]) - 1]);
+    return 0;
+}
+
+// What to do about it, said after the cover itself.
+std::string FiringSpotAdvice(int side, float step)
+{
+    if (side == 0)
+        return strings::T("W pobliżu nie ma czystego strzału, podejdź bliżej albo obejdź.",
+                          "No clear shot nearby, move closer or go around.");
+    char buf[128];
+    std::snprintf(buf, sizeof(buf),
+                  side < 0 ? strings::T("Czysty strzał %s w lewo.", "Clear shot %s to the left.")
+                           : strings::T("Czysty strzał %s w prawo.", "Clear shot %s to the right."),
+                  strings::FormatDistance(step).c_str());
+    return buf;
+}
+} // namespace
+
+// Home (and the ' key): put the CROSSHAIR on the thing, so that E uses it.
+//
+// The player pressed E after Home and got the game's "nothing to use" sound
+// (2026-10-30): Home had turned the body toward the thing, and in the third
+// person the camera stands well to one side, so from close by the crosshair
+// passed beside it. Now the view is aimed from the camera, and then the
+// GAME's own answer decides: the reference it would activate with E
+// (InterfaceManager+0xFC). Until that is the thing, the aim is moved round
+// it in small steps; once it is, it is held a moment and let go. Beyond the
+// game's activation range there is no such answer, and the plain aim stands.
+struct HomeSearch { int frame = 0, tries = 0; float dyaw = 0, dpitch = 0; bool found = false, done = false; };
+HomeSearch g_home;
+constexpr float kHomeCatchRange = 220.0f;      // a little over the game's activation reach
+constexpr int   kHomeSettleFrames = 6;         // the first aim beds in
+constexpr int   kHomeFramesPerTry = 3;
+// Offsets tried round the computed aim, degrees (yaw, pitch; pitch + = down).
+const float kHomeTries[][2] = {
+    { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 }, { 4, 0 }, { -4, 0 }, { 0, 4 }, { 0, -4 },
+    { 4, 4 }, { -4, 4 }, { 4, -4 }, { -4, -4 }, { 7, 0 }, { -7, 0 }, { 0, 7 }, { 0, -7 },
+    { 7, 7 }, { -7, 7 }, { 7, -7 }, { -7, -7 }, { 11, 0 }, { -11, 0 }, { 0, 11 }, { 0, -11 },
+    { 15, 0 }, { -15, 0 }, { 0, 15 }, { 0, -15 },
+};
+constexpr int kHomeTryCount = (int)(sizeof(kHomeTries) / sizeof(kHomeTries[0]));
+
+void HomeAimTick(const game::Vec3& tp, int trackFrames)
+{
+    if (g_home_reset.exchange(false)) g_home = HomeSearch{};
+    auto* pl = fose_rt::Player();
+    if (!pl) return;
+    const uint32_t want = g_aimtrack_refid.load();
+    const float up = BitsToF(g_aimtrack_up.load());
+    game::Vec3 eye{ pl->posX, pl->posY, pl->posZ + 100.0f };
+    game::GetCameraPos(&eye);
+    const float dx = tp.x - eye.x, dy = tp.y - eye.y, dz = (tp.z + up) - eye.z;
+    float horiz = std::sqrt(dx * dx + dy * dy);
+    if (horiz < 1.0f) horiz = 1.0f;
+    const float yaw = std::atan2(dx, dy), pitch = -std::atan2(dz, horiz);
+    const float px = tp.x - pl->posX, py = tp.y - pl->posY, pz = tp.z - pl->posZ;
+    const bool catchable = want && px * px + py * py + pz * pz <= kHomeCatchRange * kHomeCatchRange;
+
+    ++g_home.frame;
+    int frames = trackFrames;
+    if (catchable && !g_home.found && !g_home.done) {
+        if (game::CrosshairRefId() == want) {
+            g_home.found = true;
+            // Held a moment more there, so it is not undone at once.
+            if (frames > 0 && frames < 10) frames = 10;
+            F3A_INFO("Home: the crosshair is on %08X (offset %+.0f / %+.0f deg, %d frame(s))",
+                     want, g_home.dyaw, g_home.dpitch, g_home.frame);
+        } else if (g_home.frame > kHomeSettleFrames &&
+                   (g_home.frame - kHomeSettleFrames) % kHomeFramesPerTry == 0) {
+            if (g_home.tries < kHomeTryCount) {
+                g_home.dyaw   = kHomeTries[g_home.tries][0];
+                g_home.dpitch = kHomeTries[g_home.tries][1];
+                ++g_home.tries;
+            } else {
+                g_home.done = true;
+                g_home.dyaw = g_home.dpitch = 0.0f;
+                if (g_home_say_miss.load()) g_home_missed.store(want);
+                F3A_INFO("Home: the crosshair never took %08X (the game picks %08X)", want,
+                         game::CrosshairRefId());
+            }
+        }
+    }
+    const float D2R = 0.01745329f;
+    // Never past straight up or down: a thing at the feet is already steep,
+    // and a step of the search on top of that went over the vertical.
+    float pr = pitch + g_home.dpitch * D2R;
+    if (pr > 1.45f) pr = 1.45f;
+    if (pr < -1.45f) pr = -1.45f;
+    game::AimPlayerAtRad(pr, yaw + g_home.dyaw * D2R);
+    // Held while the search goes on; once it is over, the hold runs out.
+    const bool searching = catchable && !g_home.found && !g_home.done;
+    if (frames > 0 && !(searching && frames <= 1))
+        g_aimtrack_frames.store(frames - 1);
+}
+
 void AimTick()
 {
     // Rides the movement update every frame: not while a teleport settles,
@@ -2928,19 +3176,28 @@ void AimTick()
                                      !game::IsKnownHostile(hit) && g_fire_warned != hit;
                 if (blocked) {
                     s_clear = 0;
-                    if (++s_blocked == 8 && !s_said) {
+                    // Not again when the solver has just said it (see below).
+                    if (++s_blocked == 8 && !s_said && g_cover_said_id != want) {
                         s_said = true;
+                        g_cover_said_id = want;
+                        F3A_INFO("AimLOS: cover %08X at %.0f units, the enemy at %.0f", hit, dist, range);
+                        game::Vec3 at{ BitsToF(g_aimtrack_x.load()), BitsToF(g_aimtrack_y.load()),
+                                       BitsToF(g_aimtrack_z.load()) };
+                        game::GetRefPosition(g_aimtrack_refr.load(), want, &at);
+                        at.z += BitsToF(g_aimtrack_offz.load());
+                        float step = 0.0f;
+                        const int side = FindFiringSpot(at, want, &step);
                         char buf[160];
                         std::snprintf(buf, sizeof(buf),
                                       strings::T("Cel zasłonięty, przeszkoda %s przed tobą.",
                                                  "Target blocked, cover %s ahead."),
                                       strings::FormatDistance(dist).c_str());
-                        F3A_INFO("AimLOS: cover %08X at %.0f units, the enemy at %.0f", hit, dist, range);
-                        tolk::Speak(buf, tolk::Priority::Combat, false);
+                        tolk::Speak(std::string(buf) + " " + FiringSpotAdvice(side, step),
+                                    tolk::Priority::Combat, false);
                     }
                 } else {
                     s_blocked = 0;
-                    if (now_on && ++s_clear >= 10) s_said = false;
+                    if (now_on && ++s_clear >= 10) { s_said = false; g_cover_said_id = 0; }
                 }
             }
         }
@@ -3137,6 +3394,13 @@ void AimTick()
         tp.y += BitsToF(g_aim_oy.load());
         tp.z += BitsToF(g_aim_oz.load());
 
+        // Home: the crosshair onto the thing, until the game itself says E
+        // would use it.
+        if (g_aimtrack_face.load()) {
+            HomeAimTick(tp, trackFrames);
+            return;
+        }
+
         // For the shot (engine::PrepareShot): where it should go, the same
         // point the view is held on.
         g_shot_x.store(FToBits(tp.x));
@@ -3220,8 +3484,13 @@ void AimTick()
                         float pitch = pl->rotX;          // radians, + = down
                         up = (eye.z - std::sin(pitch) * hd) - pl->posZ;
                     }
+                    float step = 0.0f;
+                    const int side = FindFiringSpot(tp, want, &step);
                     g_block_dist.store(FToBits(hd));
                     g_block_up.store(FToBits(up));
+                    g_block_side.store(side);
+                    g_block_step.store(FToBits(step));
+                    g_cover_said_id = want;
                     g_block_pending.store(true);
                 }
             }
@@ -3344,9 +3613,37 @@ void AimTick()
     }
 }
 
+namespace {
+void StartAimTrack(const void* refr, uint32_t refid, const game::Vec3& at, float up,
+                   int frames, bool face);
+}
+
+void RequestFaceTrack(const void* refr, uint32_t refid, const game::Vec3& at,
+                      float up, int frames, bool sayMiss)
+{
+    // All of Home's state before the track starts: the main thread may run
+    // it the moment its frames are stored, and until the face flag is up it
+    // would run it as a shot's aim.
+    g_home_say_miss.store(sayMiss);
+    g_home_reset.store(true);
+    g_home_missed.store(0);
+    g_rayrefine_id.store(0);          // no ray re-lock: that is for shots
+    StartAimTrack(refr, refid, at, up, frames, /*face*/true);
+}
+
+uint32_t TakeHomeMissed() { return g_home_missed.exchange(0); }
+
 void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
                      float up, int frames)
 {
+    StartAimTrack(refr, refid, at, up, frames, /*face*/false);
+}
+
+namespace {
+void StartAimTrack(const void* refr, uint32_t refid, const game::Vec3& at, float up,
+                   int frames, bool face)
+{
+    g_aimtrack_face.store(face);
     g_aimtrack_refr.store(refr);
     g_aimtrack_refid.store(refid);
     // Only a call that actually names a reference moves the damage watch. The
@@ -3395,9 +3692,10 @@ void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
     }
     g_aimtrack_frames.store(frames);
     g_block_pending.store(false);
-    F3A_INFO("AimTrack: refr=%p refid=%08X at=(%.0f,%.0f,%.0f) up=%.0f frames=%d",
-             refr, refid, at.x, at.y, at.z, up, frames);
+    F3A_INFO("AimTrack: refr=%p refid=%08X at=(%.0f,%.0f,%.0f) up=%.0f frames=%d%s",
+             refr, refid, at.x, at.y, at.z, up, frames, face ? " (Home)" : "");
 }
+} // namespace
 
 void StopAimTrack() { g_aimtrack_frames.store(0); }
 
@@ -3490,11 +3788,12 @@ void RequestRayMap(const game::Vec3& centre)
 
 bool ConsumeAimTargetReacted()  { return g_aim_reacted.exchange(false); }
 
-bool ConsumeNoLineOfFire(float* outDist, float* outHeight)
+bool ConsumeNoLineOfFire(float* outDist, float* outHeight, std::string* outAdvice)
 {
     if (!g_block_pending.exchange(false)) return false;
     if (outDist)   *outDist   = BitsToF(g_block_dist.load());
     if (outHeight) *outHeight = BitsToF(g_block_up.load());
+    if (outAdvice) *outAdvice = FiringSpotAdvice(g_block_side.load(), BitsToF(g_block_step.load()));
     return true;
 }
 bool ConsumeAimReleased()       { return g_aim_released.exchange(false); }
@@ -3585,7 +3884,7 @@ void DumpTileRec(Tile* t, int depth)
     }
     if ((name && (strstr(name, "hotrect") || strstr(name, "highlight") ||
                   strstr(name, "option") || strstr(name, "setting") ||
-                  strstr(name, "slider")))
+                  strstr(name, "slider") || strcmp(name, "JLM") == 0))
         || has_target || has_label) {
         char raw[640]; int rn = 0; raw[0] = 0;
         for (UInt32 i = 0; i < t->values.size && rn < (int)sizeof(raw) - 24; ++i) {
@@ -3923,10 +4222,11 @@ void DumpQuestList()
 void DumpActiveMenuTree()
 {
     // The quantity prompt and VATS are freed by a key press on the main
-    // thread; walking their tiles from here is a known crash.
-    if (menu::ActiveMenu() == menu::Id::Quantity || menu::IsOpen(menu::Id::VATS)) {
-        tolk::Speak(strings::T("Zrzut niedostępny w tym ekranie.", "Dump not available on this screen."),
-                    tolk::Priority::System, true);
+    // thread; walking their tiles from here is a known crash. There, the
+    // main thread writes the dump (MainThreadWork).
+    if (!game::OnMainThread() &&
+        (menu::ActiveMenu() == menu::Id::Quantity || menu::IsOpen(menu::Id::VATS))) {
+        g_dump_on_main.store(true);
         return;
     }
     InterfaceManager* ifm = fose_rt::IFM();
@@ -3979,6 +4279,7 @@ void DumpActiveMenuTree()
             for (const auto& s : game::DebugHackingTraits())
                 log::DumpWrite("  %s", s.c_str());
         }
+        for (const auto& s : game::DebugVatsState()) log::DumpWrite("%s", s.c_str());
         int stage = -1;
         const auto intro = game::GetHackingIntro(&stage);
         if (stage >= 0) {

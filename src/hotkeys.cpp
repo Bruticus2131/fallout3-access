@@ -142,6 +142,16 @@ void SkipObjectiveAction()
     // quest one stage. Only meaningful in gameplay; the SetStage call runs on
     // the main thread.
     if (!::f3a::poll::IsGameplayActive()) return;
+    // Off unless the player switches it on: one key that moves a quest on is
+    // easy to press by mistake, and some take it for cheating.
+    if (!config::Get().skip_stage) {
+        tolk::Speak(strings::T("Pomijanie etapów zadań jest wyłączone. Włączysz je w Ustawieniach, "
+                               "w kategorii Dostępność.",
+                               "Skipping quest stages is off. Switch it on in Settings, "
+                               "Accessibility."),
+                    tolk::Priority::System, true);
+        return;
+    }
     ::f3a::poll::RequestSkipObjective();
 }
 

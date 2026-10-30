@@ -50,6 +50,23 @@ int InsetCorners(std::vector<game::Vec3>& waypoints, float clearance);
 bool RetraceWithMargin(const std::vector<game::Vec3>& route, std::vector<game::Vec3>& out,
                        float clearance);
 
+// A place to stand by `at`: walkable ground in the loaded cells at about its
+// height, at least `minDist` from it and as near as that allows - beside an
+// object rather than inside it. False when there is none within `maxDist`.
+bool StandingSpotNear(const game::Vec3& at, float minDist, float maxDist, game::Vec3* out);
+
+// Drops. A route may step off a ledge onto walkable ground below - one way,
+// never further down than a fall the game lets go unpunished. Such a route has
+// the point on the ledge and the landing as two waypoints next to each other:
+// IsDropLeg(a, b) tells that leg apart (the landing at least ~36 units lower
+// and within ~64 sideways). The mesh cannot tell a ledge from a floor's edge
+// at a wall with lower ground outside; the walk asks the game, and a ledge
+// with a wall behind it is banned (BanDrop, by its point) from routes until
+// ClearBannedDrops.
+bool IsDropLeg(const game::Vec3& a, const game::Vec3& b);
+void BanDrop(const game::Vec3& ledge);
+void ClearBannedDrops();
+
 // BuildPath's search and string pulling on triangles given as corners (three
 // per triangle), not read from the game: for testing it offline on a real
 // navmesh taken from Fallout3.esm.

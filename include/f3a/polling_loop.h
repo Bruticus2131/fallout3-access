@@ -74,9 +74,10 @@ void RequestVatsLimbClick(const void* tile);
 // not move the cursor for any of it.
 void RequestVatsAttack();
 
-// Put the engine's own menu cursor on a VATS body-part marker, which is how
-// Fallout 3 chooses the part. No system mouse movement is involved.
-void RequestVatsCursorTo(int limbIndex);
+// The game's date and time, as last read on the main thread (once a second).
+// False before the first reading. Any thread.
+bool GameClockNow(game::GameClock* out);
+
 
 
 // Which limb VATS is aimed at, sampled on the main thread. False when VATS
@@ -108,6 +109,9 @@ std::string SpecialDescription(int i);
 // game::SetEngineAutoAim). Applied and undone on the main thread; also undone
 // when the mod is switched off or gameplay ends. Safe from any thread.
 void SetEngineAimAssist(bool on);
+// The reference the game's Aim holds (0 for none): a shot is bent onto that
+// and nothing else.
+void SetShotTarget(uint32_t refid);
 
 // Announce the first/third-person view a moment after the F key is pressed (once
 // the camera zoom has settled). Called from the F hotkey on the worker thread;
@@ -147,6 +151,12 @@ void RequestDropItem();
 // highlight holds `want`; finish the type-out at once. Main thread.
 void RequestHackEnter(int idx, const std::string& want);
 void RequestHackSkipIntro();
+
+// Ledges on a route (point on the ledge, landing): does a wall stand there?
+// Asked of the game on the main thread (game::LedgeLooksOpen); the answer, one
+// flag per ledge (1 = open), comes back through LedgeCheckAnswer, true once.
+void RequestLedgeCheck(const std::vector<std::pair<game::Vec3, game::Vec3>>& legs);
+bool LedgeCheckAnswer(std::vector<char>* open);
 
 // Lockpicking: move the bobby pin by `units` (accumulated, applied on the main
 // thread through game::NudgeLockpick).
@@ -198,6 +208,16 @@ void RequestAim(bool doYaw, float yawDeg, bool doPitch, float pitchDeg);
 // `frames` counts main-thread frames; negative means "until StopAimTrack()".
 void RequestAimTrack(const void* refr, uint32_t refid, const game::Vec3& at,
                      float up, int frames);
+// The same for Home: put the CROSSHAIR on a thing - door, person, terminal,
+// chair, box - so that E uses it. Aimed from the camera, then moved round the
+// thing until the game's own pick (what E would activate) is it, held a
+// moment, let go. None of the shooting work (rays for where a shot lands, the
+// line-of-fire watch, the shot point) is done.
+void RequestFaceTrack(const void* refr, uint32_t refid, const game::Vec3& at,
+                      float up, int frames, bool sayMiss = true);
+// Once, the ref Home could not get under the crosshair although it was within
+// the game's activation reach; 0 when none.
+uint32_t TakeHomeMissed();
 
 // Apply the held aim for this frame. Called from the player-movement hook,
 // which runs inside the engine's own update — see the definition for why the
@@ -223,8 +243,8 @@ bool ConsumeAimTargetReacted();
 // target: `outDist` is how far the obstacle is, `outHeight` how high it sits
 // above the player's feet. The solver sweeps points around the target, so an
 // empty result means the blockage is near the shooter — which no angle can fix
-// and only moving can.
-bool ConsumeNoLineOfFire(float* outDist, float* outHeight);
+// and only moving can. `outAdvice`: where to step for a clear shot, ready to say.
+bool ConsumeNoLineOfFire(float* outDist, float* outHeight, std::string* outAdvice);
 
 // True once, when a held aim was released because the mouse took over.
 bool ConsumeAimReleased();

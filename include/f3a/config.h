@@ -43,7 +43,6 @@ struct Hotkeys {
     uint32_t crosshair_info   = 0x22; // G — say what's under the crosshair
     uint32_t view_toggle      = 0x21; // F — game's view key; we announce the result
     uint32_t item_info        = 0x20; // D — read selected item's details (in menus)
-    uint32_t aim_target       = 0x33; // , — aim view at the selected/nearest target
     uint32_t attack_key       = 0x2F; // V (DIK) — weapon attack, used by the aim burst
     uint32_t drop_item        = 0xD3; // Delete — drop the selected item (inventory)
     uint32_t sonar            = 0x31; // N — Pip-Boy sonar sweep of the surroundings
@@ -52,7 +51,6 @@ struct Hotkeys {
     uint32_t sweep_next       = 0x17; // I — walk to the nearest thing left
     uint32_t audio_desc_repeat = 0x41; // F7 — repeat the last description (Shift: on/off)
     uint32_t press_row        = 0x3C; // F2 — press the highlighted row (rebinding keys); Insert is the NVDA key
-    uint32_t aim_hold         = 0x1B; // ] — hold/release the game's aim (right mouse)
     // Trim the held aim up/down. The mod cannot see where the shot lands, but
     // the player can hear it — so these put the last word with them.
     // F9 — capture an aim set by someone who can SEE the crosshair, and work
@@ -99,11 +97,9 @@ struct Settings {
     // Turn toward targets with the engine's own actor-facing routine (the one
     // Command Extender's FaceObject uses) instead of writing angle fields.
     bool   native_face        = true;
-    // Walk by driving the engine's own movement update instead of holding W/A/S/D.
-    // Precise speed, smooth turns that slow down instead of skidding. 0 falls
-    // back to the key-holding walker.
+    // Walk by driving the engine's own movement update instead of holding W/A/S/D,
+    // at the game's own walk or run speed. 0 falls back to the key-holding walker.
     bool   native_walk        = true;
-    int    autowalk_speed     = 160;   // game units per second at run speed
     // Aim at an object's COLLISION centre. OFF by default: reaching it means
     // calling virtuals on Havok objects at offsets taken from New Vegas, and
     // that crashed FO3 outright with no log line. The default aim point is the
@@ -130,6 +126,10 @@ struct Settings {
     // Turn off if you play without a mouse: then nothing but releasing the aim
     // can break the lock.
     bool   aim_mouse_takeover  = true;
+    // Aim help: holding the game's own Aim control (the right mouse button, or
+    // the key it is bound to) locks onto the enemy and carries the shot. Off
+    // for a sighted player who aims with the mouse.
+    bool   aim_help            = true;
     // A quest marker is a PLACE, not a thing you walk into: it can sit inside
     // scenery, on a firing line you are meant to stand behind, or above a floor
     // you cannot climb. Getting this close to one ends the walk, with no other
@@ -153,14 +153,26 @@ struct Settings {
     bool   explore_mode   = true;   // finds announced on the way during auto-walk
     int    explore_radius = 900;    // ...this near the player
     bool   audio_desc     = true;   // describe scenes and people
+    // What the people round the player do, read from the game as it happens
+    // (sits down, gets up, draws a weapon, passes out...): 0 never, 1 in
+    // scenes (while a script holds the controls), 2 always (the nearest few).
+    int    audio_desc_events = 1;
+    // The written descriptions of how people look, on first sight. Off: the
+    // player wants what happens, not appearances.
+    bool   audio_desc_people = false;
+    // A soft chime when a scene takes the controls away (a cutscene) and
+    // another when it gives them back. Fallout3Access\sounds\cutscene_start.wav
+    // and cutscene_end.wav, when present, are played instead.
+    bool   cutscene_cue   = true;
     bool   audio_desc_capture = false; // save a screenshot whenever a description is due
     // Let the game's own pathfinder route the auto-walk (as it routes NPCs).
     bool   engine_path = true;
     // The game's control hints ("Aby oddać strzał, ..."): 0 = never read,
     // 1 = once per game session (default), 2 = every time they show.
     int    hint_mode = 1;
-    // While the aim key (]) is held, the engine's own bullet correction may
-    // bend a shot up to this many degrees onto a hostile actor. 0 = off.
+    // While the game's Aim is held (with aim help on), the engine's own bullet
+    // correction may bend a shot up to this many degrees onto a hostile actor.
+    // 0 = off.
     int    engine_aim_deg = 15;
     int    compass_units = 0;           // 0 = clock face ("godzina trzecia"), 1 = degrees
     // AutoWalk mouse-turn gain: mouse counts injected per degree of heading
@@ -172,6 +184,13 @@ struct Settings {
     // without precise crosshair aim. Bigger = more forgiving (may grab a wrong
     // neighbour); smaller = stricter. 0 = leave the game's value untouched.
     int    activate_pick_radius = 150;
+    // How far the End key (use the scanner's target without aiming) reaches,
+    // game units; 0 = no limit. The game's own reach is about 150; a lock
+    // picked from 2000 units away felt like a cheat (a player, 2026-10-30).
+    int    activate_range = 300;
+    // '=' moves the tracked quest one stage on (an objective that cannot be
+    // done blind). Off unless the player switches it on.
+    bool   skip_stage = false;
 
     // Debug
     // Console command run by the debug_start_game hotkey. From the main menu
@@ -227,6 +246,13 @@ struct AimOffset { uint32_t base_form_id; float x, y, z; };
 std::vector<AimOffset> LoadAimOffsets();
 void SaveAimOffset(uint32_t base_form_id, float x, float y, float z);
 const Settings& Get();
+
+// A setting changed in the game's own Settings menu (the mod's Accessibility
+// category): the caller sets the live value through Mutable(), and
+// WriteIniInt rewrites that key's line in the INI - only the value, the
+// comment after it kept - so it holds after a restart.
+Settings& Mutable();
+bool WriteIniInt(const char* section, const char* key, int value);
 
 // For runtime tweaks (toggle_mod hotkey).
 void SetEnabled(bool enabled);

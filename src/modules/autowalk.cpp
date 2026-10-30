@@ -70,9 +70,16 @@ constexpr float kWaypointRadius = 48.0f;
 // How far a corner of the engine's route is moved off the wall it turns
 // round: the player's half-width and a margin.
 constexpr float kCornerClearance = 40.0f;
+// The walk's own speed now (the game's walk or run), its turning circle
+// capped at 64 units as the mover caps it in turns.
+float TurnRadius()
+{
+    const float speed = mover::CurrentSpeed();
+    return (speed < 256.0f ? speed : 256.0f) / 4.0f;
+}
 float WaypointRadius()
 {
-    const float turn = static_cast<float>(config::Get().autowalk_speed) / 4.0f;
+    const float turn = TurnRadius();
     return turn * 1.2f > kWaypointRadius ? turn * 1.2f : kWaypointRadius;
 }
 
@@ -201,6 +208,7 @@ const void*  g_cross_prev_cell  = nullptr;        // cell at activation (detect 
 int          g_hop_count        = 0;              // load doors traversed this trip
 int          g_hop_limit        = 0;              // ...allowed: kMaxHops, or the table's chain + 6
 int          g_cross_stuck      = 0;              // stalls while approaching a door
+int          g_cross_person     = 0;              // ...of them with a person in the way
 bool         g_cross_teleported = false;          // already used the teleport fallback
 const void*  g_cross_from_cell  = nullptr;        // cell we left (skip the door back)
 // Doors taken on this walk. They are DEPRIORITISED, not banned: a route that
@@ -332,6 +340,9 @@ bool LockedDoorOnRoute(const std::vector<game::Vec3>& wp, game::WorldEntity* out
         if (e.kind != game::WorldEntity::Kind::Door || !e.locked || !e.refr) continue;
         if (e.load_door == 1 || e.open_state == 1) continue;
         if (AlreadyAvoided(e.position)) continue;
+        // Its key in the pocket: the door opens like any other.
+        if (uint32_t key = game::LockKeyForm(e.refr, e.form_id))
+            if (game::GetPlayerItemCount(key) > 0) continue;
         game::Vec3 a = pp;
         for (size_t i = 0; i < wp.size() && i < bestLeg; ++i) {
             const auto& b = wp[i];
@@ -365,6 +376,67 @@ std::string LockWords(int level)
                   strings::T(kPl[i], kEn[i]), game::LockSkillNeeded(i));
     return buf;
 }
+
+// What the player has for a lock: the key's name for one only a key opens,
+// else their Lockpick skill and bobby pins (form 0x0000000A, "Spinka").
+std::string LockAdvice(const void* refr, uint32_t form, int level)
+{
+    const int tier = level < 0 ? 5 : game::LockTier(level);
+    if (tier >= 5) {
+        std::string keyName;
+        game::LockKeyForm(refr, form, &keyName);
+        return keyName.empty() ? std::string()
+                               : strings::T(" Klucz: ", " The key: ") + keyName + ".";
+    }
+    const float skill = game::GetPlayerAV(36);              // eActorVal_Lockpick
+    const int pins = game::GetPlayerItemCount(0x0000000A);
+    char buf[128];
+    if (skill >= 0.0f)
+        std::snprintf(buf, sizeof(buf), strings::T(" Twoje otwieranie zamków: %d, spinek: %d.",
+                                                   " Your Lockpick: %d, bobby pins: %d."),
+                      (int)skill, pins < 0 ? 0 : pins);
+    else
+        std::snprintf(buf, sizeof(buf), strings::T(" Spinek: %d.", " Bobby pins: %d."),
+                      pins < 0 ? 0 : pins);
+    return buf;
+}
+
+// --- Something on the way that a switch opens ------------------------------------
+// A door or a moving fixture the hand does not open - the secret door at the
+// end of the Overseer's tunnel, the desk that slides off the tunnel - stands
+// on a route that the game and our mesh both draw straight through it, so the
+// walk ran into it, worked the same route out again and circled. Now the walk
+// goes to its switch instead, turns the crosshair onto the switch and asks for
+// E (the player presses it), and goes on to where it was going once the way
+// is open. A locked door waits the same way while the player picks it.
+struct Unblock {
+    int         phase = 0;           // 0 none, 1 walking to the switch, 2 at it: E awaited,
+                                     // 3 E pressed: waiting for the way to open
+    bool        lock = false;        // a lock to pick (the "switch" is the door itself)
+    const void* block_refr = nullptr;
+    uint32_t    block_form = 0;
+    std::string block_name;          // as said: its name, or "a closed passage"
+    game::Vec3  block_pos{};
+    bool        block_door = false;
+    const void* open_refr = nullptr;
+    uint32_t    open_form = 0;
+    std::string open_name;
+    game::Vec3  open_pos{};
+    // The walk to go back to.
+    game::Vec3  t_pos{};
+    std::string t_name;
+    const void* t_refr = nullptr;
+    uint32_t    t_form = 0;
+    bool        t_quest = false;
+    DWORD       since = 0;           // when this phase began
+    game::Vec3  stood{};             // where the player stood when it began
+    bool        aim_said = false;
+    bool        use_was_down = false;
+};
+Unblock g_ub;
+bool g_ub_starting = false;          // StartTo is called by the unblocking itself
+std::vector<uint32_t> g_ub_done;     // blockers dealt with on this walk
+constexpr float kSwitchReach = 250.0f;   // stopped this near the switch: at it
 
 constexpr float kArriveDist = 90.0f;   // ~1.4 m — close enough to activate
 // If we stall this close to the target, treat it as arrival rather than an
@@ -904,6 +976,44 @@ void SnapToRoute()
 
 void StopWalking(const char* reason_utf8);   // defined below
 
+// --- Drops off a ledge --------------------------------------------------
+// Our own route may step off a ledge onto ground below (navmesh::IsDropLeg:
+// the point on the ledge, then the landing). Before it is walked the game is
+// asked whether a wall stands there - the mesh cannot tell a ledge from a
+// floor's edge at a wall with lower ground outside - and a walled one is
+// banned and the route worked out again. Reaching the ledge says so.
+float g_drops_checked = 0.0f;   // the drop legs of the route last asked about (a sum of their points)
+float g_drops_asked   = 0.0f;   // ...of the route asked about now, 0 = no question out
+std::vector<std::pair<game::Vec3, game::Vec3>> g_drops_asked_legs;
+size_t g_drop_said = (size_t)-1;   // the landing waypoint "jumping down" was said for
+
+bool OwnRoute() { return g_have_path && !g_route_engine; }
+
+std::vector<std::pair<game::Vec3, game::Vec3>> DropLegs(const std::vector<game::Vec3>& wp)
+{
+    std::vector<std::pair<game::Vec3, game::Vec3>> out;
+    for (size_t i = 1; i < wp.size(); ++i)
+        if (navmesh::IsDropLeg(wp[i - 1], wp[i])) out.push_back({ wp[i - 1], wp[i] });
+    return out;
+}
+
+float DropsSignature(const std::vector<std::pair<game::Vec3, game::Vec3>>& legs)
+{
+    float s = 0.0f;
+    for (const auto& l : legs) s += l.first.x * 0.37f + l.first.y * 0.61f + l.first.z + 1.0f;
+    return s;
+}
+
+float RouteLength2D(const std::vector<game::Vec3>& wp)
+{
+    float len = 0.0f;
+    for (size_t i = 1; i < wp.size(); ++i) {
+        float dx = wp[i].x - wp[i - 1].x, dy = wp[i].y - wp[i - 1].y;
+        len += std::sqrt(dx * dx + dy * dy);
+    }
+    return len;
+}
+
 // Take the game's route once it is ready.
 void AdoptEngineRoute()
 {
@@ -921,6 +1031,15 @@ void AdoptEngineRoute()
     }
     if (RouteHitsAvoided(wp)) {
         F3A_INFO("autowalk: engine route goes through an avoided door - ignored");
+        return;
+    }
+    // The engine never steps off a ledge. Where our own route does, and is
+    // much the shorter for it, ours is walked.
+    if (OwnRoute() && !DropLegs(g_waypoints).empty() &&
+        RouteLength2D(g_waypoints) + 300.0f < RouteLength2D(wp)) {
+        F3A_INFO("autowalk: engine route ignored - ours drops off a ledge and is %.0f units "
+                 "shorter (%.0f against %.0f)", RouteLength2D(wp) - RouteLength2D(g_waypoints),
+                 RouteLength2D(g_waypoints), RouteLength2D(wp));
         return;
     }
     if (!g_cross) {
@@ -962,6 +1081,34 @@ void AdoptEngineRoute()
     float residual = std::sqrt(rx * rx + ry * ry);
     // Ending under (or over) its goal, a floor away, is not reaching it.
     bool partial = residual > kPartialResidual || std::fabs(end.z - g_route_goal.z) > kFloorDelta;
+    // Short of the goal, while our own mesh reaches it: ours is walked, now.
+    // The game paths the player as if every closed door inside were a wall
+    // (an interior's sliding doors have no door portals), so from a closed
+    // room in the vault its route led into the room's corner nearest the
+    // target - and the walk stalled there, against a chair, until the stall
+    // count gave up ("I can't get there on foot", Escape!, 2026-10-29/30).
+    // Our route goes through the door, which the walk opens.
+    if (partial) {
+        std::vector<game::Vec3> own;
+        if (BuildOwnPath(g_route_goal, own) && own.size() >= 2) {
+            const auto& oe = own.back();
+            const float ox = oe.x - g_route_goal.x, oy = oe.y - g_route_goal.y;
+            if (std::sqrt(ox * ox + oy * oy) <= kPartialResidual &&
+                std::fabs(oe.z - g_route_goal.z) <= kFloorDelta) {
+                F3A_INFO("autowalk: the engine's route ends %.0f units short (%u waypoint(s)); "
+                         "our mesh reaches the goal - walking ours, %u waypoint(s)",
+                         residual, (unsigned)wp.size(), (unsigned)own.size());
+                g_waypoints = std::move(own);
+                g_wp_index = 0;
+                g_have_path = true;
+                g_route_engine = false;
+                g_route_partial = false;
+                SnapToRoute();
+                g_last_probe_dist = ProgressDistance();
+                return;
+            }
+        }
+    }
     F3A_INFO("autowalk: engine route adopted, %u waypoint(s)%s (ours had %u)",
              (unsigned)wp.size(), partial ? ", PARTIAL" : "", (unsigned)g_waypoints.size());
     if (partial) F3A_INFO("autowalk: it ends %.0f units short of its goal", residual);
@@ -1030,6 +1177,53 @@ bool RebuildPath(const char* why)
         tolk::Speak(why, tolk::Priority::Ui, false);
     }
     return ok;
+}
+
+// The drops on our own route: asked about once (a wall there?), said when the
+// ledge is reached.
+void TickDrops()
+{
+    if (!OwnRoute()) return;
+    // An answer about the route walked now.
+    std::vector<char> open;
+    if (g_drops_asked != 0.0f && poll::LedgeCheckAnswer(&open)) {
+        const float asked = g_drops_asked;
+        g_drops_asked = 0.0f;
+        g_drops_checked = asked;
+        int walled = 0;
+        for (size_t k = 0; k < open.size() && k < g_drops_asked_legs.size(); ++k) {
+            if (open[k]) continue;
+            const auto& l = g_drops_asked_legs[k];
+            navmesh::BanDrop(l.first);
+            ++walled;
+            F3A_INFO("autowalk: a wall stands at the ledge (%.0f,%.0f,%.0f) - no drop there",
+                     l.first.x, l.first.y, l.first.z);
+        }
+        if (walled) {
+            RebuildPath(strings::T("Przeliczam trasę.", "Recalculating the route."));
+            return;
+        }
+    }
+    const auto legs = DropLegs(g_waypoints);
+    if (legs.empty()) return;
+    const float sig = DropsSignature(legs);
+    if (sig != g_drops_checked && g_drops_asked == 0.0f) {
+        g_drops_asked = sig;
+        g_drops_asked_legs = legs;
+        poll::RequestLedgeCheck(legs);
+        for (const auto& l : legs)
+            F3A_INFO("autowalk: the route drops %.0f units off a ledge at (%.0f,%.0f,%.0f) - "
+                     "asking the game for a wall there", l.first.z - l.second.z,
+                     l.first.x, l.first.y, l.first.z);
+    }
+    // At the ledge: the next point is the landing below.
+    if (g_wp_index > 0 && g_wp_index < g_waypoints.size() && g_wp_index != g_drop_said &&
+        navmesh::IsDropLeg(g_waypoints[g_wp_index - 1], g_waypoints[g_wp_index])) {
+        g_drop_said = g_wp_index;
+        const float h = g_waypoints[g_wp_index - 1].z - g_waypoints[g_wp_index].z;
+        F3A_INFO("autowalk: over the ledge, %.0f units down", h);
+        tolk::Speak(strings::T("Zeskakuję.", "Jumping down."), tolk::Priority::Ui, false);
+    }
 }
 
 // On to the next leg of a long walk: the engine is asked for the way to its
@@ -1148,7 +1342,13 @@ void AdvanceWaypoints()
 // along the route, so a bend is rounded smoothly instead of walking corner to
 // corner — but never round a corner sharper than 60°, which would cut its
 // inside into a wall. `corner` gets the real next waypoint, for braking.
-constexpr float kLookAhead      = 60.0f;   // 1.5x the turning radius (160 u/s / 4 rad/s)
+// (The mover follows the same rules frame by frame - mover::SetRoute; this is
+// the walk's own view of where it is heading.)
+float LookAhead()                          // 1.5x the turning radius, 48 to 96
+{
+    const float l = 1.5f * TurnRadius();
+    return l < 48.0f ? 48.0f : l > 96.0f ? 96.0f : l;
+}
 constexpr float kSharpCornerCos = 0.5f;    // cos 60°
 // Where the route climbs or drops (ramps, stairs, Megaton's walkways with no
 // rails) the corners are not cut: the player walked off a walkway there,
@@ -1182,7 +1382,7 @@ game::Vec3 LookAheadGoal(game::Vec3* corner)
     float curX = a.x + abx * t, curY = a.y + aby * t;
     size_t next = g_wp_index;
     float nx = b.x, ny = b.y;
-    float remaining = RouteClimbsHere() ? kLookAheadTight : kLookAhead;
+    float remaining = RouteClimbsHere() ? kLookAheadTight : LookAhead();
     for (int guard = 0; guard < 64; ++guard) {
         float dx = nx - curX, dy = ny - curY;
         float seg = std::sqrt(dx * dx + dy * dy);
@@ -1467,8 +1667,21 @@ void ReachedFarDoor()
 
 // The walk is over at the target: say so and face it. On the way to a far
 // door, "arriving" is reaching that door: it is crossed, the walk goes on.
+void UnblockAtSwitch();   // defined below
+float Dist2D(const game::Vec3& a, const game::Vec3& b);   // defined below
+
 void Arrive(const char* say)
 {
+    if (g_ub.phase == 1) {                                 // the walk to the switch is over
+        if (Dist2D(game::GetPlayerPosition(), g_ub.open_pos) <= kSwitchReach) {
+            UnblockAtSwitch();
+            return;
+        }
+        // Ended out of E's reach (a floor below it, say): not "press E" there.
+        F3A_INFO("autowalk: the walk to the switch '%s' ended %.0f units from it - letting it go",
+                 g_ub.open_name.c_str(), Dist2D(game::GetPlayerPosition(), g_ub.open_pos));
+        g_ub = {};
+    }
     if (g_far_door) { ReachedFarDoor(); return; }
     StopWalking(say);
     LookAtTarget();
@@ -1508,10 +1721,23 @@ void SteerOntoSpot()
 }
 
 // Steer along the route: at the look-ahead point, braking for the real corner.
+// With the mover, the stretch of route ahead is handed to it and it works the
+// point out itself every frame: this module looks only every 80 ms, and at a
+// run a point a few steps ahead was passed in between.
 float SteerRoute()
 {
     game::Vec3 corner{};
     game::Vec3 goal = LookAheadGoal(&corner);
+    if (config::Get().native_walk && mover::Available() && g_have_path &&
+        g_wp_index > 0 && g_wp_index < g_waypoints.size()) {
+        Move(false, false, false, false);          // make sure no key is stuck down
+        const size_t from = g_wp_index - 1;
+        const size_t left = g_waypoints.size() - from;
+        const size_t n = left < mover::kRouteMax ? left : mover::kRouteMax;
+        mover::SetRoute(&g_waypoints[from], n);
+        auto pp = game::GetPlayerPosition();
+        return std::fabs(game::ComputeBearing(pp, game::GetPlayerYaw(), goal).relative_yaw);
+    }
     return Steer(goal, &corner);
 }
 
@@ -1595,6 +1821,427 @@ void StopWalking(const char* reason_utf8)
 }
 
 
+// --- The unblocking ------------------------------------------------------------
+float Dist2D(const game::Vec3& a, const game::Vec3& b)
+{
+    const float dx = a.x - b.x, dy = a.y - b.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+bool UseKeyDown()
+{
+    const uint8_t sc = game::GetUseKeyScancode();
+    UINT vk = sc ? MapVirtualKeyA(sc, MAPVK_VSC_TO_VK) : 0;
+    if (!vk) vk = 'E';
+    // Held now, or pressed and let go since the last look (a quick tap falls
+    // between two 80 ms looks). The first look when the wait starts takes an
+    // old press away (see use_was_down).
+    return (GetAsyncKeyState((int)vk) & 0x8001) != 0;
+}
+
+bool UbDone(uint32_t form)
+{
+    for (uint32_t f : g_ub_done) if (f == form) return true;
+    return false;
+}
+
+// A switched reference that may be what is in the way: a shut door the hand
+// does not open (only its switch does, it has no name to be used by, or the
+// hand already tried it), or a fixture at the player's height (the desk).
+// Not one dealt with on this walk, nor the one being dealt with.
+bool CouldBlock(const game::SwitchedRef& s, bool doorsOnly)
+{
+    if (UbDone(s.form_id) || (g_ub.phase != 0 && s.form_id == g_ub.block_form)) return false;
+    if (s.is_door) {
+        if (s.open_state == 1 || game::IsLoadDoor(s.refr)) return false;
+        return s.parent_only || s.name.empty() || s.form_id == g_last_door;
+    }
+    if (doorsOnly) return false;
+    // The desk's origin is ~150 units above the office floor.
+    return std::fabs(s.position.z - game::GetPlayerPosition().z) <= 200.0f;
+}
+
+// Where the walk is stuck: a switched reference by the player, on the side
+// the walk is heading for.
+bool SwitchedBlockerHere(game::SwitchedRef* out)
+{
+    const auto pp = game::GetPlayerPosition();
+    const game::Vec3 goal = g_cross && g_cross_door_refr ? g_cross_door_pos : CurrentGoal();
+    for (auto& s : game::FindSwitchedRefs(pp, 260.0f, 16)) {
+        if (!CouldBlock(s, false)) continue;
+        if (Dist2D(s.position, pp) > 120.0f) {
+            // Further off, it has to be ahead, not behind.
+            const float hx = goal.x - pp.x, hy = goal.y - pp.y;
+            const float sx = s.position.x - pp.x, sy = s.position.y - pp.y;
+            if (hx * sx + hy * sy < 0.0f) continue;
+        }
+        *out = std::move(s);
+        return true;
+    }
+    return false;
+}
+
+// A shut switched door on the route ahead (its first 3000 units), seen before
+// the walk runs into it. Doors only: a fixture beside a route is not in its way.
+bool SwitchedDoorOnRoute(const std::vector<game::Vec3>& wp, size_t from, game::SwitchedRef* out)
+{
+    if (from >= wp.size()) return false;
+    const auto pp = game::GetPlayerPosition();
+    std::vector<game::Vec3> pts{ pp };
+    float len = 0.0f, reach = 0.0f;
+    for (size_t i = from; i < wp.size() && len < 3000.0f; ++i) {
+        len += Dist2D(pts.back(), wp[i]);
+        pts.push_back(wp[i]);
+        reach = (std::max)(reach, Dist2D(wp[i], pp));
+    }
+    const auto refs = game::FindSwitchedRefs(pp, reach + 150.0f, 32);
+    const game::SwitchedRef* best = nullptr;
+    size_t bestLeg = (size_t)-1;
+    for (const auto& s : refs) {
+        if (!CouldBlock(s, true)) continue;
+        for (size_t i = 1; i < pts.size() && i < bestLeg; ++i) {
+            const bool level = std::fabs(s.position.z - pts[i - 1].z) < 160.0f ||
+                               std::fabs(s.position.z - pts[i].z) < 160.0f;
+            if (level && SegDist2D(s.position, pts[i - 1], pts[i]) <= kDoorOnRoute) {
+                best = &s; bestLeg = i;
+                break;
+            }
+        }
+    }
+    if (!best) return false;
+    *out = *best;
+    return true;
+}
+
+// No way to the target at all: a shut switched door near the straight line
+// to it is the likely reason.
+bool SwitchedDoorBetween(const game::Vec3& to, game::SwitchedRef* out)
+{
+    const auto pp = game::GetPlayerPosition();
+    for (auto& s : game::FindSwitchedRefs(pp, 2500.0f, 32)) {
+        if (!CouldBlock(s, true) || SegDist2D(s.position, pp, to) > 400.0f) continue;
+        *out = std::move(s);
+        return true;
+    }
+    return false;
+}
+
+// Can the player get to `to` without passing `block`? Our own mesh with the
+// blocker's doorway closed off: 1 yes, 0 only through it, -1 can't tell. From
+// the doorway itself the test starts a step back from it, on the player's side.
+int ReachableAround(const game::Vec3& to, const game::Vec3& block)
+{
+    const auto pp = game::GetPlayerPosition();
+    game::Vec3 from = pp;
+    const float d = Dist2D(pp, block);
+    if (d > 1.0f && d < 200.0f) {
+        const float k = (200.0f - d) / d;
+        from.x += (pp.x - block.x) * k;
+        from.y += (pp.y - block.y) * k;
+    }
+    std::vector<game::Vec3> wp;
+    const std::vector<game::Vec3> avoid{ block };
+    if (navmesh::BuildPath(from, to, wp, &avoid) && !wp.empty()) return 1;
+    wp.clear();
+    if (navmesh::BuildPath(pp, to, wp) && !wp.empty()) return 0;
+    return -1;
+}
+
+// The walk the unblocking goes back to: the one going on now, or - already
+// on the way to one switch - the one before that.
+void KeepWalkTarget(Unblock* u)
+{
+    if (g_ub.phase != 0) {
+        u->t_pos = g_ub.t_pos; u->t_name = g_ub.t_name; u->t_refr = g_ub.t_refr;
+        u->t_form = g_ub.t_form; u->t_quest = g_ub.t_quest;
+        return;
+    }
+    u->t_pos   = TargetPos();
+    u->t_name  = g_far_door ? g_final_name : g_target_name;
+    u->t_refr  = TargetRefr();
+    u->t_form  = TargetFormId();
+    u->t_quest = g_follow_quest;
+}
+
+void AimAtOpener()
+{
+    game::Vec3 at = g_ub.open_pos;
+    game::Vec3 body{};
+    if (game::GetAimPointFor(g_ub.open_refr, &body, nullptr)) at = body;
+    // The crosshair onto it, checked against what E would use, held until E.
+    poll::RequestFaceTrack(g_ub.open_refr, g_ub.open_form, at, 0.0f, -1, /*sayMiss*/false);
+}
+
+// At the switch (or in reach of it): stop, put the crosshair on it, and wait
+// for E. What to press is said once the crosshair is seen on it (TickUnblock).
+void UnblockAtSwitch()
+{
+    StopWalking(nullptr);
+    g_ub.phase        = 2;
+    g_ub.since        = GetTickCount();
+    g_ub.stood        = game::GetPlayerPosition();
+    g_ub.aim_said     = false;
+    g_ub.use_was_down = UseKeyDown();
+    AimAtOpener();
+    F3A_INFO("autowalk: at the switch '%s' (%08X), %.0f units off - aiming, waiting for E",
+             g_ub.open_name.c_str(), (unsigned)g_ub.open_form, Dist2D(g_ub.stood, g_ub.open_pos));
+}
+
+// Off to the switch that opens `s`. False when there is none to go to.
+bool StartUnblock(const game::SwitchedRef& s)
+{
+    const auto pp = game::GetPlayerPosition();
+    // The nearest switch the player reaches without passing what it opens;
+    // with none such for sure, the nearest one.
+    const game::Opener* pick = nullptr;
+    int pickSide = -1;
+    float bestd = 1e30f;
+    for (const auto& o : s.openers) {
+        const int side = ReachableAround(o.position, s.position);
+        F3A_INFO("autowalk: '%s' opens with '%s' (%08X) at (%.0f,%.0f,%.0f), %.0f units - "
+                 "reached round it: %s", s.name.c_str(), o.name.c_str(), (unsigned)o.form_id,
+                 o.position.x, o.position.y, o.position.z, Dist2D(pp, o.position),
+                 side == 1 ? "yes" : side == 0 ? "only through it" : "can't tell");
+        const float d = Dist2D(pp, o.position);
+        const bool better = side == 1 ? (pickSide != 1 || d < bestd)
+                                      : (pickSide != 1 && d < bestd);
+        if (better) { pick = &o; pickSide = side; bestd = d; }
+    }
+    if (!pick) return false;
+
+    Unblock u;
+    KeepWalkTarget(&u);
+    u.block_refr = s.refr;
+    u.block_form = s.form_id;
+    u.block_name = s.name.empty() ? std::string(strings::T("zamknięte przejście", "a closed passage"))
+                                  : s.name;
+    u.block_pos  = s.position;
+    u.block_door = s.is_door;
+    u.open_refr  = pick->refr;
+    u.open_form  = pick->form_id;
+    u.open_name  = pick->name;
+    u.open_pos   = pick->position;
+    F3A_INFO("autowalk: the way to '%s' is shut by '%s' (%08X, %s%s) - going to its switch '%s'",
+             u.t_name.c_str(), u.block_name.c_str(), (unsigned)s.form_id,
+             s.is_door ? "door" : "fixture", s.parent_only ? ", switch only" : "", pick->name.c_str());
+
+    std::string say = s.name.empty()
+        ? strings::T("Przejście jest zamknięte. Otwiera je: ", "The passage is closed. It opens with: ") + pick->name + "."
+        : strings::T("Drogę zamyka: ", "The way is shut by: ") + s.name +
+          strings::T(". Otwiera to: ", ". It opens with: ") + pick->name + ".";
+    g_ub = u;
+    if (bestd <= 120.0f) {
+        // In reach already: no walk, the crosshair onto it.
+        g_ub.phase = 1;
+        UnblockAtSwitch();
+        tolk::Speak(say, tolk::Priority::System, true);
+        return true;
+    }
+    g_ub_starting = true;
+    StartTo(pick->position, pick->name, pick->refr, pick->form_id);
+    g_ub_starting = false;
+    if (g_state == State::Idle) { g_ub = {}; return false; }   // the walk was refused
+    g_ub.phase = 1;
+    if (pickSide == 1) {
+        // Round it, never through it.
+        g_avoid.push_back(s.position);
+        RebuildPath(nullptr);
+    }
+    tolk::Speak(say + strings::T(" Prowadzę tam.", " Leading you there."),
+                tolk::Priority::System, true);
+    return true;
+}
+
+// A locked door the walk stopped at: the crosshair onto it, and the walk goes
+// on by itself once the player has picked it (or opened it otherwise).
+void WaitForLock(const game::WorldEntity& d)
+{
+    Unblock u;
+    KeepWalkTarget(&u);
+    u.lock       = true;
+    u.block_refr = d.refr;
+    u.block_form = d.form_id;
+    u.block_name = d.name;
+    u.block_pos  = d.position;
+    u.block_door = true;
+    u.open_refr  = d.refr;
+    u.open_form  = d.form_id;
+    u.open_name  = d.name;
+    u.open_pos   = d.position;
+    g_ub = u;
+    g_ub.phase        = 2;
+    g_ub.since        = GetTickCount();
+    g_ub.stood        = game::GetPlayerPosition();
+    g_ub.use_was_down = UseKeyDown();
+    AimAtOpener();
+}
+
+// A door in the way that the walk cannot open itself (it did not open, or
+// its state cannot be read, or it was tried already and still blocks): the
+// walk stops, the crosshair goes onto the door and the player is asked to
+// open it with E; once it is open, the walk goes on (TickUnblock). In the
+// Super-Duper Mart the walk out of the storeroom stood wedged at such a door
+// and never said a word about it (user, 2026-10-30).
+void AskToOpenDoor(const game::WorldEntity& d, const char* why)
+{
+    F3A_INFO("autowalk: door '%s' (%08X) in the way, %s - asking the player to open it",
+             d.name.c_str(), (unsigned)d.form_id, why);
+    WaitForLock(d);
+    g_ub.lock = false;                 // nothing to pick: E opens it
+    // Its state cannot be read: it cannot say it opened either, so the walk
+    // goes on a moment after E, as at a fixture.
+    if (game::DoorOpenState(d.refr, d.form_id) < 0) g_ub.block_door = false;
+    StopWalking((strings::T("Drzwi na drodze: ", "A door in the way: ") + d.name +
+                 strings::T(". Otwórz je klawiszem E, a pójdę dalej.",
+                            ". Open it with E and I'll go on.")).c_str());
+}
+
+// Is the way open now? A door says so; a fixture cannot be read, so it
+// counts as open a moment after E (TickUnblock).
+bool BlockOpen()
+{
+    if (!g_ub.block_door) return false;
+    if (game::DoorOpenState(g_ub.block_refr, g_ub.block_form) == 1) return true;
+    return g_ub.lock && game::LockState(g_ub.block_refr, g_ub.block_form) == 0;   // picked
+}
+
+void ResumeAfterUnblock()
+{
+    poll::StopAimTrack();
+    const Unblock u = g_ub;
+    g_ub = {};
+    if (g_ub_done.size() < 32) g_ub_done.push_back(u.block_form);
+    F3A_INFO("autowalk: '%s' is open - on to '%s'", u.block_name.c_str(), u.t_name.c_str());
+    if (u.t_name.empty() && !u.t_quest) {
+        tolk::Speak(strings::T("Otwarte.", "Open."), tolk::Priority::System, true);
+        return;
+    }
+    const void* refr = u.t_refr && game::IsLiveRef(u.t_refr, u.t_form) ? u.t_refr : nullptr;
+    g_ub_starting = true;
+    const bool quest = u.t_quest && StartToQuest();
+    if (!quest) StartTo(u.t_pos, u.t_name, refr, refr ? u.t_form : 0);
+    g_ub_starting = false;
+    if (g_state != State::Idle)
+        tolk::Speak(strings::T("Otwarte. Idę dalej do: ", "Open. Walking on to: ") + u.t_name + ".",
+                    tolk::Priority::System, true);
+}
+
+// Every tick, walking or not: the walk to the switch, the crosshair on it,
+// E, and the way opening.
+void TickUnblock()
+{
+    if (g_ub.phase == 0) return;
+    // Under a menu (the lockpick screen, a terminal) nothing goes on: a walk
+    // set off there would be ended by the menu at once.
+    if (!poll::IsGameplayActive()) return;
+    {
+        const auto m = menu::ActiveMenu();
+        if (m != menu::Id::None && m != menu::Id::HUDMain) return;
+    }
+    const DWORD now = GetTickCount();
+    const auto  pp  = game::GetPlayerPosition();
+    // Open, whatever opened it (E, End on the switch, a script): on to where
+    // the walk was going.
+    if (BlockOpen()) {
+        if (g_ub.phase == 1) StopWalking(nullptr);
+        ResumeAfterUnblock();
+        return;
+    }
+    if (g_ub.phase == 1) {
+        if (g_state != State::Idle) return;           // still on the way to the switch
+        // The walk there stopped short ("as close as I can get", stuck): near
+        // it is near enough - E reaches it, or it is used for the player.
+        if (Dist2D(pp, g_ub.open_pos) <= kSwitchReach) { UnblockAtSwitch(); return; }
+        F3A_INFO("autowalk: the walk to the switch '%s' ended %.0f units from it - letting it go",
+                 g_ub.open_name.c_str(), Dist2D(pp, g_ub.open_pos));
+        g_ub = {};
+        return;
+    }
+    if (g_ub.phase == 2) {
+        // Walked off, or left it for long: the player has other plans.
+        if (Dist2D(pp, g_ub.stood) > 300.0f || now - g_ub.since > 180000) {
+            F3A_INFO("autowalk: no E at '%s' - the player went on (%.0f units off)",
+                     g_ub.open_name.c_str(), Dist2D(pp, g_ub.stood));
+            poll::StopAimTrack();
+            g_ub = {};
+            return;
+        }
+        if (!g_ub.aim_said && now - g_ub.since >= 600) {
+            const bool on = game::GetCrosshairRefID() == g_ub.open_form;
+            if (on || now - g_ub.since >= 2500) {
+                g_ub.aim_said = true;
+                F3A_INFO("autowalk: the crosshair is %s '%s'", on ? "on" : "NOT on",
+                         g_ub.open_name.c_str());
+                std::string say;
+                if (g_ub.lock)
+                    say = on ? strings::T("Celownik na drzwiach.", "Crosshair on the door.")
+                             : strings::T("Drzwi przed tobą.", "The door is in front of you.");
+                else
+                    say = on ? strings::T("Celownik na: ", "Crosshair on: ") + g_ub.open_name +
+                                   strings::T(". Naciśnij E.", ". Press E.")
+                             : g_ub.open_name + strings::T(" przed tobą. Naciśnij E.",
+                                                           " is in front of you. Press E.");
+                // After the lock's own sentence, not over it.
+                tolk::Speak(say, tolk::Priority::Ui, false);
+            }
+        }
+        const bool down = UseKeyDown();
+        const bool pressed = down && !g_ub.use_was_down;
+        g_ub.use_was_down = down;
+        if (pressed) {
+            poll::StopAimTrack();
+            // Nothing under the crosshair: the game's E goes nowhere, so the
+            // switch is used directly, as End uses the scanner's target.
+            if (game::GetCrosshairRefID() == 0) {
+                F3A_INFO("autowalk: E with nothing under the crosshair - using '%s' directly",
+                         g_ub.open_name.c_str());
+                game::QueueActivate(g_ub.open_refr, g_ub.open_form);
+            }
+            F3A_INFO("autowalk: E at '%s' - waiting for '%s' to open", g_ub.open_name.c_str(),
+                     g_ub.block_name.c_str());
+            g_ub.phase = 3;
+            g_ub.since = now;
+        }
+        return;
+    }
+    // 3: E pressed - the door swings, the desk slides, the lock is picked.
+    if (!g_ub.block_door) {
+        if (now - g_ub.since >= 3000) ResumeAfterUnblock();
+        return;
+    }
+    const DWORD wait = g_ub.lock ? 180000 : 6000;
+    if (Dist2D(pp, g_ub.stood) > 600.0f || now - g_ub.since > wait) {
+        F3A_INFO("autowalk: '%s' did not open", g_ub.block_name.c_str());
+        if (!g_ub.lock)
+            tolk::Speak(strings::T("Nie otworzyło się: ", "It didn't open: ") + g_ub.block_name + ".",
+                        tolk::Priority::Ui, false);
+        g_ub = {};
+    }
+}
+
+// A switched door on the route just worked out: the switch first.
+float g_switch_route_sig = 0.0f;
+
+bool CheckRouteForSwitched()
+{
+    if (!g_have_path || g_waypoints.empty() || g_wp_index >= g_waypoints.size()) return false;
+    const auto& e = g_waypoints.back();
+    const float sig = e.x * 0.37f + e.y * 0.61f + (float)g_waypoints.size() +
+                      (g_route_engine ? 0.5f : 0.0f);
+    if (sig == g_switch_route_sig) return false;
+    g_switch_route_sig = sig;
+    game::SwitchedRef s;
+    if (!SwitchedDoorOnRoute(g_waypoints, g_wp_index, &s)) return false;
+    F3A_INFO("autowalk: the route runs through '%s' (%08X), which a switch opens",
+             s.name.c_str(), (unsigned)s.form_id);
+    return StartUnblock(s);
+}
+
+// Stalls this walk, by place: the same spot again and again is a dead end,
+// whatever the sidesteps and new routes say.
+std::vector<game::Vec3> g_stall_spots;
+constexpr int kStallsHere = 3;
+
 // When blocked, a closed door is the usual culprit. Open it ourselves — the
 // same native Activate the End key uses, on the game's thread — hold still
 // while it swings, check it really opened, and walk on.
@@ -1632,14 +2279,48 @@ bool TryOpenBlockingDoor()
         float d2 = dx * dx + dy * dy;
         if (d2 < bestd) { bestd = d2; best = &e; }
     }
+    // Not ahead: a closed door beside the route just ahead (the walk may be
+    // turned away from it while it squeezes round), or one the player stands
+    // right against.
+    if (!best && g_have_path && g_wp_index < g_waypoints.size()) {
+        float bestr = 1e9f;
+        for (const auto& e : ents) {
+            if (e.kind != game::WorldEntity::Kind::Door || !e.refr || !e.form_id) continue;
+            if (e.load_door != 0 || e.open_state == 1) continue;
+            float dx = e.position.x - pp.x, dy = e.position.y - pp.y;
+            if (dx * dx + dy * dy > kDoorReach * kDoorReach) continue;
+            float r = 1e9f;
+            const size_t from = g_wp_index > 0 ? g_wp_index - 1 : 0;
+            for (size_t i = from; i + 1 < g_waypoints.size() && i < from + 3; ++i)
+                r = (std::min)(r, SegDist2D(e.position, g_waypoints[i], g_waypoints[i + 1]));
+            if (r <= 90.0f && r < bestr) { bestr = r; best = &e; bestd = dx * dx + dy * dy; }
+        }
+    }
+    if (!best) {
+        for (const auto& e : ents) {
+            if (e.kind != game::WorldEntity::Kind::Door || !e.refr || !e.form_id) continue;
+            if (e.load_door != 0 || e.open_state == 1) continue;
+            float dx = e.position.x - pp.x, dy = e.position.y - pp.y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 <= 140.0f * 140.0f && d2 < bestd) { bestd = d2; best = &e; }
+        }
+    }
     if (!best) return false;
-    // Only once per door per walk: if the SAME door blocks us again it is not
-    // the problem, so fall through to the ordinary stuck handling.
-    if (best->form_id == g_last_door) return false;
+    // Tried already and still in the way: the player opens it.
+    if (best->form_id == g_last_door) {
+        AskToOpenDoor(*best, "tried already");
+        return true;
+    }
     g_last_door = best->form_id;
     float dist = std::sqrt(bestd);
 
-    if (best->locked) {
+    // Locked, but its key is in the pocket: the game opens it with the key.
+    bool withKey = false;
+    if (best->locked)
+        if (uint32_t key = game::LockKeyForm(best->refr, best->form_id))
+            withKey = game::GetPlayerItemCount(key) > 0;
+
+    if (best->locked && !withKey) {
         // A locked door on the route is not the end of the route: the navmesh
         // runs through doorways whether or not they open, and often there is
         // another way round (the reactor level on the way to Jonas). Close the
@@ -1659,23 +2340,23 @@ bool TryOpenBlockingDoor()
                  best->name.c_str(), (unsigned)best->form_id, best->lock_level, dist);
         std::string what = strings::T("Zamknięte drzwi na drodze: ", "Locked door on the way: ") +
                            best->name + ", " +
-                           LockWords(best->lock_level) + ".";
-        const void* r = best->refr; uint32_t f = best->form_id;
+                           LockWords(best->lock_level) + "." +
+                           LockAdvice(best->refr, best->form_id, best->lock_level);
+        // The crosshair onto the door, and the walk goes on by itself once
+        // the player has picked it.
+        WaitForLock(*best);
         StopWalking(what.c_str());
-        game::Vec3 at{};
-        if (game::GetRefPosition(r, f, &at)) poll::RequestFacePoint(at);
         return true;
     }
     if (best->open_state != 0) {
-        // Can't tell whether it is open: don't risk shutting it. Stuck handling
-        // goes round instead, and logs this so a pattern would show.
-        F3A_INFO("autowalk: door '%s' (%08X) state unknown — not touching it",
-                 best->name.c_str(), (unsigned)best->form_id);
-        return false;
+        // Can't tell whether it is open: don't risk shutting it - the player
+        // opens it, with the crosshair on it.
+        AskToOpenDoor(*best, "its state unknown");
+        return true;
     }
 
-    F3A_INFO("autowalk: opening the door '%s' (%08X), %.0f units",
-             best->name.c_str(), (unsigned)best->form_id, dist);
+    F3A_INFO("autowalk: opening the door '%s' (%08X), %.0f units%s",
+             best->name.c_str(), (unsigned)best->form_id, dist, withKey ? ", with its key" : "");
     game::QueueActivate(best->refr, best->form_id);
     // Stop ONCE, here; the hold below only waits. (The mover's stop is a full
     // brake with an idle animation — not something to repeat every tick.)
@@ -1687,7 +2368,9 @@ bool TryOpenBlockingDoor()
     g_door_hold = kDoorHoldSecs;
     g_door_checks = 2;
     g_door_cooldown = 2.0f * kDoorHoldSecs + kDoorGraceSecs;
-    tolk::Speak(strings::T("Otwieram drzwi.", "Opening the door."), tolk::Priority::Background, false);
+    tolk::Speak(withKey ? strings::T("Masz klucz. Otwieram drzwi.", "You have the key. Opening the door.")
+                        : strings::T("Otwieram drzwi.", "Opening the door."),
+                tolk::Priority::Background, false);
     return true;
 }
 
@@ -1707,12 +2390,24 @@ bool DoorHoldTick(float dt)
         return true;
     }
     if (st == 0) {
-        std::string what = strings::T("Drzwi się nie otworzyły: ", "The door didn't open: ") +
-                           g_door_name + ".";
-        const void* r = g_door_refr; uint32_t f = g_door_form;
-        StopWalking(what.c_str());
-        game::Vec3 at{};
-        if (game::GetRefPosition(r, f, &at)) poll::RequestFacePoint(at);
+        // A switch opens it, not the hand: off to the switch.
+        game::SwitchedRef sw;
+        if (!UbDone(g_door_form) && game::GetSwitchedRef(g_door_refr, g_door_form, &sw) &&
+            StartUnblock(sw)) {
+            g_door_hold = 0.0f;
+            return true;
+        }
+        // The player tries: the crosshair onto it, E, and on once it opens.
+        game::WorldEntity d{};
+        d.kind = game::WorldEntity::Kind::Door;
+        d.refr = g_door_refr; d.form_id = g_door_form; d.name = g_door_name;
+        if (!game::GetRefPosition(d.refr, d.form_id, &d.position)) {
+            StopWalking((strings::T("Drzwi się nie otworzyły: ", "The door didn't open: ") +
+                         g_door_name + ".").c_str());
+            return true;
+        }
+        g_door_hold = 0.0f;
+        AskToOpenDoor(d, "it did not open");
         return true;
     }
     g_last_probe_dist = ProgressDistance();   // fresh progress base past the door
@@ -1725,8 +2420,25 @@ bool DoorHoldTick(float dt)
 // solid reference in it. Static world geometry (walls, rocks, cliffs) isn't a
 // scannable reference, so "nothing solid in the cone" == a terrain obstacle.
 // Items/notes/quest markers don't physically block, so they're skipped.
-std::string DescribeObstacle()
+// Where a stall happened: the player, and the waypoint walked to.
+std::string StallWhere()
 {
+    auto pp = game::GetPlayerPosition();
+    char buf[200];
+    if (g_have_path && g_wp_index < g_waypoints.size()) {
+        const auto& w = g_waypoints[g_wp_index];
+        std::snprintf(buf, sizeof(buf), "at (%.0f,%.0f,%.0f), waypoint %u/%u (%.0f,%.0f,%.0f)%s",
+                      pp.x, pp.y, pp.z, (unsigned)g_wp_index, (unsigned)g_waypoints.size(),
+                      w.x, w.y, w.z, g_route_engine ? " engine route" : "");
+    } else {
+        std::snprintf(buf, sizeof(buf), "at (%.0f,%.0f,%.0f), no route", pp.x, pp.y, pp.z);
+    }
+    return buf;
+}
+
+std::string DescribeObstacle(bool* actor = nullptr)
+{
+    if (actor) *actor = false;
     auto  pp   = game::GetPlayerPosition();
     float yaw  = game::GetPlayerYaw();
     auto  ents = game::ScanNearby(320, 12, /*actors_only*/false, false);
@@ -1748,6 +2460,7 @@ std::string DescribeObstacle()
                           "Terrain in the way — a wall or rock. Going round.");
     switch (best->kind) {
         case game::WorldEntity::Kind::Actor:
+            if (actor) *actor = true;
             return (best->hostile ? strings::T("Wróg na drodze: ", "Enemy in the way: ")
                                   : strings::T("Ktoś na drodze: ", "Someone in the way: "))
                    + best->name + strings::T(". Omijam.", ". Going round.");
@@ -2004,6 +2717,7 @@ void BeginCross()
                                        : game::PlayerIsInInterior();
     g_cross_door_refr  = nullptr;
     g_cross_stuck      = 0;
+    g_cross_person     = 0;
     g_probe_timer      = 0.0f;
     if (!CrossNextHop()) return;
     if (!g_cross_door_refr) return;          // the game's answer names the door
@@ -2142,6 +2856,7 @@ void TickCross(float dt)
     AdoptEngineRoute();
     g_engine_said_none = false;     // a door route's "none" means nothing for the target
     AdvanceWaypoints();
+    if (CheckRouteForSwitched()) return;    // a door on the way only its switch opens
 
     auto  pp = game::GetPlayerPosition();
     float dx = g_cross_door_pos.x - pp.x, dy = g_cross_door_pos.y - pp.y;
@@ -2163,6 +2878,42 @@ void TickCross(float dt)
         return;
     }
 
+    // The game's route to the door was walked and ended short of it: it routes
+    // only so far (on the way up to the Vault's atrium, 2886 units short after
+    // three points). As on an ordinary walk: the next stretch from here while
+    // each gains ground, else our own mesh's way to the door - not a straight
+    // line at it, which walked into the wall below and gave up ("I can't get
+    // there on foot", log 2026-10-29).
+    if (g_route_engine && g_route_partial && g_have_path && g_wp_index >= g_waypoints.size() &&
+        g_recover_timer <= 0.0f) {
+        g_route_partial = false;
+        const float gain = g_leg_start_dist - DistanceToRouteGoal();
+        if (gain > kLegMinGain && g_route_legs < kMaxRouteLegs && RequestEngineRoute()) {
+            ++g_route_legs;
+            F3A_INFO("autowalk: the game's route to the door ended short (gained %.0f) - "
+                     "asking for the next stretch", gain);
+            mover::Clear();
+            g_engine_wait = kEngineWaitSecs;
+            return;
+        }
+        std::vector<game::Vec3> own;
+        if (BuildOwnPath(g_cross_door_pos, own)) {
+            F3A_INFO("autowalk: the game's route to the door ended short (gained %.0f) - "
+                     "our own way to it, %u waypoint(s)", gain, (unsigned)own.size());
+            g_waypoints     = std::move(own);
+            g_wp_index      = 0;
+            g_have_path     = true;
+            g_route_engine  = false;
+            g_route_partial = false;
+            SnapToRoute();
+            g_probe_pos   = game::GetPlayerPosition();
+            g_probe_timer = 0.0f;
+        } else {
+            F3A_INFO("autowalk: the game's route to the door ended short and our mesh has "
+                     "no way to it - heading straight for it");
+        }
+    }
+
     // Recovery strafe (same idea as the main loop) or steer at the door.
     if (g_recover_timer > 0.0f) {
         if (config::Get().native_walk)
@@ -2176,8 +2927,8 @@ void TickCross(float dt)
             g_probe_pos       = game::GetPlayerPosition();
             g_probe_timer     = 0.0f;
         }
-    } else if (g_route_engine && g_have_path && g_wp_index < g_waypoints.size()) {
-        SteerRoute();                         // the engine's way to the door
+    } else if (g_have_path && g_wp_index < g_waypoints.size()) {
+        SteerRoute();                         // the engine's (or our) way to the door
     } else {
         Steer(g_cross_door_pos);              // no route: straight at it
     }
@@ -2197,12 +2948,13 @@ void TickCross(float dt)
         g_probe_timer = 0.0f;
         float progress = g_last_probe_dist - dd;
         g_last_probe_dist = dd;
-        // On the engine's route the way to the door can lead away from it
-        // first; there a stall means NOT MOVING, as in the FNV mod.
+        // On a route the way to the door can lead away from it first (up the
+        // stairs at the far end of the room); there a stall means NOT MOVING,
+        // as in the FNV mod.
         auto ppNow = game::GetPlayerPosition();
         float mvx = ppNow.x - g_probe_pos.x, mvy = ppNow.y - g_probe_pos.y;
         g_probe_pos = ppNow;
-        if (g_route_engine && g_have_path && g_wp_index < g_waypoints.size())
+        if (g_have_path && g_wp_index < g_waypoints.size())
             progress = std::sqrt(mvx * mvx + mvy * mvy);
         // Circling: near the target but no longer getting nearer. The existing
         // backstop only covers 175 units for 2.5 s, so an orbit at any wider
@@ -2231,8 +2983,47 @@ void TickCross(float dt)
         }
 
         if (progress < kMinProgress && g_recover_timer <= 0.0f) {
+            {
+                game::SwitchedRef sw;     // the Overseer's desk over the tunnel
+                if (SwitchedBlockerHere(&sw) && StartUnblock(sw)) return;
+            }
             if (TryOpenBlockingDoor()) return;
-            if (++g_cross_stuck >= kCrossMaxStuck) { CrossFallbackTeleport(); return; }
+            // Stuck on the game's route that ends short of the door: our own
+            // way to it, at once - not after the dead end has been walked to
+            // its last point, which the stalls on the way never let happen.
+            if (g_route_engine && g_route_partial) {
+                std::vector<game::Vec3> own;
+                if (BuildOwnPath(g_cross_door_pos, own)) {
+                    F3A_INFO("autowalk: stalled on the game's short route to the door - our "
+                             "own way to it, %u waypoint(s)", (unsigned)own.size());
+                    g_waypoints     = std::move(own);
+                    g_wp_index      = 0;
+                    g_have_path     = true;
+                    g_route_engine  = false;
+                    g_route_partial = false;
+                    SnapToRoute();
+                    g_probe_pos     = game::GetPlayerPosition();
+                    g_probe_timer   = 0.0f;
+                    g_cross_stuck   = 0;
+                    return;
+                }
+            }
+            // A person in the way walks off (Amata in the room, Officer
+            // Gomez at the door): gone round, not counted - as on an
+            // ordinary walk since 2026-10-29.
+            bool personInWay = false;
+            const std::string obstacle = DescribeObstacle(&personInWay);
+            // Someone who never moves (stands in the doorway for good) still
+            // ends it, three times later.
+            const bool tooMany = personInWay ? ++g_cross_person >= kCrossMaxStuck * 3
+                                             : ++g_cross_stuck >= kCrossMaxStuck;
+            if (tooMany) {
+                F3A_INFO("autowalk: stalled %d times on the way to the door (%d with a person "
+                         "in the way), %s: %s", g_cross_stuck, g_cross_person,
+                         StallWhere().c_str(), obstacle.c_str());
+                CrossFallbackTeleport();
+                return;
+            }
             // Same side again, for longer, until this side has had its chances.
             if (++g_recover_tries > kSideTries) {
                 g_recover_dir   = -g_recover_dir;
@@ -2243,9 +3034,10 @@ void TickCross(float dt)
             // Logged, not spoken. Naming every crate and doorframe it squeezes
             // past turned a walk into a running commentary, and the player
             // cannot act on any of it — the mod is already going round.
-            F3A_DEBUG("autowalk: %s", DescribeObstacle().c_str());
+            F3A_INFO("autowalk: stalled %s: %s", StallWhere().c_str(), obstacle.c_str());
         } else if (progress >= kMinProgress) {
             g_cross_stuck   = 0;
+            g_cross_person  = 0;
             g_recover_tries = 0;   // it is getting through; stop escalating
         }
     }
@@ -2349,6 +3141,23 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     // a walk which carried on after "Zatrzymano".
     if (config::Get().native_walk && !mover::Available()) { WarnNoMover(); return; }
     DropAimLock();
+    if (!g_ub_starting) {
+        // A walk of the player's own: whatever switch was waited for is past.
+        g_ub = {};
+        g_ub_done.clear();
+    }
+    // Left over from the walk before (set as it ended): not this walk's.
+    (void)mover::UserTookOver();
+    (void)mover::SpeedUnreadable();
+    // Ledges found walled are coordinates only, and every interior shares the
+    // same coordinates: forgotten in another place.
+    {
+        static const void* s_drop_cell = nullptr;
+        const void* cell = game::GetPlayerCell();
+        if (cell != s_drop_cell) { navmesh::ClearBannedDrops(); s_drop_cell = cell; }
+    }
+    g_stall_spots.clear();
+    g_switch_route_sig = 0.0f;
     game::Vec3  pos     = pos_in;
     const void* refr    = refr_in;
     uint32_t    form_id = form_in;
@@ -2403,6 +3212,7 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     g_hop_count        = 0;
     g_hop_limit        = kMaxHops;
     g_cross_stuck      = 0;
+    g_cross_person     = 0;
     g_cross_teleported = false;
     g_cross_from_cell  = nullptr;
 
@@ -2618,6 +3428,8 @@ void Stop()
     // idle, so the engine-side stop goes first and unconditionally.
     mover::Clear();
     ReleaseKeysHard();
+    if (g_ub.phase >= 2) poll::StopAimTrack();
+    g_ub = {};                        // no going on by itself after a stop
     StopWalking(strings::T("Zatrzymano.", "Stopped."));
 }
 
@@ -2703,9 +3515,36 @@ bool FollowQuestRetarget()
 }
 } // namespace
 
+namespace {
+// The player ended the walk (a movement key, a menu): a walk to a switch ends
+// with it - no crosshair on the switch, no "press E" afterwards.
+void PlayerEndedWalk(const char* reason)
+{
+    if (g_ub.phase == 1) {
+        F3A_INFO("autowalk: the walk to the switch '%s' was ended by the player - letting it go",
+                 g_ub.open_name.c_str());
+        g_ub = {};
+    }
+    StopWalking(reason);
+}
+} // namespace
+
 void Tick(float dt)
 {
+    TickUnblock();                    // a switch to press, a lock to pick: walking or not
     if (g_state == State::Idle) return;
+    // The walk moves only at the game's own speed; when that cannot be read
+    // there is nothing else to walk at.
+    // A movement key: the game dropped its auto-move, the player took over.
+    if (mover::UserTookOver()) {
+        PlayerEndedWalk(strings::T("Zatrzymano.", "Stopped."));
+        return;
+    }
+    if (mover::SpeedUnreadable()) {
+        StopWalking(strings::T("Nie mogę odczytać prędkości chodu z gry. Chodzenie zatrzymane.",
+                               "I can't read the game's walking speed. Walk stopped."));
+        return;
+    }
     // A teleport (a travel leg) is still settling: the walk waits, standing,
     // and goes on once the place round the player is there.
     if (game::WorldSettling()) { mover::Clear(); return; }
@@ -2723,7 +3562,7 @@ void Tick(float dt)
     // running. Steering re-states the goal as soon as the walk resumes.
     if (!poll::IsGameplayActive()) {
         if (g_cross) { mover::Clear(); return; }   // loading between cells
-        StopWalking(nullptr);
+        PlayerEndedWalk(nullptr);
         return;
     }
     auto active = menu::ActiveMenu();
@@ -2736,12 +3575,12 @@ void Tick(float dt)
             mover::Clear();
             return;
         }
-        StopWalking(nullptr);
+        PlayerEndedWalk(nullptr);
         return;
     }
 
     if (PlayerMoveKeyPressed()) {
-        StopWalking(strings::T("Zatrzymano.", "Stopped."));
+        PlayerEndedWalk(strings::T("Zatrzymano.", "Stopped."));
         return;
     }
 
@@ -2922,6 +3761,8 @@ void Tick(float dt)
     AdoptEngineRoute();
     if (g_state == State::Idle) return;     // it found a locked door it cannot pass
     AdvanceWaypoints();
+    if (CheckRouteForSwitched()) return;    // a door on the way only its switch opens
+    TickDrops();
 
     // On a long walk: at a leg's point (or at the end of the route to it,
     // near enough) — on to the next leg.
@@ -3021,6 +3862,12 @@ void Tick(float dt)
     // a ledge). Stop and face it rather than walk at it in a straight line.
     if (g_engine_said_none) {
         g_engine_said_none = false;
+        // No way at all, and a shut door a switch opens lies between: that is
+        // why. The switch first, instead of walking at the target blind.
+        if (!g_have_path && !OnLegs() && !g_far_door) {
+            game::SwitchedRef sw;
+            if (SwitchedDoorBetween(g_target_pos, &sw) && StartUnblock(sw)) return;
+        }
         if (!g_have_path && TryWalkGraph()) return;
         if (!g_have_path && !OnLegs() && !g_far_door && !g_precise &&
             DistanceToTarget() <= 600.0f) {
@@ -3199,6 +4046,12 @@ void Tick(float dt)
                     ArriveOnSpot();
                     return;
                 }
+                // Something here that a switch opens (a secret door, the
+                // Overseer's desk): off to the switch.
+                {
+                    game::SwitchedRef sw;
+                    if (SwitchedBlockerHere(&sw) && StartUnblock(sw)) return;
+                }
                 // Blocked further out — a closed door is the usual culprit. Open
                 // the nearest one and keep going before treating this as a real
                 // obstacle. (No-op if it's the same door we already opened.)
@@ -3233,6 +4086,33 @@ void Tick(float dt)
                     g_probe_route_left = RouteLeft();   // the skip itself is not progress
                 }
                 ++g_stuck_count;
+                bool personInWay = false;
+                const std::string obstacle = DescribeObstacle(&personInWay);
+                // Back on the same spot a third time, after walking on from it
+                // in between: no way on from here. Said and stopped, not
+                // circled with new routes. Only the first stall of each go
+                // counts - stalls in a row are the sidestepping's business
+                // (kMaxStuck) - and never a person in the way, who walks off:
+                // Jonas in the classroom door ended the walk to Mr Brotch
+                // after eight seconds (log 2026-10-29).
+                if (g_stuck_count == 1 && !personInWay) {
+                    const auto here = game::GetPlayerPosition();
+                    int n = 1;
+                    for (const auto& s : g_stall_spots)
+                        if (Dist2D(s, here) <= 200.0f && std::fabs(s.z - here.z) < 160.0f) ++n;
+                    if (g_stall_spots.size() < 64) g_stall_spots.push_back(here);
+                    if (n >= kStallsHere) {
+                        F3A_INFO("autowalk: dead end - stalled %d times within 200 units, %s: %s",
+                                 n, StallWhere().c_str(), obstacle.c_str());
+                        std::string say = strings::T("Utknąłem kilka razy w tym samym miejscu. "
+                                                     "Nie widzę drogi do: ",
+                                                     "Stuck in the same place several times. "
+                                                     "I can't see a way to: ") +
+                                          g_target_name + ".";
+                        StopWalking(say.c_str());
+                        return;
+                    }
+                }
                 if (g_stuck_count >= kMaxStuck) {
                     StopWalking(strings::T("Utknąłem. Spróbuj naprowadzania ręcznego.",
                                            "I'm stuck. Try walking with the guide beacon."));
@@ -3247,7 +4127,7 @@ void Tick(float dt)
                 g_recover_dir   = -g_recover_dir;   // try the other side
                 g_recover_timer = kRecoverSecs;
                 TriggerJump();   // hop while strafing — frees ledges/lips/rubble
-                F3A_DEBUG("autowalk: %s", DescribeObstacle().c_str());
+                F3A_INFO("autowalk: stalled %s: %s", StallWhere().c_str(), obstacle.c_str());
             } else {
                 g_stuck_count = 0;                  // made progress — reset
             }

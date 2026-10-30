@@ -41,22 +41,41 @@ int g_gone_ticks = 0;
 constexpr int kGoneTicksToClose = 6;
 
 // Taking an item. The overlay says nothing when the player presses Use on an
-// entry: the entry just disappears and the next one slides into its place
-// (or, for the last one, the list goes away). So a take is recognised from
-// the list itself — fewer entries in the same container, or a smaller count
-// on the same entry — and the entry that was highlighted is announced.
+// entry: the entry just disappears and the next one slides into its place.
+// So the press is noted with the entry highlighted at that moment (the list
+// read afterwards may already show the next one in its slot), and "taken" is
+// said once the list confirms it: that entry gone, its count smaller, or -
+// the last one - the list gone. A press the game refuses (too heavy...)
+// changes nothing, and nothing is said; the game's own message about it is
+// read by the HUD reader. (Working the take out from list changes alone,
+// without the press noted, missed takes: the player heard nothing.)
 DWORD g_use_down_at = 0;            // last time the Use key was seen down
+bool  g_use_was_down = false;
 constexpr DWORD kUseRecentMs = 700;
 
-void WatchUseKey()
+// True on the press of the Use key (E unless rebound).
+bool WatchUseKey()
 {
     uint8_t sc = game::GetUseKeyScancode();
     UINT vk = sc ? MapVirtualKeyA(sc, MAPVK_VSC_TO_VK) : 0;
     if (!vk) vk = 'E';
-    if (GetAsyncKeyState((int)vk) & 0x8000) g_use_down_at = GetTickCount();
+    const bool down = (GetAsyncKeyState((int)vk) & 0x8000) != 0;
+    const bool pressed = down && !g_use_was_down;
+    g_use_was_down = down;
+    if (down) g_use_down_at = GetTickCount();
+    return pressed;
 }
 
 bool UseRecently() { return g_use_down_at && GetTickCount() - g_use_down_at <= kUseRecentMs; }
+
+// A press of Use on the list, waiting for the list to confirm the take.
+struct PendingTake {
+    std::string item, title;
+    int   total = 0;
+    DWORD at = 0;          // 0 = none
+};
+PendingTake g_take;
+constexpr DWORD kTakeWaitMs = 1500;
 
 // "Śrut (25)" -> "Śrut", 25; no count -> the whole text, 1.
 std::string SplitCount(const std::string& s, int* count)
@@ -70,16 +89,23 @@ std::string SplitCount(const std::string& s, int* count)
     return s.substr(0, open);
 }
 
-void SayTaken(const std::string& entry)
+// `count` taken of `name` ("Śrut, 25"; one: the name alone).
+void SayTaken(const std::string& name, int count)
 {
-    if (entry.empty()) return;
-    F3A_INFO("Loot menu: taken '%s'", entry.c_str());
-    tolk::Speak(strings::RenderArgs(strings::Key::LootTakenFmt, entry.c_str()),
+    // Taken from a body: it has been searched (the scanner says so).
+    if (uint32_t id = game::GetCrosshairActorID(); id && game::IsKnownDead(id))
+        game::NoteSearched(id);
+    if (name.empty()) return;
+    std::string said = name;
+    if (count > 1) said += ", " + std::to_string(count);
+    F3A_INFO("Loot menu: taken '%s'", said.c_str());
+    tolk::Speak(strings::RenderArgs(strings::Key::LootTakenFmt, said.c_str()),
                 tolk::Priority::Ui, true);
 }
 
 void Forget()
 {
+    g_take = {};
     g_open = false;
     g_gone_ticks = 0;
     g_last_title.clear();
@@ -121,16 +147,51 @@ bool IsOpen() { return g_open; }
 
 void Tick(float)
 {
-    WatchUseKey();
+    // E on the list: the entry highlighted until now is the one it takes -
+    // noted before this tick's list, which may already show the next one.
+    if (WatchUseKey() && g_open && g_gone_ticks == 0 && !g_last_item.empty()) {
+        g_take.item  = g_last_item;
+        g_take.title = g_last_title;
+        g_take.total = g_last_total;
+        g_take.at    = GetTickCount() | 1u;
+        F3A_INFO("Loot menu: Use on '%s' (%d entries in '%s')",
+                 g_take.item.c_str(), g_take.total, g_take.title.c_str());
+    }
+    bool taken = false;
     game::LootMenuInfo v;
-    if (!poll::LootMenuState(&v)) {
-        if (!g_open) return;
-        // The last entry taken: the list goes away right after Use. Said at
-        // once, before the flicker wait below, and only once.
-        if (g_gone_ticks == 0 && g_last_total == 1 && UseRecently()) {
-            SayTaken(g_last_item);
-            g_last_total = 0;
+    const bool shown = poll::LootMenuState(&v);
+    if (g_take.at) {
+        int was = 1, now = 1;
+        const std::string wasName = SplitCount(g_take.item, &was);
+        if (!shown) {
+            // The last entry taken: the list goes away (a tick of it, not a
+            // flicker of the overlay).
+            if (g_take.total <= 1 && g_gone_ticks >= 1) {
+                SayTaken(wasName, was);
+                g_take = {};
+                taken = true;
+            }
+        } else if (g_take.title != v.title) {
+            g_take = {};                              // looking at another container
+        } else {
+            const std::string nowName = SplitCount(v.item, &now);
+            if (g_take.total > 0 && v.total < g_take.total) {
+                SayTaken(wasName, was);               // the entry went
+                g_take = {};
+                taken = true;
+            } else if (nowName == wasName && now < was) {
+                SayTaken(wasName, was - now);         // part of a stack
+                g_take = {};
+                taken = true;
+            }
         }
+        if (g_take.at && GetTickCount() - g_take.at > kTakeWaitMs) {
+            F3A_INFO("Loot menu: Use on '%s' took nothing", g_take.item.c_str());
+            g_take = {};
+        }
+    }
+    if (!shown) {
+        if (!g_open) return;
         if (++g_gone_ticks < kGoneTicksToClose) return;   // flicker, not a close
         Forget();
         tolk::Speak(strings::Render(strings::Key::LootClosed),
@@ -161,24 +222,6 @@ void Tick(float)
     // the next one into the same slot, and that is still a new entry to hear.
     const bool moved = v.index != g_last_index || v.offset != g_last_offset;
     const bool text_changed = g_last_item != v.item;
-
-    // A take: an entry fewer in the same container (the highlighted one went),
-    // or the highlighted entry's count went down (part of a stack).
-    bool taken = false;
-    if (!new_container && !g_last_item.empty()) {
-        int was = 1, now = 1;
-        std::string wasName = SplitCount(g_last_item, &was);
-        std::string nowName = SplitCount(v.item, &now);
-        if (g_last_total > 0 && v.total < g_last_total && UseRecently()) {
-            SayTaken(g_last_item);
-            taken = true;
-        } else if (!moved && wasName == nowName && now < was && UseRecently()) {
-            char n[16];
-            std::snprintf(n, sizeof(n), "%d", was - now);
-            SayTaken(wasName + ", " + n);
-            taken = true;
-        }
-    }
 
     if (moved || text_changed || v.equipped != g_last_equipped) {
         g_last_index = v.index;

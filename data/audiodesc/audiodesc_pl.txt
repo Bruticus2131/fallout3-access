@@ -1,6 +1,9 @@
 # Audiodeskrypcja Fallout 3 Access - opisy scen i postaci (polski).
 #
 # [stage <id zadania> <etap>]  - gdy zadanie dojdzie do tego etapu
+# [stage <id zadania> <etap> +<sekundy>] - tyle sekund później (etap przychodzi
+#                                przed tym, co opis mówi - np. na początku
+#                                animacji, a skutek widać po kilku sekundach)
 # [npc <imię>]                 - przy pierwszym spojrzeniu na tę postać
 # [npc <imię> @<id zadania>]   - ...ale tylko w trakcie tego zadania
 # [movie <plik> <sekunda>]     - w tej sekundzie filmu gry (intro, plansze)
@@ -161,13 +164,13 @@ Wokół stoją sąsiedzi z krypty i patrzą na ciebie z uśmiechem.
 Do przodu przeciska się Nadzorca - przywódca krypty.
 
 [stage 00014E84 8]
-Nadzorca wręcza ci Pip-Boya 3000 - komputer zakładany na przedramię, z małym ekranem.
+Nadzorca podchodzi do ciebie z Pip-Boyem 3000 - komputerem zakładanym na przedramię, z małym ekranem.
 
 [stage 00014E84 15]
-Andy, robot krypty, podlatuje do tortu i unosi swoje ostrze.
+Andy, robot krypty, podlatuje do tortu.
 
-[stage 00014E84 16]
-Z tortu zostały kawałki rozrzucone po ladzie.
+[stage 00014E84 16 +4]
+Andy przeciął tort piłą tarczową - kawałki tortu rozprysły się po całej ladzie.
 
 [stage 00014E84 35]
 Na ścianie baru zaczyna pikać interkom. Tata podchodzi i odbiera.
@@ -252,7 +255,7 @@ Amata: szesnastoletnia, ciemne włosy spięte z tyłu, piwne oczy, kombinezon kr
 Pan Brotch, nauczyciel: czarnoskóry mężczyzna w średnim wieku z krótko przyciętymi włosami, w kombinezonie krypty.
 
 [stage 00014E85 50]
-Siadasz w szkolnej ławce. Pan Brotch staje przed klasą, obok flaga i rzutnik.
+Siadasz w szkolnej ławce. Pan Brotch idzie na przód klasy, gdzie stoją flaga i rzutnik.
 
 [stage 00014E85 60]
 Rzutnik wyświetla na ścianie slajdy egzaminu.
@@ -289,10 +292,13 @@ Nadzorca: posiwiały prawie zupełnie, w kombinezonie krypty, z twarzą ściągn
 Jonas leży bez życia na podłodze.
 
 [stage 00014E86 120]
-Jesteś w skalnej jaskini u wejścia do krypty. Przed tobą wielki, okrągły właz w kształcie koła zębatego, z wymalowanym numerem 101.
+Biurko Nadzorcy przesuwa się i odsłania wejście do tajnego tunelu.
+
+[stage 00014E86 140]
+Stoisz przy konsoli sterującej włazem krypty - wielkim, okrągłym, w kształcie koła zębatego, z wymalowanym numerem 101.
 
 [stage 00014E86 144]
-Mechaniczne ramię wyciąga ogromny właz z otworu i odtacza go na bok z ogłuszającym zgrzytem metalu. Za nim ciemny skalny korytarz prowadzący na zewnątrz.
+Właz jest otwarty: mechaniczne ramię wyciągnęło go z framugi i odtoczyło na bok. Za nim ciemny skalny korytarz prowadzi na zewnątrz.
 
 [stage 00014E86 150]
 Wychodzisz z jaskini. Oślepia cię ostre słońce - pierwszy raz w życiu widzisz niebo.

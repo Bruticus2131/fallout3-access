@@ -9,11 +9,12 @@ The installer prepares Fallout 3 for blind and visually impaired players. It ins
 
 - FOSE (from the FOSE website),
 - the Fallout 3 Access plugin (from our GitHub releases),
-- Loot Menu Updated ([mod 27191](https://www.nexusmods.com/fallout3/mods/27191)), and
+- Loot Menu ([mod 24347](https://www.nexusmods.com/fallout3/mods/24347)) and, over it,
+  Loot Menu Updated ([mod 27191](https://www.nexusmods.com/fallout3/mods/27191)), and
 - for Steam/GOG copies only, the Anniversary Patcher ([mod 24913](https://www.nexusmods.com/fallout3/mods/24913)),
   which downgrades the game to 1.7.0.3 so that FOSE can run.
 
-Only the two Nexus mods involve the Nexus Mods API.
+Only the three Nexus mods involve the Nexus Mods API.
 
 ## Sign-in
 

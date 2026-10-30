@@ -44,14 +44,67 @@ constexpr uint32_t  kFlagForward = 0x001;
 constexpr uint32_t  kFlagWalking = 0x100;
 constexpr uint32_t  kFlagRunning = 0x200;
 constexpr uint32_t  kFlagMask    = kFlagForward | kFlagWalking | kFlagRunning;
-constexpr float     kSneakSpeedMult = 0.65f;   // crouched walk vs walk (FNV's fMoveSneakMult)
 
-// Turning: cap the rate so the body swings smoothly, and cut speed while a turn
-// is still in progress. An open-loop move vector at full speed through a sharp
-// corner is what walks a player off a ledge.
-constexpr float kTurnRateRadPerSec = 4.0f;
+// The player's own walk and run speeds, as the FNV mod takes them. Actor
+// vtable +0x448 is CalculateWalkSpeed (0x006FB200) and +0x44C
+// CalculateRunSpeed (0x006FB2E0) - New Vegas's +0x458/+0x45C - found through
+// the formulas they call: the walk one hands IsSneaking (0x0045C200) and the
+// load carried to 0x005845B0, which applies fMoveSneakMult itself; the run
+// one multiplies by fMoveRunMult. Called only while the live vtable holds
+// exactly these.
+constexpr uintptr_t kWalkSpeedSlot = 0x448, kWalkSpeedFn = 0x006FB200;
+constexpr uintptr_t kRunSpeedSlot  = 0x44C, kRunSpeedFn  = 0x006FB2E0;
+// Always run, which Caps Lock toggles: PlayerCharacter+0x5AF. The player's
+// input update flips it on the AlwaysRun control (0x00788E27) and runs when
+// it is on and the Run key is not held, or the other way round (0x007897A9);
+// the constructor fills it from bAlwaysRunByDefault (0x0077AD8A).
+constexpr uintptr_t kAlwaysRunOffset = 0x5AF;
+constexpr uint32_t  kControlRun      = 9;
+// The game's own Auto Move (control 11): PlayerCharacter+0x5B0, toggled by
+// the input handler (0x00788E46). While it is set and no movement control is
+// pressed, the handler holds Forward itself every frame (0x00788EAD, the
+// OSInputGlobals "control held" 0x00BE9590); a movement control clears it
+// (0x00788EB4). Walking by it, the ENGINE moves the player - its own speed,
+// walk or run as Caps Lock and the Run key say, sneaking, its animations and
+// footsteps - and the walk only turns the player toward the route. Used only
+// where those bytes are the ones disassembled; else the old way (Actor::Move).
+constexpr uintptr_t kAutoMoveOffset = 0x5B0;
+
+// Turning. The walk never slows down: it moves at the game's own walk or run
+// speed and nothing else (the player's wish, 2026-10-30 - the turn bands and
+// the turning-circle cap braked every bend). So the body turns about as fast
+// as a mouse turns it, ~690 degrees a second: at a run that is a turning
+// circle of ~30 units, tight enough for a doorway.
+constexpr float kTurnRateRadPerSec = 12.0f;
 constexpr float kPi    = 3.14159265f;
 constexpr float kTwoPi = 6.28318530f;
+
+// Following a stretch of route (SetRoute), frame by frame. The rules are the
+// walk module's own (autowalk's AdvanceWaypoints and LookAheadGoal), moved
+// here so the point steered at is worked out every frame: aim a little ahead
+// along the route, by the turning circle (the FNV mod's 1.5 x, 48 to 96
+// units), never round a corner sharper than 60 degrees, and barely at all
+// where the route climbs or drops - stairs, ramps, walkways with no rails.
+constexpr float kLookAheadMin   = 48.0f;
+constexpr float kLookAheadMax   = 96.0f;
+constexpr float kLookAheadTight = 12.0f;
+constexpr float kRouteClimb     = 24.0f;
+constexpr float kSharpCornerCos = 0.5f;
+constexpr float kRouteRadiusMin = 48.0f;
+constexpr float kRouteFloorDelta = 160.0f;
+
+std::mutex            g_rt_mx;
+game::Vec3            g_rt_pts[kRouteMax];   // under g_rt_mx
+size_t                g_rt_n = 0;            // under g_rt_mx
+std::atomic<uint32_t> g_rt_stamp{ 0 };       // bumped under g_rt_mx
+std::atomic<bool>     g_rt_on{ false };      // the goal is a route, not a point
+// The hook's own copy, and the leg of it being walked.
+game::Vec3 h_rt[kRouteMax];
+size_t     h_rt_n = 0, h_rt_seg = 0;
+uint32_t   h_rt_seen = 0;
+
+std::atomic<float> g_speed{ 0.0f };          // the walk's speed now (CurrentSpeed)
+std::atomic<bool>  g_speed_unreadable{ false };   // the game's speed could not be read
 
 using UpdateFn = void (__thiscall*)(void* mover, float dt);
 UpdateFn g_original = nullptr;
@@ -60,19 +113,19 @@ std::atomic<bool>  g_installed{ false };
 std::atomic<bool>  g_active{ false };
 std::atomic<float> g_goal_x{ 0.0f };
 std::atomic<float> g_goal_y{ 0.0f };
-// The route's next corner, for braking (see SetGoalWithCorner).
-std::atomic<bool>  g_corner_on{ false };
-std::atomic<float> g_corner_x{ 0.0f };
-std::atomic<float> g_corner_y{ 0.0f };
 std::atomic<bool>  g_run{ false };
 // A goal to stop ON rather than walk through (see SetGoalPrecise): within this
 // many units the hook holds still. 0 = an ordinary goal.
 std::atomic<float> g_goal_stop{ 0.0f };
+// Hook thread: the spot the walk last stopped at (NaN: none) - started again
+// from there only on a clear miss.
+float g_spot_x = NAN, g_spot_y = NAN;
 float g_heading = 0.0f;          // radians, engine convention (0 = +Y/north)
 bool  g_heading_seeded = false;
 // A new walk was started from the poll thread: the hook re-seeds its own
 // heading/footstep/animation state on its next frame (those are its own).
 std::atomic<bool> g_reseed_pending{ false };
+bool g_speed_log = false;        // hook thread: say the speed once the walk starts
 
 // Stopping is requested from the polling thread but CARRIED OUT in the hook,
 // which runs on the game's own thread and is handed the engine's real mover as
@@ -123,8 +176,24 @@ constexpr float kGoalTimeout = 0.40f;      // ~5 autowalk ticks
 // the rhythm follows real speed and stops dead when the player wedges.
 constexpr float kFootstepEvery = 55.0f;   // game units between steps
 float g_step_accum = 0.0f;
-float g_anim_refresh = 0.0f;              // seconds since the walk anim was issued
-constexpr float kAnimRefreshSecs = 1.5f;  // long enough not to stutter the anim
+float g_anim_refresh = 0.0f;              // seconds since the movement slot was looked at
+constexpr float kAnimCheckSecs = 0.0f;    // every frame: two pointer reads
+bool  g_pace_said = false;                // the cycle's pace logged this walk
+bool  g_anim_sneaking = false;            // the posture the walk anim was played in
+int   g_anim_dropped_said = 0;            // "dropped"/"wrong cycle" log lines this walk
+float g_anim_cool = 0.0f;                 // s before the next replay is allowed
+// Walking or running, as the walk goes: a change counts only once it has
+// held a moment. Something flipped it for a frame or two about a second into
+// every walk (log 2026-10-29), and the run cycle played after that blip did
+// not take - the walk cycle stayed, slow steps under a run.
+bool  g_run_state = true;
+bool  g_run_seeded = false;
+float g_run_flip = 0.0f;                  // s the other state has held
+constexpr float kRunFlipSecs = 0.25f;
+// How fast the player really goes, measured: the first few 2-second windows
+// of each walk are logged against the speed asked for.
+float g_meas_t = 0.0f, g_meas_d = 0.0f;
+int   g_meas_said = 0;
 bool  g_step_alt = false;                 // alternate pitch: left/right feel
 
 // Animation groups the engine itself uses (same ids as the PlayGroup command).
@@ -141,20 +210,123 @@ float NormalizeAngle(float a)
     return a;
 }
 
-// Speed scale through a turn: crawl while badly misaligned, full speed once
-// pointed the right way. Mirrors what the engine's own followers do.
-// Speed for a heading error, in the bands the engine's own NPC follower uses
-// (the FNV mod mirrors ComputeTurnAndSpeed): full speed to ~45°, then half,
-// and a crawl — never a dead stop — through hairpins, so the player keeps
-// moving while turning and a turn never slides off at full speed. The old
-// ramp braked from 11° on, which made every slight bend a slowdown.
-float TurnSpeedScale(float absErrRad)
+// The game's walk or run speed for the player, -1 when it cannot be had.
+float GameMoveSpeed(void* player, bool running)
 {
-    if (absErrRad > 2.71f) return 0.05f;   // > ~155°: turning round
-    if (absErrRad > 2.01f) return 0.10f;   // > ~115°
-    if (absErrRad > 1.60f) return 0.20f;   // > ~92°
-    if (absErrRad > 0.79f) return 0.50f;   // > ~45°
-    return 1.0f;
+    void** vt = *reinterpret_cast<void***>(player);
+    if (!vt || IsBadReadPtr(vt, kRunSpeedSlot + 4)) return -1.0f;
+    const uintptr_t fn = running ? kRunSpeedFn : kWalkSpeedFn;
+    if (reinterpret_cast<uintptr_t>(vt[(running ? kRunSpeedSlot : kWalkSpeedSlot) / 4]) != fn)
+        return -1.0f;
+    using SpeedFn = float (__thiscall*)(void* self);
+    const float s = reinterpret_cast<SpeedFn>(fn)(player);
+    return std::isfinite(s) && s >= 10.0f && s <= 2000.0f ? s : -1.0f;
+}
+
+// Does the player run, as the game would decide it: always run (Caps Lock)
+// unless the Run key is held, or the other way round. What changed is logged
+// (a few times), so a flip nobody asked for can be traced.
+bool PlayerRuns(const void* player)
+{
+    auto* p = reinterpret_cast<const uint8_t*>(player);
+    if (IsBadReadPtr(p + kAlwaysRunOffset, 1)) return true;
+    const uint8_t always = p[kAlwaysRunOffset];
+    if (always > 1) return true;          // not the flag it should be: run, as before
+    const bool held = game::IsControlKeyHeld(kControlRun);
+    static int s_always = -1, s_held = -1, s_said = 0;
+    if ((always != s_always || (int)held != s_held) && s_always >= 0 && s_said < 12) {
+        ++s_said;
+        F3A_INFO("Mover: always run %u -> %u, Run key %s", (unsigned)s_always,
+                 (unsigned)always, held ? "held" : "not held");
+    }
+    s_always = always; s_held = held;
+    return (always != 0) != held;
+}
+
+// The point to steer at along the route SetRoute gave, and the route's next
+// real corner (for braking). False when there is no route to follow.
+bool RouteSteer(const TESObjectREFR* player, float speed, float* gx, float* gy,
+                float* cx, float* cy)
+{
+    const uint32_t stamp = g_rt_stamp.load();
+    if (stamp != h_rt_seen) {
+        // A new stretch from the walk. Taken when the lock is free; a frame
+        // on the previous copy costs nothing.
+        std::unique_lock<std::mutex> lk(g_rt_mx, std::try_to_lock);
+        if (lk.owns_lock()) {
+            h_rt_n = g_rt_n;
+            for (size_t i = 0; i < h_rt_n; ++i) h_rt[i] = g_rt_pts[i];
+            h_rt_seen = g_rt_stamp.load();
+            h_rt_seg  = 0;
+        }
+    }
+    if (h_rt_n < 2) return false;
+    const float px = player->posX, py = player->posY, pz = player->posZ;
+    // The look-ahead keeps the geometry it was tuned with (a turning circle
+    // of speed / 4 rad/s, at most 64 units), whatever the body turns at now.
+    const float turn   = (speed < 256.0f ? speed : 256.0f) / 4.0f;
+    const float radius = turn * 1.2f > kRouteRadiusMin ? turn * 1.2f : kRouteRadiusMin;
+
+    // On past the points reached, or passed beside (the last one stays).
+    while (h_rt_seg + 2 < h_rt_n) {
+        const auto& a = h_rt[h_rt_seg];
+        const auto& w = h_rt[h_rt_seg + 1];
+        if (std::fabs(w.z - pz) > kRouteFloorDelta) break;   // fallen off: not walked
+        const float dx = w.x - px, dy = w.y - py;
+        bool on = dx * dx + dy * dy <= radius * radius;
+        if (!on) {
+            const float sx = w.x - a.x, sy = w.y - a.y, len2 = sx * sx + sy * sy;
+            if (len2 > 1.0f) {
+                const float t  = ((px - a.x) * sx + (py - a.y) * sy) / len2;
+                const float lx = a.x + t * sx - px, ly = a.y + t * sy - py;
+                on = t >= 0.92f && lx * lx + ly * ly <= 4.0f * radius * radius;
+            }
+        }
+        if (!on) break;
+        ++h_rt_seg;
+    }
+
+    const auto& a = h_rt[h_rt_seg];
+    const auto& b = h_rt[h_rt_seg + 1];
+    *cx = b.x; *cy = b.y;
+    const float abx = b.x - a.x, aby = b.y - a.y, len2 = abx * abx + aby * aby;
+    float t = len2 > 1.0f ? ((px - a.x) * abx + (py - a.y) * aby) / len2 : 1.0f;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    float curX = a.x + abx * t, curY = a.y + aby * t;
+
+    bool climbs = false;
+    for (size_t i = h_rt_seg; i + 1 < h_rt_n && i < h_rt_seg + 3; ++i)
+        if (std::fabs(h_rt[i + 1].z - h_rt[i].z) > kRouteClimb) climbs = true;
+    float remaining = turn * 1.5f;
+    if (remaining < kLookAheadMin) remaining = kLookAheadMin;
+    if (remaining > kLookAheadMax) remaining = kLookAheadMax;
+    if (climbs) remaining = kLookAheadTight;
+
+    size_t next = h_rt_seg + 1;
+    float nx = b.x, ny = b.y;
+    for (int guard = 0; guard < (int)kRouteMax; ++guard) {
+        const float dx = nx - curX, dy = ny - curY;
+        const float seg = std::sqrt(dx * dx + dy * dy);
+        if (remaining <= seg || next + 1 >= h_rt_n) {
+            float f = seg > 1.0f ? remaining / seg : 1.0f;
+            if (f > 1.0f) f = 1.0f;
+            *gx = curX + dx * f; *gy = curY + dy * f;
+            return true;
+        }
+        const auto& o = h_rt[next + 1];
+        const float ox = o.x - nx, oy = o.y - ny;
+        const float olen = std::sqrt(ox * ox + oy * oy);
+        if (seg > 1.0f && olen > 1.0f && (dx * ox + dy * oy) / (seg * olen) < kSharpCornerCos) {
+            *gx = nx; *gy = ny;                    // stop at a sharp corner
+            return true;
+        }
+        remaining -= seg;
+        curX = nx; curY = ny;
+        ++next;
+        nx = o.x; ny = o.y;
+    }
+    *gx = nx; *gy = ny;
+    return true;
 }
 
 void SetMoverFlags(void* mover, bool moving, bool running)
@@ -256,8 +428,85 @@ void ClearMoveDirection(void* mover)
 int g_idle_left = 0;
 constexpr int kIdleReissues = 4;
 
-void StopNow(void* mover)
+// The engine walks (see kAutoMoveOffset): checked once.
+int  g_automove_ok = -1;           // -1 untested, 0 no, 1 yes
+std::atomic<bool> g_auto_moving{ false };   // we set the game's auto-move on
+std::atomic<bool> g_engine_walk{ false };   // the walk going on is the engine's
+int  g_saved_always_run = -1;      // always run as it was before a walk-only stretch
+std::atomic<bool> g_user_took_over{ false };
+// Frames left in which a loaded save's leftover walking is cleared (see the
+// hook). Armed by OnGameLoaded.
+std::atomic<int>  g_after_load{ 0 };
+constexpr int     kAfterLoadFrames = 30;
+
+bool AutoMoveReady()
 {
+    if (g_automove_ok >= 0) return g_automove_ok != 0;
+    // cmp byte [ebx+0x5B0],0 / je  (the per-frame auto-move test), and
+    // mov byte [ebx+0x5B0],0 (a movement control cancels it).
+    static const uint8_t test[] = { 0x80, 0xBB, 0xB0, 0x05, 0x00, 0x00, 0x00, 0x74 };
+    static const uint8_t clear[] = { 0xC6, 0x83, 0xB0, 0x05, 0x00, 0x00, 0x00 };
+    const auto* a = reinterpret_cast<const uint8_t*>(0x00788E56);
+    const auto* b = reinterpret_cast<const uint8_t*>(0x00788EB4);
+    g_automove_ok = !IsBadReadPtr(a, sizeof(test)) && !IsBadReadPtr(b, sizeof(clear)) &&
+                    std::memcmp(a, test, sizeof(test)) == 0 &&
+                    std::memcmp(b, clear, sizeof(clear)) == 0;
+    F3A_INFO("Mover: %s", g_automove_ok ? "the game's own auto-move drives the walk"
+                                        : "auto-move code differs - the walk moves the player itself");
+    return g_automove_ok != 0;
+}
+
+bool AutoMoveOn(const void* player)
+{
+    const auto* b = reinterpret_cast<const uint8_t*>(player) + kAutoMoveOffset;
+    return !IsBadReadPtr(b, 1) && *b != 0;
+}
+
+void SetAutoMove(void* player, bool on)
+{
+    auto* b = reinterpret_cast<uint8_t*>(player) + kAutoMoveOffset;
+    if (IsBadWritePtr(b, 1)) return;
+    *b = on ? 1 : 0;
+    g_auto_moving = on;
+}
+
+// A stretch to be walked, not run (a spot to stop on): always run off for
+// it, put back as it was afterwards. The Run key still runs, as in the game.
+void HoldWalk(void* player, bool walk)
+{
+    auto* ar = reinterpret_cast<uint8_t*>(player) + kAlwaysRunOffset;
+    if (IsBadWritePtr(ar, 1)) return;
+    if (walk) {
+        if (g_saved_always_run < 0 && *ar <= 1) { g_saved_always_run = *ar; *ar = 0; }
+    } else if (g_saved_always_run >= 0) {
+        *ar = (uint8_t)g_saved_always_run;
+        g_saved_always_run = -1;
+    }
+}
+
+// Returns true when it was the game's auto-move that was stopped: the engine
+// stops the player by itself then, and nothing has to be braked.
+bool StopNow(void* mover);
+bool StopEngineWalk()
+{
+    const bool engine = g_engine_walk.exchange(false);
+    if (!engine && !g_auto_moving && g_saved_always_run < 0) return false;
+    if (auto* p = rt::Player()) {
+        SetAutoMove(p, false);
+        HoldWalk(p, false);
+        g_watch       = 0.0f;
+        g_watch_stage = 0;
+        g_watch_x     = p->posX;
+        g_watch_y     = p->posY;
+    }
+    g_auto_moving = false;
+    F3A_INFO("Mover: stop - the game's auto-move is off.");
+    return true;
+}
+
+bool StopNow(void* mover)
+{
+    if (StopEngineWalk()) return true;
     SetMoverFlags(mover, false, false);
     EngineStopMover(mover);
     ClearMoveDirection(mover);
@@ -274,6 +523,8 @@ void StopNow(void* mover)
             // producing footsteps on a stationary player.
             killed = game::StopActorMovementAnim(p);
             idled  = game::PlayActorAnimGroup(p, kAnimIdle);
+            // The cycle's pace back to what the walk found (SetMovementAnimPace).
+            game::RestoreMovementAnimPace(p);
         }
         g_current_anim = kAnimIdle;
         g_idle_left    = kIdleReissues;
@@ -290,6 +541,7 @@ void StopNow(void* mover)
         g_watch_x     = p->posX;
         g_watch_y     = p->posY;
     }
+    return false;
 }
 
 // The live mover, captured for the path probe. Set inside the engine's own
@@ -618,9 +870,48 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
 
     // Carry out a stop asked for from another thread, before anything else —
     // the engine reads these flags in the original Update we are about to call.
-    if (g_stop_pending.exchange(false)) {
-        StopNow(mover);
-        g_brake = kBrakeFrames;
+    if (g_stop_pending.exchange(false))
+        g_brake = StopNow(mover) ? 0 : kBrakeFrames;
+
+    // Just after a game was loaded. A save made during a walk keeps the
+    // game's auto-move on (a quick save: no menu, the walk still going) or
+    // the mover's "moving forward" state (a save from the pause menu, where
+    // the game stands still before a frame can clear it) - and the loaded
+    // player walked on, or ran in place, with nothing driving them (user,
+    // 2026-10-30). Cleared in the first frames, unless a walk has started
+    // or the player is pressing a movement key.
+    if (const int left = g_after_load.load(); left > 0) {
+        g_after_load.store(left - 1);
+        auto* p = rt::Player();
+        bool keys = false;
+        for (uint32_t c = 0; c < 4; ++c) keys = keys || game::IsControlKeyHeld(c);
+        if (p && !g_active.load() && !keys && !IsBadReadPtr(mover, 0x98)) {
+            const auto* mf = reinterpret_cast<const uint8_t*>(mover);
+            const uint32_t f1 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags1);
+            const uint32_t f2 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags2);
+            const bool autoMove = AutoMoveOn(p);
+            // A direction (forward, back, the sides), not the walk/run mode
+            // bits: 0x200 stays set on a player standing with always run on.
+            const bool moving = ((f1 | f2) & 0x0F) != 0;
+            bool ok = false;
+            int group = -1;
+            game::ActorMovementSequence(p, &ok, &group);
+            const bool cycle = ok && (group == (int)kAnimForward || group == (int)kAnimFastForward);
+            if (autoMove || moving || cycle) {
+                static int s_said = 0;
+                if (s_said++ < 4)
+                    F3A_INFO("Mover: the loaded save was still walking (auto-move %d, movement "
+                             "flags %08X / %08X, walk cycle %d) - stopped", (int)autoMove, f1, f2,
+                             (int)cycle);
+                if (autoMove) SetAutoMove(p, false);
+                SetMoverFlags(mover, false, false);
+                EngineStopMover(mover);
+                if (cycle) {
+                    game::StopActorMovementAnim(p);
+                    game::PlayActorAnimGroup(p, kAnimIdle);
+                }
+            }
+        }
     }
     // A walk (re)started by SetGoal: fresh state, set here on the thread that
     // owns it rather than written from the poll thread mid-frame.
@@ -629,6 +920,12 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
         g_step_accum     = 0.0f;
         g_current_anim   = kAnimIdle;  // force the walk anim to be issued
         g_watch_stage    = 3;          // a new walk ends the previous stop's probe
+        g_speed_log      = true;
+        g_anim_dropped_said = 0;
+        g_meas_t = g_meas_d = 0.0f;
+        g_meas_said = 0;
+        g_pace_said = false;
+        g_run_seeded = false;
     }
 
     if (!g_active.load()) {
@@ -703,8 +1000,75 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
         }
     }
 
+    // How fast: the player's own way of moving holds during a walk, as in the
+    // FNV mod. Running or walking as Caps Lock (always run) and the Run key
+    // say, at the game's own speed for it. Crouched (the 0x400 posture bit of
+    // the movement flags; 0x800 is swimming) the walk creeps instead of
+    // running - running stood the player up and gave them away - and carrying
+    // more than they can (inventory weight, AV 46, over carry weight, AV 13)
+    // it walks, as the game makes them. The engine picks the crouched variant
+    // of the walk animation itself from the posture bit, and the game's walk
+    // speed already counts the crouch.
+    bool running = false;
+    if (g_run.load()) {
+        const bool now = PlayerRuns(player);
+        if (!g_run_seeded) { g_run_seeded = true; g_run_state = now; g_run_flip = 0.0f; }
+        if (now != g_run_state) {
+            g_run_flip += clamped;
+            if (g_run_flip >= kRunFlipSecs) { g_run_state = now; g_run_flip = 0.0f; }
+        } else {
+            g_run_flip = 0.0f;
+        }
+        running = g_run_state;
+    }
+    const auto* mf = reinterpret_cast<const uint8_t*>(mover);
+    const uint32_t f1 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags1);
+    const uint32_t f2 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags2);
+    const bool sneaking = (f1 & 0xC00) == 0x400 || (f2 & 0xC00) == 0x400;
+    const float carried = game::GetPlayerAV(46), carry = game::GetPlayerAV(13);
+    const bool overloaded = carry > 0.0f && carried > carry;
+    static bool s_said_sneak = false, s_said_load = false;
+    if (sneaking != s_said_sneak || overloaded != s_said_load) {
+        s_said_sneak = sneaking; s_said_load = overloaded;
+        F3A_INFO("Mover: sneaking=%d overloaded=%d (flags %08X / %08X)",
+                 (int)sneaking, (int)overloaded, f1, f2);
+    }
+    if (sneaking || overloaded) running = false;
+    // The game's speed and no other: when it cannot be read (another build
+    // of the game), the walk stops instead of making one up.
+    const bool engineWalk = config::Get().native_walk && AutoMoveReady();
+    float speed = GameMoveSpeed(player, running);
+    if (engineWalk && !(speed > 0.0f)) speed = g_speed.load() > 0.0f ? g_speed.load() : 150.0f;
+    if (!(speed > 0.0f)) {
+        F3A_WARN("Mover: the game's %s speed cannot be read - the walk stops.",
+                 running ? "run" : "walk");
+        g_speed_unreadable.store(true);
+        g_active.store(false);
+        StopNow(mover);
+        if (g_original) g_original(mover, dt);
+        return;
+    }
+    g_speed.store(speed);
+    {
+        static int   s_said_run = -1;
+        static float s_said_speed = 0.0f;
+        if (g_speed_log || (int)running != s_said_run ||
+            std::fabs(speed - s_said_speed) > 0.1f * s_said_speed) {
+            g_speed_log = false;
+            g_pace_said = false;            // and the cycle's pace with it
+            s_said_run = (int)running; s_said_speed = speed;
+            F3A_INFO("Mover: %s at %.0f units/s (the game's own speed)",
+                     running ? "running" : "walking", speed);
+        }
+    }
+
     float gx = g_goal_x.load();
     float gy = g_goal_y.load();
+    // Along a route: the point a little ahead on it, worked out now.
+    if (g_rt_on.load()) {
+        float rx, ry, rcx, rcy;
+        if (RouteSteer(player, speed, &rx, &ry, &rcx, &rcy)) { gx = rx; gy = ry; }
+    }
     float dx = gx - player->posX;
     float dy = gy - player->posY;
     // A goal that is not a number (a bad read somewhere upstream) must never
@@ -719,6 +1083,62 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
 
     if (!g_heading_seeded) { g_heading = player->rotZ; g_heading_seeded = true; }
 
+    // THE ENGINE WALKS. The game's own auto-move holds Forward; the walk only
+    // turns the player toward the route, as a player with a mouse would.
+    // Speed, walk or run, sneaking, stairs, animations and footsteps are all
+    // the game's.
+    if (engineWalk) {
+        // A movement key cancels the game's auto-move: the player has taken
+        // over, and the walk ends.
+        if (g_auto_moving && !AutoMoveOn(player)) {
+            g_auto_moving = false;
+            F3A_INFO("Mover: the game's auto-move was cancelled (a movement key) - the walk stops.");
+            g_user_took_over.store(true);
+            g_active.store(false);
+            StopNow(mover);
+            if (g_original) g_original(mover, dt);
+            return;
+        }
+        const float want = std::atan2(dx, dy);
+        float turn = NormalizeAngle(want - g_heading);
+        const float maxTurn = kTurnRateRadPerSec * clamped;
+        if (turn >  maxTurn) turn =  maxTurn;
+        if (turn < -maxTurn) turn = -maxTurn;
+        g_heading = NormalizeAngle(g_heading + turn);
+        if (!game::SteerYawRad(g_heading)) player->rotZ = g_heading;
+        g_engine_walk.store(true);
+        // A spot to stop ON (the photo's trigger box): the game stops a
+        // walking player within a few units, so it is let go just before the
+        // spot - at a fifth of a second's way it stood 35-odd units short,
+        // outside the 12 that count as on it. Once stopped, only a clear miss
+        // starts it again, so it never paces to and fro over the spot.
+        bool go = true;
+        const float stopR = g_goal_stop.load();
+        if (stopR > 0.0f) {
+            const float d = std::sqrt(dx * dx + dy * dy);
+            const float lead = stopR + speed * 0.04f;
+            const bool stoppedHere = std::fabs(gx - g_spot_x) < 1.0f && std::fabs(gy - g_spot_y) < 1.0f;
+            go = d > lead + ((!g_auto_moving && stoppedHere) ? 24.0f : 0.0f);
+            if (!go && g_auto_moving) { g_spot_x = gx; g_spot_y = gy; }
+        }
+        HoldWalk(player, !g_run.load());
+        if (go != g_auto_moving) SetAutoMove(player, go);
+        const float bx = player->posX, by = player->posY;
+        if (g_original) g_original(mover, dt);
+        const float mx = player->posX - bx, my = player->posY - by;
+        g_meas_d += std::sqrt(mx * mx + my * my);
+        g_meas_t += clamped;
+        if (g_meas_t >= 2.0f) {
+            if (g_meas_said < 3) {
+                ++g_meas_said;
+                F3A_INFO("Mover: the game moved the player %.0f units in %.1f s = %.0f units/s",
+                         g_meas_d, g_meas_t, g_meas_d / g_meas_t);
+            }
+            g_meas_t = g_meas_d = 0.0f;
+        }
+        return;
+    }
+
     float target = std::atan2(dx, dy);                 // engine convention
     float err    = NormalizeAngle(target - g_heading);
 
@@ -732,49 +1152,13 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     // field that decides WHERE "forward" points.
     player->rotZ = g_heading;
 
-    // Brake for the sharper of the two turns: toward the look-ahead point we
-    // steer at, and toward the route's real corner (when one was given and is
-    // not right underfoot, where its bearing means nothing).
-    float brake = std::fabs(err);
-    if (g_corner_on.load()) {
-        float cx = g_corner_x.load() - player->posX;
-        float cy = g_corner_y.load() - player->posY;
-        if (cx * cx + cy * cy > 32.0f * 32.0f) {
-            float cerr = std::fabs(NormalizeAngle(std::atan2(cx, cy) - g_heading));
-            if (cerr > brake) brake = cerr;
-        }
-    }
+    // No braking for turns or corners: the speed stays the game's (see
+    // kTurnRateRadPerSec).
 
-    bool running = g_run.load();
-    // The player's own way of moving holds during a walk, as in the FNV mod:
-    // crouched (the 0x400 posture bit of the movement flags; 0x800 is
-    // swimming) the walk creeps instead of running - running stood the player
-    // up and gave them away - and carrying more than they can (inventory
-    // weight, AV 46, over carry weight, AV 13) it walks, as the game makes
-    // them. The engine picks the crouched variant of the walk animation itself
-    // from the posture bit.
-    const auto* mf = reinterpret_cast<const uint8_t*>(mover);
-    const uint32_t f1 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags1);
-    const uint32_t f2 = *reinterpret_cast<const uint32_t*>(mf + kMoverFlags2);
-    const bool sneaking = (f1 & 0xC00) == 0x400 || (f2 & 0xC00) == 0x400;
-    const float carried = game::GetPlayerAV(46), carry = game::GetPlayerAV(13);
-    const bool overloaded = carry > 0.0f && carried > carry;
-    static bool s_said_sneak = false, s_said_load = false;
-    if (sneaking != s_said_sneak || overloaded != s_said_load) {
-        s_said_sneak = sneaking; s_said_load = overloaded;
-        F3A_INFO("Mover: sneaking=%d overloaded=%d (flags %08X / %08X)",
-                 (int)sneaking, (int)overloaded, f1, f2);
-    }
-    if (sneaking || overloaded) running = false;
-    float speed = static_cast<float>(config::Get().autowalk_speed);
-    if (!running) speed *= 0.5f;
-    if (sneaking) speed *= kSneakSpeedMult;
-    speed *= TurnSpeedScale(brake);
-
-    // A spot to stand ON (a trigger box a few dozen units across): ease in
-    // over the last stretch and never step past it in one frame. The walk
-    // module only looks every 80 ms, which at full speed is a stride — so the
-    // stopping has to happen here, frame by frame.
+    // A spot to stand ON (a trigger box a few dozen units across): never step
+    // past it in one frame. The walk module only looks every 80 ms, which at
+    // full speed is a stride - so the stopping has to happen here, frame by
+    // frame.
     float stopR = g_goal_stop.load();
     if (stopR > 0.0f) {
         float left = std::sqrt(dx * dx + dy * dy);
@@ -792,11 +1176,6 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
                 g_current_anim = kAnimIdle;
             }
             return;
-        }
-        constexpr float kEaseIn = 96.0f;
-        if (left < kEaseIn) {
-            float k = left / kEaseIn;
-            speed *= k < 0.25f ? 0.25f : k;
         }
         float maxStep = (left - stopR * 0.5f) / (clamped > 0.0f ? clamped : 0.016f);
         if (speed > maxStep) speed = maxStep > 0.0f ? maxStep : 0.0f;
@@ -826,30 +1205,89 @@ void __fastcall Update_Hook(void* mover, void* /*edx*/, float dt)
     // restart the animation continuously.
     if (g_anim_works && config::Get().walk_animation) {
         uint32_t want = running ? kAnimFastForward : kAnimForward;
-        // Re-issue periodically, not only on change. Whether the animation is
-        // still playing is the ENGINE's business — a collision or a posture
-        // change can drop it — and our own note saying "already playing" then
-        // goes stale. The footsteps stop with it, and since the synthesized
-        // clicks are suppressed while the real ones are expected, the walk goes
-        // silent while the player is still moving. That is the gap you hear.
+        // Whether the animation is still playing is the ENGINE's business — a
+        // collision or a posture change can drop it — and our own note saying
+        // "already playing" then goes stale. The footsteps stop with it, and
+        // since the synthesized clicks are suppressed while the real ones are
+        // expected, the walk goes silent while the player is still moving. So
+        // the movement slot is looked at every frame, and the cycle is played
+        // again when it is empty or the game has put another one in its
+        // place - at most twice a second. It used to be replayed every
+        // 1.5 s whatever, which restarted a cycle that was playing fine; and
+        // replaying only an EMPTY slot left the game's own choice playing, a
+        // slow walk's footsteps while the player ran (log 2026-10-29).
+        // Checked by the cycle's GROUP, not by which object plays it: a run
+        // played just after a walk did not take, the walk cycle stayed in
+        // the slot as a new object of the walk's group, and a check by
+        // object saw nothing wrong (log 2026-10-29).
+        bool clearSlot = false;
         g_anim_refresh += clamped;
-        if (g_anim_refresh >= kAnimRefreshSecs) {
+        if (g_anim_cool > 0.0f) g_anim_cool -= clamped;
+        if (g_anim_refresh >= kAnimCheckSecs && want == g_current_anim && g_anim_cool <= 0.0f) {
             g_anim_refresh = 0.0f;
-            g_current_anim = 0;          // force the re-issue below
+            bool ok = false;
+            int group = -1;
+            const void* seq = game::ActorMovementSequence(player, &ok, &group);
+            if (ok && (!seq || group != (int)want)) {
+                if (g_anim_dropped_said < 6) {
+                    ++g_anim_dropped_said;
+                    F3A_INFO("Mover: the movement slot holds %s (group %d), not the %s cycle "
+                             "- playing it again", seq ? "another cycle" : "nothing", group,
+                             running ? "run" : "walk");
+                }
+                g_current_anim = 0;          // re-issued below
+                clearSlot = seq != nullptr;
+            }
         }
+        // Crouching or standing up mid-walk: the same group, the other
+        // variant of it, which the engine picks when the group is played.
+        if (sneaking != g_anim_sneaking) { g_current_anim = 0; clearSlot = true; }
         if (want != g_current_anim) {
+            // From a walk to a run or back, or a cycle that did not take:
+            // the slot is emptied first, so the new cycle is not left waiting
+            // behind the old one.
+            if (clearSlot || g_current_anim == kAnimForward || g_current_anim == kAnimFastForward)
+                game::StopActorMovementAnim(player);
             if (game::PlayActorAnimGroup(player, want)) {
                 g_current_anim = want;
+                g_anim_sneaking = sneaking;
+                g_anim_refresh = 0.0f;
+                g_anim_cool = 0.25f;
             } else {
                 g_anim_works = false;      // guards refused; stop trying
                 F3A_INFO("Mover: walk animation unavailable on this build.");
             }
+        }
+        // And in step with how fast the player really goes, this frame -
+        // braking for a turn included. The game sets this pace only when it
+        // starts a walk or run itself; ours ran at whatever pace was left,
+        // which is why the steps were slow under a full run.
+        float pace = 0.0f, animSpeed = 0.0f, before = 0.0f;
+        if (game::SetMovementAnimPace(player, speed, &pace, &animSpeed, &before) && !g_pace_said) {
+            g_pace_said = true;
+            F3A_INFO("Mover: %s cycle paced x%.2f (its own speed %.0f units/s; it was x%.2f)",
+                     running ? "run" : "walk", pace, animSpeed, before);
         }
     }
 
     float beforeX = player->posX, beforeY = player->posY;
     float disp[3] = { 0.0f, speed * clamped, 0.0f };   // local space; engine rotates it
     ActorMove(player, clamped, disp);
+
+    {
+        const float mx = player->posX - beforeX, my = player->posY - beforeY;
+        g_meas_d += std::sqrt(mx * mx + my * my);
+        g_meas_t += clamped;
+        if (g_meas_t >= 2.0f) {
+            if (g_meas_said < 3) {
+                ++g_meas_said;
+                F3A_INFO("Mover: moved %.0f units in %.1f s = %.0f units/s (asked %.0f, "
+                         "before braking for turns)", g_meas_d, g_meas_t, g_meas_d / g_meas_t,
+                         g_speed.load());
+            }
+            g_meas_t = g_meas_d = 0.0f;
+        }
+    }
 
     // Step clicks follow the distance ACTUALLY covered, so wedging against a wall
     // silences them — which is the cue that something is wrong.
@@ -951,6 +1389,7 @@ void Shutdown()
 {
     if (!g_installed.load()) return;
     g_active.store(false);
+    StopEngineWalk();            // never leave the game walking by itself
     auto* slot = reinterpret_cast<uintptr_t*>(kUpdateSlot);
     DWORD old = 0;
     if (VirtualProtect(slot, sizeof(uintptr_t), PAGE_EXECUTE_READWRITE, &old)) {
@@ -963,24 +1402,50 @@ void Shutdown()
 bool Available() { return g_installed.load(); }
 bool Active()    { return g_active.load(); }
 
-void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY)
+void SetRoute(const game::Vec3* pts, size_t n)
 {
+    if (!pts || n == 0) return;
+    if (n > kRouteMax) n = kRouteMax;
+    {
+        std::lock_guard<std::mutex> lk(g_rt_mx);
+        for (size_t i = 0; i < n; ++i) g_rt_pts[i] = pts[i];
+        g_rt_n = n;
+        g_rt_stamp.fetch_add(1);
+    }
     g_goal_stop.store(0.0f);
-    g_corner_x.store(cornerX);
-    g_corner_y.store(cornerY);
-    g_corner_on.store(std::isfinite(cornerX) && std::isfinite(cornerY));
-    g_goal_x.store(x);
-    g_goal_y.store(y);
-    g_run.store(run);
+    // Where the leg being walked ends: what the hook steers at until it has
+    // its copy of the route (and what the heading readout names).
+    const auto& end = pts[n > 1 ? 1 : 0];
+    g_goal_x.store(end.x);
+    g_goal_y.store(end.y);
+    g_run.store(true);
+    g_rt_on.store(true);
     g_goal_stamp.fetch_add(1);      // feeds the watchdog in the hook
     if (!g_active.exchange(true))
         g_reseed_pending.store(true);   // the hook resets its state (next frame)
 }
 
+float CurrentSpeed()
+{
+    const float s = g_speed.load();
+    return s > 0.0f ? s : 0.0f;
+}
+
+bool SpeedUnreadable() { return g_speed_unreadable.exchange(false); }
+
+bool UserTookOver() { return g_user_took_over.exchange(false); }
+
+void OnGameLoaded() { g_after_load.store(kAfterLoadFrames); }
+
+void SetGoalWithCorner(float x, float y, bool run, float, float)
+{
+    SetGoal(x, y, run);   // the corner only braked the walk, which it no longer does
+}
+
 void SetGoal(float x, float y, bool run)
 {
+    g_rt_on.store(false);
     g_goal_stop.store(0.0f);
-    g_corner_on.store(false);
     g_goal_x.store(x);
     g_goal_y.store(y);
     g_run.store(run);
@@ -991,7 +1456,7 @@ void SetGoal(float x, float y, bool run)
 
 void SetGoalPrecise(float x, float y, float stopRadius)
 {
-    g_corner_on.store(false);
+    g_rt_on.store(false);
     g_goal_x.store(x);
     g_goal_y.store(y);
     g_run.store(false);
@@ -1010,10 +1475,16 @@ void Clear()
     // animation and ran no brake. The mod said "Zatrzymano" and nothing in the
     // game was told to stop. A stop request is cheap; swallowing one is not.
     g_active.store(false);
+    // The game's auto-move off at once: under a menu the hook does not run,
+    // and the player would walk on for a frame when it closes. A byte the
+    // game's own input handler also writes; the rest is the hook's.
+    if (g_auto_moving.load())
+        if (auto* p = rt::Player()) SetAutoMove(p, false);
     // Hand the actual stopping to the hook: it runs on the game's thread and is
     // given the engine's own mover, so nothing here has to guess an offset or
     // call into the game from the polling thread. The very next frame clears the
     // movement bits before the engine's Update gets to act on them.
+    g_rt_on.store(false);
     g_stop_pending.store(true);
 }
 

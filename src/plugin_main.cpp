@@ -23,6 +23,7 @@
 #include "f3a/hotkeys.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/engine_hooks.h"
+#include "f3a/settings_menu.h"
 #include "f3a/polling_loop.h"
 #include "f3a/player_mover.h"
 #include "f3a/modules.h"
@@ -126,6 +127,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
     f3a::menu::Init();
     f3a::hotkeys::Init();
     f3a::engine::InstallHooks();   // engine bug fixes (the inventory drop prompt)
+    f3a::settings_menu::Install(); // the Accessibility category in Settings
 
     f3a::OnPluginLoad();
 

@@ -13,15 +13,19 @@
 #include "fose/GameOSDepend.h"
 #include "f3a/polling_loop.h"
 #include "f3a/questobjs.h"
+#include "f3a/settings_menu.h"
 
 #include <windows.h>
+#include <shlobj.h>
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cwctype>
 #include <cstring>
 #include <unordered_map>
 
@@ -655,6 +659,7 @@ struct ContainerTally {
     bool levelled = false;  // base list holds a leveled list (rolled at runtime)
     bool changes  = false;  // the ref has ExtraContainerChanges
     int  entries  = 0;      // ...and how many entries it lists
+    std::string seen;       // the first few: "form id x count", for the log
 };
 
 // Is a container currently empty? Counted the way FOSE's own GetNumItems does
@@ -722,8 +727,15 @@ int ContainerItemStateAt(TESForm* base, UInt32 contOff, const TESObjectREFR* r,
                 if (ed) {
                     if (!Readable(ed, 0x0C)) return -1;
                     ++t.entries;
-                    add(*reinterpret_cast<const void* const*>(ed + 0x08),
-                        *reinterpret_cast<const SInt32*>(ed + 0x04));
+                    const void* f = *reinterpret_cast<const void* const*>(ed + 0x08);
+                    const SInt32 n = *reinterpret_cast<const SInt32*>(ed + 0x04);
+                    add(f, n);
+                    if (t.entries <= 4 && Readable(f, 0x10)) {
+                        char buf[40];
+                        std::snprintf(buf, sizeof(buf), "%s%08X x%d", t.seen.empty() ? "" : ", ",
+                                      (unsigned)reinterpret_cast<const TESForm*>(f)->refID, (int)n);
+                        t.seen += buf;
+                    }
                 }
                 list = *reinterpret_cast<const UInt8* const*>(list + 0x04);
             }
@@ -735,12 +747,13 @@ int ContainerItemStateAt(TESForm* base, UInt32 contOff, const TESObjectREFR* r,
     for (const auto& c : counts) if (c.n > 0) ++t.forms;
     if (out) *out = t;
     if (t.forms > 0) return 1;
-    // A leveled list with no changes yet may simply not have been rolled —
-    // nor with a changes record that lists nothing: "empty" is said only when
-    // the game's own record of the contents says so. (The scanner hides
-    // empty containers, and a hidden container that held something is the
-    // one mistake it must never make.)
-    if (t.levelled && (!t.changes || t.entries == 0)) return -1;
+    // A leveled list with no changes record yet may simply not have been
+    // rolled: that one is "can't tell". The game rolls a container's lists
+    // as its cell loads and writes what came out into that record - every
+    // container in the logs had one - so a record that lists nothing is a
+    // roll that gave nothing: empty. Taking it for "can't tell" kept dozens
+    // of empty boxes in the scanner (log 2026-10-24: 25 of 96 containers).
+    if (t.levelled && !t.changes) return -1;
     return 0;
 }
 
@@ -880,8 +893,9 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
                 if (!seen && s_seen.size() < 8192) {
                     s_seen.push_back({ r->refID, st });
                     F3A_INFO("Cont: '%s' state=%d (1=full 0=empty -1=?) forms=%d lvl=%d "
-                             "changes=%d entries=%d", label.c_str(), st, tally.forms,
-                             (int)tally.levelled, (int)tally.changes, tally.entries);
+                             "changes=%d entries=%d [%s]", label.c_str(), st, tally.forms,
+                             (int)tally.levelled, (int)tally.changes, tally.entries,
+                             tally.seen.c_str());
                 }
             }
             if (st == 0) {
@@ -981,6 +995,94 @@ bool IsHostileToPlayer(const void* refr)
     return tgt == (void*)rt::Player();
 }
 
+// Who hit an actor, and who killed it. The hit is the process's last hit:
+// the game's GetHitLocation and GetLastHitCritical conditions take it from
+// 0x006F6F50, which asks the process (actor+0x60) through its vtable +0x764
+// - in a High or MiddleHigh process 0x0073B4F0, the field at +0x240; in the
+// lower ones (actors far away) 0x00887DA0, nothing. It is New Vegas's
+// ActorHitData: the attacker at +0x00, the hit location at +0x10 (what
+// GetHitLocation returns), the flags at +0x58 (bit 4 critical, what
+// GetLastHitCritical tests). The killer is actor+0xB8, what IsKiller
+// compares (0x00513050, only for a dead actor). Read, not called: the
+// process function is checked to be one of the two disassembled.
+namespace {
+constexpr uintptr_t kHitDataFromProcess = 0x0073B4F0;
+constexpr uintptr_t kNoHitData          = 0x00887DA0;
+
+// `why`: -1 the process is not one of the two, -2 a low process (no data),
+// -3 no hit data, -4 hit data with no attacker.
+const void* LastHitSource(const void* actor, int* why)
+{
+    *why = -1;
+    auto* a = reinterpret_cast<const UInt8*>(actor);
+    if (!Readable(a, 0x64)) return nullptr;
+    auto* proc = *reinterpret_cast<const UInt8* const*>(a + 0x60);
+    if (!Readable(proc, 0x244)) return nullptr;
+    auto* vt = *reinterpret_cast<const uintptr_t* const*>(proc);
+    if (!Readable(vt, 0x768)) return nullptr;
+    const uintptr_t fn = vt[0x764 / 4];
+    if (fn == kNoHitData) { *why = -2; return nullptr; }
+    if (fn != kHitDataFromProcess) return nullptr;
+    *why = -3;
+    auto* hd = *reinterpret_cast<const UInt8* const*>(proc + 0x240);
+    if (!Readable(hd, 4)) return nullptr;
+    *why = -4;
+    return *reinterpret_cast<const void* const*>(hd);
+}
+} // namespace
+
+int LastHitByPlayer(const void* actor)
+{
+    int why = -1;
+    const void* src = LastHitSource(actor, &why);
+    if (!src) return why;
+    return src == (const void*)rt::Player() ? 1 : 0;
+}
+
+bool RefGone(const void* refr, uint32_t expectedRefID)
+{
+    if (!IsLiveRef(refr, expectedRefID)) return true;
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    // The scan's own test (ScanCellRefs): 0x20 deleted - set, with 0x02, on
+    // a reference that was taken - and 0x800 disabled.
+    return (r->flags & 0x820) != 0 || !r->parentCell;
+}
+
+namespace {
+std::mutex g_searched_mx;
+std::unordered_set<uint32_t> g_searched;
+}
+
+void NoteSearched(uint32_t refid)
+{
+    if (!refid) return;
+    std::lock_guard<std::mutex> lk(g_searched_mx);
+    if (g_searched.insert(refid).second)
+        F3A_INFO("Searched: body %08X", refid);
+}
+
+bool WasSearched(uint32_t refid)
+{
+    std::lock_guard<std::mutex> lk(g_searched_mx);
+    return g_searched.count(refid) != 0;
+}
+
+void ClearSearched()
+{
+    std::lock_guard<std::mutex> lk(g_searched_mx);
+    g_searched.clear();
+}
+
+int KilledByPlayer(const void* actor)
+{
+    auto* a = reinterpret_cast<const UInt8*>(actor);
+    if (!Readable(a, 0xBC)) return -1;
+    const void* killer = *reinterpret_cast<const void* const*>(a + 0xB8);
+    if (killer) return killer == (const void*)rt::Player() ? 1 : 0;
+    // No killer recorded (a fall, a trap): whoever hit it last.
+    return LastHitByPlayer(actor);
+}
+
 // The player's cell and, outdoors, the loaded cells around it (two squares
 // each way): exteriors are split into a grid of cells and the player's
 // parentCell holds only its own square, so a metro door one square over is
@@ -1046,6 +1148,10 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
             if (e.kind == WorldEntity::Kind::Actor) {
                 e.hostile = IsKnownHostile(e.form_id);
                 e.dead    = IsKnownDead(e.form_id);
+                // The player's companion: the byte GetPlayerTeammate tests
+                // (eval 0x005135E0: actor+0x181).
+                if (!e.dead && e.refr && Readable(e.refr, 0x184))
+                    e.teammate = reinterpret_cast<const UInt8*>(e.refr)[0x181] != 0;
                 // A body: anything left on it? (Its worn clothes count too.)
                 if (e.dead && e.refr) {
                     auto* r = reinterpret_cast<const TESObjectREFR*>(e.refr);
@@ -1341,6 +1447,27 @@ float GetGameHour()
     if (!Readable(f, 0x28) || f->typeID != kFormType_Global) return -1.0f;
     const float h = *reinterpret_cast<const float*>(reinterpret_cast<const UInt8*>(f) + 0x24);
     return (std::isfinite(h) && h >= 0.0f && h <= 24.0f) ? h : -1.0f;
+}
+
+bool ReadGameClock(GameClock* out)
+{
+    if (!out || !OnMainThread()) return false;
+    const UInt8 want[] = { 0x51, 0x8B, 0x0D, 0x14, 0xDD, 0x06, 0x01 };   // LookupFormByID
+    auto* p = reinterpret_cast<const UInt8*>(0x00455190);
+    if (!Readable(p, sizeof(want)) || std::memcmp(p, want, sizeof(want)) != 0) return false;
+    using LookupFn = TESForm* (__cdecl*)(UInt32);
+    float v[4];
+    for (UInt32 i = 0; i < 4; ++i) {
+        TESForm* f = reinterpret_cast<LookupFn>(0x00455190)(0x35 + i);
+        if (!Readable(f, 0x28) || f->typeID != kFormType_Global) return false;
+        v[i] = *reinterpret_cast<const float*>(reinterpret_cast<const UInt8*>(f) + 0x24);
+        if (!std::isfinite(v[i])) return false;
+    }
+    if (!(v[0] >= 1.0f && v[0] < 10000.0f && v[1] >= 0.0f && v[1] < 12.0f &&
+          v[2] >= 1.0f && v[2] < 32.0f && v[3] >= 0.0f && v[3] <= 24.0f))
+        return false;
+    out->year = (int)v[0]; out->month = (int)v[1]; out->day = (int)v[2]; out->hour = v[3];
+    return true;
 }
 
 int GetQuestStage(uint32_t questId, bool* running)
@@ -1673,6 +1800,34 @@ const void* GetPlayerCell()
     return p ? (const void*)p->parentCell : nullptr;
 }
 
+// A practice target: an activator whose script reacts to being shot - an
+// OnHit (block type 8) or OnHitWith (9) block, as the vault range's
+// CG02Target has ("begin OnHitWith"). Its compiled script (Script+0x20 the
+// length, +0x30 the data): the 4-byte ScriptName, then each block as Begin
+// (0x0010), the parameters' length, the block type, the block's length.
+bool IsHitTarget(const TESForm* base)
+{
+    if (!base || !Readable(base, 0x64) || base->typeID != kFormType_Activator) return false;
+    auto* script = *reinterpret_cast<const UInt8* const*>(reinterpret_cast<const UInt8*>(base) + 0x60);
+    if (!script || !Readable(script, 0x34)) return false;
+    const UInt32 len = *reinterpret_cast<const UInt32*>(script + 0x20);
+    auto* data = *reinterpret_cast<const UInt8* const*>(script + 0x30);
+    if (!data || len < 14 || len > 0x10000 || !Readable(data, len)) return false;
+    UInt32 i = 4;
+    for (int blocks = 0; i + 10 <= len && blocks < 64; ++blocks) {
+        UInt16 op = 0, plen = 0, type = 0;
+        UInt32 blen = 0;
+        std::memcpy(&op, data + i, 2);
+        std::memcpy(&plen, data + i + 2, 2);
+        std::memcpy(&type, data + i + 4, 2);
+        std::memcpy(&blen, data + i + 6, 4);
+        if (op != 0x10) return false;
+        if (type == 8 || type == 9) return true;
+        i += 4 + plen + blen;
+    }
+    return false;
+}
+
 std::vector<WorldEntity> GetShootingTargets(int radius)
 {
     // Targets of a "shoot the targets" objective (e.g. the vault BB-gun range)
@@ -1692,6 +1847,10 @@ std::vector<WorldEntity> GetShootingTargets(int radius)
     if (!Readable(mref, 0x40)) return out;
     TESForm* mbase = mref->baseForm;
     if (!Readable(mbase, 0x08)) return out;
+    // Only a target meant to be shot. Any objective's target used to do: with
+    // "talk to Amata" tracked, raising the weapon locked onto Amata, and a door
+    // or a marker objective onto every one like it in the cell.
+    if (!IsHitTarget(mbase)) return out;
 
     Vec3 pp = GetPlayerPosition();
     const float r2 = (float)radius * (float)radius;
@@ -2288,6 +2447,17 @@ bool GetCrosshairTarget(CrosshairTarget* out)
         }
     }
     return true;
+}
+
+uint32_t CrosshairRefId()
+{
+    auto* ifm = rt::IFM();
+    if (!ifm) return 0;
+    auto* b = reinterpret_cast<const UInt8*>(ifm);
+    if (IsBadReadPtr(b + 0xFC, 4)) return 0;
+    auto* refr = *reinterpret_cast<TESObjectREFR* const*>(b + 0xFC);
+    if (!refr || IsBadReadPtr(refr, 0x20)) return 0;
+    return refr->refID;
 }
 
 uint32_t GetCrosshairActorID()
@@ -2935,6 +3105,25 @@ bool GetCameraPos(Vec3* out)
     return true;
 }
 
+bool LedgeLooksOpen(const Vec3& ledge, const Vec3& landing)
+{
+    float dx = landing.x - ledge.x, dy = landing.y - ledge.y;
+    const float l = std::sqrt(dx * dx + dy * dy);
+    if (!(l >= 1.0f) || !RayCastReady()) return true;   // nothing to ask with: as the mesh says
+    dx /= l; dy /= l;
+    for (float h : { 35.0f, 80.0f }) {
+        const Vec3 from{ ledge.x - dx * 24.0f, ledge.y - dy * 24.0f, ledge.z + h };
+        uint32_t id = 0;
+        float dist = 0.0f;
+        if (RayCastView(from, { dx, dy, 0.0f }, l + 48.0f, &id, &dist) && dist < l + 24.0f) {
+            F3A_INFO("Ledge (%.0f,%.0f,%.0f): the ray at %.0f up hits %08X at %.0f units - walled",
+                     ledge.x, ledge.y, ledge.z, h, id, dist);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool RayCastView(const Vec3& from, const Vec3& dir, float maxDist,
                  uint32_t* outRefId, float* outDist, const void** outRef)
 {
@@ -3311,6 +3500,27 @@ bool AimPlayerAtRad(float pitchRad, float yawRad)
     return true;
 }
 
+bool SteerYawRad(float yawRad)
+{
+    if (!std::isfinite(yawRad) || !AimNativeReady()) return false;
+    auto* player = rt::Player();
+    if (!player) return false;
+    // The yaw half of AimPlayerAtRad: the engine's own turn (a delta from
+    // where it thinks the player faces), the public field, the camera's yaw.
+    void** vt = *reinterpret_cast<void***>(player);
+    if (!vt || IsBadReadPtr(vt + kGetRotationZSlot, sizeof(void*))) return false;
+    using GetZFn = float (__thiscall*)(void*, int);
+    using YawFn  = void  (__thiscall*)(void*, float);
+    auto getZ = reinterpret_cast<GetZFn>(vt[kGetRotationZSlot]);
+    if (!getZ) return false;
+    const float cur = getZ(player, 0);
+    if (!std::isfinite(cur)) return false;
+    reinterpret_cast<YawFn>(kAddDeltaZRot)(player, std::remainder(yawRad - cur, kAimTwoPi));
+    player->rotZ = yawRad;
+    *reinterpret_cast<float*>(kCameraYawGlobal) = yawRad;
+    return true;
+}
+
 bool GetEffectiveYawRad(float* out)
 {
     auto* p = rt::Player();
@@ -3585,6 +3795,114 @@ bool StopActorMovementAnim(void* actor)
     using DeactivateFn = void (__thiscall*)(void* self, int slot, float blendOut);
     reinterpret_cast<DeactivateFn>(0x0045DB50)(animData, kSequenceMovement, 0.0f);
     return true;
+}
+
+// The movement slot's sequence: the array DeactivateSequence clears
+// (this+0xE0, one pointer per slot), the very word PlayActorAnimGroup reads
+// back as the active sequence (+0xE4 = slot 1). Its group: the sequence's
+// TESAnimGroup (BSAnimGroupSequence+0x74), whose id is the byte at +0x10
+// (0x0054BEF0, what the game's own step 0x0045D3FE tests for 3..16).
+const void* ActorMovementSequence(void* actor, bool* ok, int* group)
+{
+    *ok = false;
+    if (group) *group = -1;
+    if (!actor || !AnimAddrsOk()) return nullptr;
+    void* animData = ActorAnimData(actor);
+    if (!animData || IsBadReadPtr(animData, 0x104)) return nullptr;
+    *ok = true;
+    const char* ad = reinterpret_cast<const char*>(animData);
+    auto* seq = *reinterpret_cast<const char* const*>(ad + 0xE0 + 4 * kSequenceMovement);
+    if (group && seq && !IsBadReadPtr(seq, 0x78)) {
+        auto* grp = *reinterpret_cast<const unsigned char* const*>(seq + 0x74);
+        if (grp && !IsBadReadPtr(grp, 0x11)) *group = grp[0x10];
+    }
+    return seq;
+}
+
+// The pace of the walk and run cycles. AnimData+0x10C is the time scale of
+// the movement groups (3..13): the sequence's time runs at that multiple
+// (0x00462538), and the game's own anim-driven step is the group's speed
+// times it (0x0045D44C). The game sets it when IT starts a walk or a run
+// (0x00720946: the actor's speed / the animation's speed); a cycle the mod
+// plays itself kept whatever pace was left there - slow steps under a run of
+// 300 units/s (log 2026-10-29). The animation's own speed is the length of
+// its movement vector, TESAnimGroup+0x1C (0x0054BD10), the group reached
+// through the playing sequence (BSAnimGroupSequence+0x74). The player has
+// two sets of animation data: first person at +0x5EC, third person from the
+// process (Character's GetAnimData, 0x006F8F30 - the player's own picks
+// one of them by the view, 0x0076CCB0).
+namespace {
+struct PaceSaved { char* ad; float value; };
+PaceSaved g_pace_saved[2] = { { nullptr, 0.0f }, { nullptr, 0.0f } };
+
+std::vector<char*> MovementAnimDatas(void* actor)
+{
+    std::vector<char*> out;
+    auto add = [&](void* ad) {
+        if (ad && !IsBadReadPtr(ad, 0x110) &&
+            std::find(out.begin(), out.end(), static_cast<char*>(ad)) == out.end())
+            out.push_back(static_cast<char*>(ad));
+    };
+    add(ActorAnimData(actor));
+    if (actor == static_cast<void*>(rt::Player()) && Readable(actor, 0x5F0)) {
+        add(*reinterpret_cast<void**>(static_cast<char*>(actor) + 0x5EC));
+        static const unsigned char kGetAnimData[] = { 0x83, 0x79, 0x60, 0x00, 0x74, 0x0D };
+        static int ok = -1;
+        if (ok < 0)
+            ok = Readable(reinterpret_cast<void*>(0x006F8F30), sizeof(kGetAnimData)) &&
+                 std::memcmp(reinterpret_cast<void*>(0x006F8F30), kGetAnimData,
+                             sizeof(kGetAnimData)) == 0 ? 1 : 0;
+        if (ok == 1) {
+            using GetAnimData = void* (__thiscall*)(void*);
+            add(reinterpret_cast<GetAnimData>(0x006F8F30)(actor));
+        }
+    }
+    return out;
+}
+} // namespace
+
+bool SetMovementAnimPace(void* actor, float speed, float* pace, float* animSpeed, float* before)
+{
+    if (!actor || !AnimAddrsOk() || !std::isfinite(speed)) return false;
+    bool any = false;
+    for (char* ad : MovementAnimDatas(actor)) {
+        auto* seq = *reinterpret_cast<const char* const*>(ad + 0xE0 + 4 * kSequenceMovement);
+        if (!seq || IsBadReadPtr(seq, 0x78)) continue;
+        auto* grp = *reinterpret_cast<const char* const*>(seq + 0x74);
+        if (!grp || IsBadReadPtr(grp, 0x28)) continue;
+        const float* v = reinterpret_cast<const float*>(grp + 0x1C);
+        const float gs = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (!(std::isfinite(gs) && gs >= 1.0f)) continue;   // a cycle that goes nowhere
+        float m = speed / gs;
+        if (m < 0.25f) m = 0.25f; else if (m > 4.0f) m = 4.0f;
+        float& slot = *reinterpret_cast<float*>(ad + 0x10C);
+        // What the walk found, once per animation data, to put back after.
+        for (auto& s : g_pace_saved) {
+            if (s.ad == ad) break;
+            if (!s.ad) { s.ad = ad; s.value = slot; break; }
+        }
+        if (!any) {
+            if (before) *before = slot;
+            if (pace) *pace = m;
+            if (animSpeed) *animSpeed = gs;
+        }
+        slot = m;
+        any = true;
+    }
+    return any;
+}
+
+void RestoreMovementAnimPace(void* actor)
+{
+    // Only into animation data the actor still has: after a load the old
+    // pointers may be gone.
+    const auto now = actor ? MovementAnimDatas(actor) : std::vector<char*>{};
+    for (auto& s : g_pace_saved) {
+        if (s.ad && std::isfinite(s.value) &&
+            std::find(now.begin(), now.end(), s.ad) != now.end())
+            *reinterpret_cast<float*>(s.ad + 0x10C) = s.value;
+        s = { nullptr, 0.0f };
+    }
 }
 
 // ---- Aiming at a reference's real body ------------------------------------
@@ -4091,14 +4409,72 @@ void ReleaseStuckMenuModifiers()
 
 // Does the player have a weapon out? Aim assistance has no business running
 // while the gun is holstered.
+//
+// Actor::IsWeaponOut (0x006F6C70, what the IsWeaponOut condition calls) asks
+// the process through its vtable +0x450; the High and MiddleHigh processes
+// answer with the byte at +0x135 (0x007526E0). Read, not called: the slot is
+// checked to be that function. The byte at actor+0x19C read before was New
+// Vegas's and never set here, so the game's own aim control never counted.
 bool IsWeaponOut()
 {
-    auto* p = rt::Player();
-    if (!p) return false;
-    // Actor::isWeaponOut, a byte on the actor; guarded like every raw read.
-    const UInt8* b = reinterpret_cast<const UInt8*>(p) + 0x19C;
-    if (IsBadReadPtr((void*)b, 1)) return false;
-    return *b != 0;
+    auto* a = reinterpret_cast<const UInt8*>(rt::Player());
+    if (!Readable(a, 0x64)) return false;
+    auto* proc = *reinterpret_cast<const UInt8* const*>(a + 0x60);
+    if (!Readable(proc, 0x138)) return false;
+    auto* vt = *reinterpret_cast<const uintptr_t* const*>(proc);
+    if (!Readable(vt, 0x454) || vt[0x450 / 4] != 0x007526E0) return false;
+    return proc[0x135] != 0;
+}
+
+bool ReadActorFacts(const void* refr, uint32_t refid, ActorFacts* out)
+{
+    if (!out || !IsLiveRef(refr, refid) || !RefIsActor(refr)) return false;
+    *out = ActorFacts{};
+    auto* a = reinterpret_cast<const UInt8*>(refr);
+    if (!Readable(a, 0x1A0)) return false;
+    auto* vt = *reinterpret_cast<const uintptr_t* const*>(a);
+    out->life = (int)*reinterpret_cast<const UInt32*>(a + 0xFC);
+    // The sit/sleep state only where the getter is the one disassembled
+    // (Character, Creature and the player all share it).
+    if (Readable(vt, 0x218) && vt[0x214 / 4] == 0x0070C8C0)
+        out->sit_sleep = (int)*reinterpret_cast<const UInt32*>(a + 0x19C);
+    // Weapon out: the High/MiddleHigh process byte (see IsWeaponOut).
+    auto* proc = *reinterpret_cast<const UInt8* const*>(a + 0x60);
+    if (Readable(proc, 0x138)) {
+        auto* pvt = *reinterpret_cast<const uintptr_t* const*>(proc);
+        if (Readable(pvt, 0x454) && pvt[0x450 / 4] == 0x007526E0) out->weapon = proc[0x135] != 0;
+    }
+    // Running: the movement flags, as Actor 0x006F58D0 asks the mover
+    // (+0x184) through its vtable +0x20 - ActorMover 0x007DDAD0 (+0x34 & 0xFF00
+    // while +0x70 is set, else +0x3C), PlayerMover 0x007E8DC0 (+0x94).
+    auto* mover = *reinterpret_cast<const UInt8* const*>(a + 0x184);
+    if (Readable(mover, 0x98)) {
+        auto* mvt = *reinterpret_cast<const uintptr_t* const*>(mover);
+        if (Readable(mvt, 0x24)) {
+            UInt32 flags = 0;
+            bool known = true;
+            if (mvt[0x20 / 4] == 0x007DDAD0)
+                flags = mover[0x70] ? (*reinterpret_cast<const UInt32*>(mover + 0x34) & 0xFF00)
+                                    : *reinterpret_cast<const UInt32*>(mover + 0x3C);
+            else if (mvt[0x20 / 4] == 0x007E8DC0)
+                flags = *reinterpret_cast<const UInt32*>(mover + 0x94);
+            else
+                known = false;
+            if (known) out->running = (flags & 0x200) != 0;
+        }
+    }
+    return true;
+}
+
+// GetPlayerControlsDisabled (eval 0x00510C60) tests its flags against the
+// byte at PlayerCharacter+0x5DC; the names it prints for the bits are the
+// table at 0x00F50B00 (Movement, Looking, Pipboy, Fighting, POV Switch,
+// Rollover Text, Sneaking).
+int PlayerControlsDisabled()
+{
+    auto* p = reinterpret_cast<const UInt8*>(rt::Player());
+    if (!Readable(p, 0x5E0)) return -1;
+    return p[0x5DC];
 }
 
 // ---- VATS limbs -----------------------------------------------------------
@@ -4123,9 +4499,39 @@ constexpr UInt32 kTrait_VatsLimbSelected = 0x27D6;
 
 int g_limb_tiles_seen = 0;   // all limb_percent tiles, before the visible filter
 
+// A limb_percent marker as a limb: its place, name and hit chance.
+VatsLimb LimbFromTile(Tile* t)
+{
+    VatsLimb l;
+    l.tile = t;
+    l.x = TileAbsX(t);
+    l.y = TileAbsY(t);
+    l.w = TileNum(t, kTileValue_width);
+    l.h = TileNum(t, kTileValue_height);
+    l.part_id = (int)TileNum(t, kTrait_VatsBodyPartId);
+    l.selected = TileNum(t, kTrait_VatsLimbSelected) != 0.0f;
+    l.alpha = TileNum(t, kTileValue_alpha);
+    if (Tile* n = FindChildByName(t, "limb_name", 3)) {
+        // Fallback only: the selected limb also shows its name label, but
+        // that label was not set during play, so it cannot be the primary
+        // test — it is kept as corroboration if the flag ever goes missing.
+        if (!l.selected) l.selected = TileVisible(n);
+        if (const char* raw = TileStringTrait(n)) {
+            l.name = GameStrToUtf8(raw);
+            // The game pads these with tabs and spaces.
+            while (!l.name.empty() &&
+                   (l.name.back() == ' ' || l.name.back() == '	'))
+                l.name.pop_back();
+        }
+    }
+    if (Tile* c = FindChildByName(t, "chance_to_hit", 3))
+        if (const char* raw = TileStringTrait(c)) l.chance = GameStrToUtf8(raw);
+    return l;
+}
+
 void CollectVatsLimbs(Tile* t, int depth, std::vector<VatsLimb>& out)
 {
-    if (!t || depth > 10 || out.size() >= 32) return;
+    if (!t || depth > 10 || out.size() >= 64) return;
     // VATS draws ONE limb_percent tile per skeleton node, so a creature with
     // several legs mapped to the same body part gets several identical tiles —
     // which is why cycling read "Prawe nogi" three times before moving on. A
@@ -4140,49 +4546,10 @@ void CollectVatsLimbs(Tile* t, int depth, std::vector<VatsLimb>& out)
     // strict, and only the counts tell those apart.
     if (TileNameHas(t, "limb_percent")) ++g_limb_tiles_seen;
     if (TileNameHas(t, "limb_percent") && TileVisible(t)) {
-        VatsLimb l;
-        l.tile = t;
-        l.x = TileAbsX(t);
-        l.y = TileAbsY(t);
-        l.w = TileNum(t, kTileValue_width);
-        l.h = TileNum(t, kTileValue_height);
-        l.part_id = (int)TileNum(t, kTrait_VatsBodyPartId);
-        l.selected = TileNum(t, kTrait_VatsLimbSelected) != 0.0f;
-        if (Tile* n = FindChildByName(t, "limb_name", 3)) {
-            // Fallback only: the selected limb also shows its name label, but
-            // that label was not set during play, so it cannot be the primary
-            // test — it is kept as corroboration if the flag ever goes missing.
-            if (!l.selected) l.selected = TileVisible(n);
-            if (const char* raw = TileStringTrait(n)) {
-                l.name = GameStrToUtf8(raw);
-                // The game pads these with tabs and spaces.
-                while (!l.name.empty() &&
-                       (l.name.back() == ' ' || l.name.back() == '	'))
-                    l.name.pop_back();
-            }
-        }
-        if (Tile* c = FindChildByName(t, "chance_to_hit", 3))
-            if (const char* raw = TileStringTrait(c)) l.chance = GameStrToUtf8(raw);
-        // Same body part twice (several visible nodes) — keep the first, but
-        // let a later tile contribute the selection flag.
-        //
-        // Matched on the NAME as well as the id: a human target came back with
-        // sixteen tiles carrying only six distinct names, so the id alone does
-        // not collapse them. The name is also what the player hears, and two
-        // entries that read identically are not a choice.
-        if (!l.name.empty()) {
-            bool dup = false;
-            for (auto& e : out) {
-                bool same = (l.part_id != 0 && e.part_id == l.part_id) ||
-                            e.name == l.name;
-                if (!same) continue;
-                if (l.selected) { e.selected = true; e.tile = l.tile;
-                                  e.x = l.x; e.y = l.y; }
-                dup = true;
-                break;
-            }
-            if (!dup) out.push_back(l);
-        }
+        VatsLimb l = LimbFromTile(t);
+        // Every tile, as it is: which of them belong to the target being aimed
+        // at is worked out over all of them (GetVatsLimbs).
+        if (!l.name.empty()) out.push_back(l);
     }
     struct Node { Tile::ChildNode* item; Node* next; };
     auto* node = reinterpret_cast<Node*>(&t->childList);
@@ -4214,6 +4581,55 @@ std::vector<VatsLimb> GetVatsLimbs()
         }
         node = node->next;
     }
+    // The aimed-at target's parts only. With two raiders in view VATS drew
+    // the parts of both - 14 tiles, two of each name, one set high on the
+    // screen and one low - and W/S stepped from one raider's arm to the
+    // other's weapon (log 2026-10-24). A part not drawn (alpha 0) is left out
+    // when some are drawn; of a name seen twice, the tile nearest the
+    // selected one is the target's own; and a part farther from the
+    // selected one than the other target's copies are is the other target's.
+    const size_t rawCount = out.size();
+    {
+        size_t lit = 0;
+        for (const auto& l : out) if (l.alpha > 0.5f) ++lit;
+        if (lit > 0 && lit < out.size())
+            out.erase(std::remove_if(out.begin(), out.end(),
+                                     [](const VatsLimb& l) { return !(l.alpha > 0.5f); }),
+                      out.end());
+    }
+    const VatsLimb* selTile = nullptr;
+    for (const auto& l : out) if (l.selected) { selTile = &l; break; }
+    const float sx = selTile ? selTile->x : 0.0f, sy = selTile ? selTile->y : 0.0f;
+    auto dist = [&](const VatsLimb& l) {
+        return std::sqrt((l.x - sx) * (l.x - sx) + (l.y - sy) * (l.y - sy));
+    };
+    std::vector<VatsLimb> kept;
+    float otherNear = 1e30f;          // the nearest copy left out (another target's)
+    for (const auto& l : out) {
+        bool placed = false;
+        for (auto& e : kept) {
+            const bool same = e.name == l.name;   // the name: what the player hears
+            if (!same) continue;
+            placed = true;
+            if (l.selected || (selTile && !e.selected && dist(l) < dist(e))) {
+                if (selTile) otherNear = (std::min)(otherNear, dist(e));
+                const bool wasSel = e.selected;
+                e = l;
+                e.selected = l.selected || wasSel;
+            } else if (selTile) {
+                otherNear = (std::min)(otherNear, dist(l));
+            }
+            break;
+        }
+        if (!placed) kept.push_back(l);
+    }
+    if (selTile && otherNear < 1e29f)
+        kept.erase(std::remove_if(kept.begin(), kept.end(),
+                                  [&](const VatsLimb& l) {
+                                      return !l.selected && dist(l) >= otherNear * 0.75f;
+                                  }),
+                   kept.end());
+    out.swap(kept);
     // A STABLE ORDER. The tile tree is walked fresh every frame and comes back
     // in a different order each time — the log caught the same four parts as
     // [Korpus, Prawe nogi, Lewe nogi, Głowa] on one frame and
@@ -4232,6 +4648,24 @@ std::vector<VatsLimb> GetVatsLimbs()
     static int  last_sel = -1;
     int sel = -1;
     for (size_t i = 0; i < out.size(); ++i) if (out[i].selected) { sel = (int)i; break; }
+    static size_t last_raw = (size_t)-1;
+    if (rawCount != last_raw) {
+        // Every tile once, when their number changes: name, place, how drawn,
+        // selected - what tells which tiles belong to which target.
+        last_raw = rawCount;
+        std::vector<VatsLimb> all;
+        auto* ifm2 = rt::IFM();
+        Tile* vt = FindVisibleMenuTile(kMenuType_VATS);
+        if (ifm2 && vt) CollectVatsLimbs(vt, 0, all);
+        std::string line;
+        for (const auto& l : all) {
+            char b[96];
+            std::snprintf(b, sizeof(b), "%s%s@(%.0f,%.0f) a%.0f%s", line.empty() ? "" : "; ",
+                          l.name.c_str(), l.x, l.y, l.alpha, l.selected ? " SEL" : "");
+            line += b;
+        }
+        F3A_INFO("VATS tiles: %u | %s", (unsigned)all.size(), line.c_str());
+    }
     if ((int)out.size() != last_n || sel != last_sel) {
         // The whole list, not just the pick. Which parts the engine is even
         // offering is the thing we cannot see from the outside, and "W and S
@@ -4294,12 +4728,194 @@ bool GetVatsSelectedLimbPos(float* x, float* y)
     return false;
 }
 
+// The target's body parts as the GAME keeps them, in the order its own W and
+// S step through them. VATS's input code (0x00690FBB) moves the selected part,
+// [menu+0xF8], to the next or previous part of the target's list on the press
+// of W or S (DIK 0x11 / 0x1F) or a turn of the mouse wheel, and skips the
+// parts whose marker is not visible. The targets are a list at 0x010774A8
+// ({target, ...} entries, the target's parts as a list at entry+8), the target
+// is [0x0108D014], and each part's limb_percent marker is at part+0x30.
+// False when anything in that chain does not check out: the markers on screen
+// are read instead (GetVatsLimbs).
+bool ReadVatsPartsFromEngine(std::vector<VatsLimb>& out, uintptr_t* selKey)
+{
+    constexpr uintptr_t kVatsMenuPtr = 0x01077448, kVatsTarget = 0x0108D014,
+                        kVatsTargets = 0x010774A8;
+    constexpr size_t kOffSelPart = 0xF8, kOffPartTile = 0x30;
+    out.clear();
+    Menu* menu = FindMenuByType(kMenuType_VATS);
+    if (!menu || *reinterpret_cast<Menu**>(kVatsMenuPtr) != menu) return false;
+    const void* target = *reinterpret_cast<void**>(kVatsTarget);
+    if (!target) return false;
+    struct Node { const void* item; const Node* next; };
+    const uint8_t* entry = nullptr;
+    const Node* n = reinterpret_cast<const Node*>(kVatsTargets);
+    for (int i = 0; n && i < 64; ++i, n = n->next) {
+        if (IsBadReadPtr(n, sizeof(Node))) return false;
+        if (n->item && !IsBadReadPtr(n->item, 0x10) &&
+            *static_cast<const void* const*>(n->item) == target) {
+            entry = static_cast<const uint8_t*>(n->item);
+            break;
+        }
+    }
+    if (!entry) return false;
+    const void* sel = *reinterpret_cast<const void* const*>(
+        reinterpret_cast<const uint8_t*>(menu) + kOffSelPart);
+    bool selFound = false;
+    n = reinterpret_cast<const Node*>(entry + 8);
+    for (int i = 0; n && i < 32; ++i, n = n->next) {
+        if (IsBadReadPtr(n, sizeof(Node))) return false;
+        const uint8_t* part = static_cast<const uint8_t*>(n->item);
+        if (!part) continue;
+        if (IsBadReadPtr(part, kOffPartTile + 4)) return false;
+        Tile* t = *reinterpret_cast<Tile* const*>(part + kOffPartTile);
+        if (!t || IsBadReadPtr(t, sizeof(Tile)) || !TileNameHas(t, "limb_percent"))
+            return false;
+        if (!TileVisible(t)) continue;           // the game's step skips it too
+        VatsLimb l = LimbFromTile(t);
+        l.selected = (part == sel);
+        if (l.name.empty()) continue;
+        if (l.selected) {
+            selFound = true;
+            if (selKey) *selKey = reinterpret_cast<uintptr_t>(part);
+        }
+        out.push_back(l);
+    }
+    // A selection that is none of the parts means the offsets are not what
+    // they seem: the markers decide then.
+    return selFound;
+}
+
+// For the F11 dump: what VATS's own W/S step works with. Its input code
+// (0x006908E0) takes the W/S branch when no XInput pad is connected
+// (0x01075B28, set from XInputGetState at 0x006276A2) or the pad is turned off
+// (bDisable360Controller, 0x01075CAC); otherwise the pad's stick picks.
+// The test the game makes before it takes W/S in VATS at all (0x00690925 -
+// 0x0069095D): with the VATS camera in mode 3 always; else not when the
+// player's process has its byte +0x124 set (vtable +0x1A8, 0x0073B060), not
+// for a target entry of type 2, and only with a weapon (process +0x114 via
+// vtable +0x148, 0x0073B050: the inventory entry, its form at +8) whose type
+// (+0xF4) is above 2 - a gun; melee and unarmed attacks pick no part.
+int VatsPartChoice(int* reason, char* detail, size_t detailSize)
+{
+    if (reason) *reason = 0;
+    if (detail && detailSize) detail[0] = 0;
+    const UInt32 camMode = *reinterpret_cast<const UInt32*>(0x0108D0A0);
+    if (camMode == 3) return 1;
+    auto* a = reinterpret_cast<const UInt8*>(rt::Player());
+    if (!Readable(a, 0x64)) return -1;
+    auto* proc = *reinterpret_cast<const UInt8* const*>(a + 0x60);
+    if (!Readable(proc, 0x128)) return -1;
+    auto* vt = *reinterpret_cast<const uintptr_t* const*>(proc);
+    if (!Readable(vt, 0x1AC) || vt[0x1A8 / 4] != 0x0073B060 || vt[0x148 / 4] != 0x0073B050)
+        return -1;
+    const UInt8 flag = proc[0x124];
+    // The target's entry: the targets list (0x010774A8) item whose actor is
+    // the current target (0x0108D014).
+    const void* target = *reinterpret_cast<const void* const*>(0x0108D014);
+    int entryType = -1;
+    struct Node { const void* item; const Node* next; };
+    int guard = 0;
+    for (auto* n = reinterpret_cast<const Node*>(0x010774A8);
+         n && guard < 64 && Readable(n, sizeof(Node)); n = n->next, ++guard) {
+        auto* e = static_cast<const UInt8*>(n->item);
+        if (e && Readable(e, 8) && *reinterpret_cast<const void* const*>(e) == target) {
+            entryType = (int)*reinterpret_cast<const UInt32*>(e + 4);
+            break;
+        }
+    }
+    auto* inv = *reinterpret_cast<const UInt8* const*>(proc + 0x114);
+    const UInt8* weap = Readable(inv, 0x0C) ? *reinterpret_cast<const UInt8* const*>(inv + 8) : nullptr;
+    const int weapType = Readable(weap, 0xF8) ? weap[0xF4] : -1;
+    if (detail && detailSize)
+        std::snprintf(detail, detailSize, "camera mode %u, process+0x124=%u, target entry type %d, "
+                      "weapon %08X type %d", camMode, (unsigned)flag, entryType,
+                      weap && Readable(weap, 0x10) ? reinterpret_cast<const TESForm*>(weap)->refID : 0u,
+                      weapType);
+    int why = 0;
+    if (flag)                 why = 1;
+    else if (entryType == 2)  why = 2;
+    else if (!weap)           why = 3;
+    else if (weapType <= 2)   why = 4;
+    if (reason) *reason = why;
+    return why ? 0 : 1;
+}
+
+std::vector<std::string> DebugVatsState()
+{
+    std::vector<std::string> out;
+    Menu* menu = FindMenuByType(kMenuType_VATS);
+    if (!menu || !Readable(menu, 0xFC)) return out;
+    char b[320];
+    {
+        char d[200];
+        int why = 0;
+        const int ok = VatsPartChoice(&why, d, sizeof(d));
+        std::snprintf(b, sizeof(b), "vats: part choice %s (reason %d): %s",
+                      ok > 0 ? "allowed" : ok == 0 ? "NOT allowed" : "unknown", why, d);
+        out.push_back(b);
+    }
+    const UInt8 pad   = *reinterpret_cast<const UInt8*>(0x01075B28);
+    const UInt8 noPad = *reinterpret_cast<const UInt8*>(0x01075CAC);
+    std::snprintf(b, sizeof(b), "vats: menu=%p (global %p), pad connected=%u, "
+                  "bDisable360Controller=%u -> %s", (void*)menu,
+                  *reinterpret_cast<void**>(0x01077448), pad, noPad,
+                  (!pad || noPad) ? "W/S step the parts" : "the pad's stick picks the parts");
+    out.push_back(b);
+    const void* target = *reinterpret_cast<void**>(0x0108D014);
+    const void* sel = *reinterpret_cast<const void* const*>(
+        reinterpret_cast<const UInt8*>(menu) + 0xF8);
+    std::snprintf(b, sizeof(b), "vats: target=%p selected part=%p", target, sel);
+    out.push_back(b);
+    struct Node { const void* item; const Node* next; };
+    const Node* n = reinterpret_cast<const Node*>(0x010774A8);
+    for (int i = 0; n && i < 16; ++i, n = n->next) {
+        if (!Readable(n, sizeof(Node))) break;
+        auto* entry = static_cast<const UInt8*>(n->item);
+        if (!entry || !Readable(entry, 0x10)) continue;
+        const void* actor = *reinterpret_cast<const void* const*>(entry);
+        std::snprintf(b, sizeof(b), "vats: entry %d actor=%p%s", i, actor,
+                      actor == target ? " (the target)" : "");
+        out.push_back(b);
+        const Node* pn = reinterpret_cast<const Node*>(entry + 8);
+        for (int j = 0; pn && j < 24; ++j, pn = pn->next) {
+            if (!Readable(pn, sizeof(Node))) break;
+            auto* part = static_cast<const UInt8*>(pn->item);
+            if (!part || !Readable(part, 0x34)) continue;
+            Tile* t = *reinterpret_cast<Tile* const*>(part + 0x30);
+            std::string name, chance;
+            float vis = -1.0f, alpha = -1.0f;
+            if (t && Readable(t, sizeof(Tile))) {
+                const VatsLimb l = LimbFromTile(t);
+                name = l.name; chance = l.chance;
+                vis = TileNum(t, kTileValue_visible);
+                alpha = TileNum(t, kTileValue_alpha);
+            }
+            std::snprintf(b, sizeof(b), "  part %p type=%u tile=%p visible=%.0f alpha=%.0f "
+                          "'%s' %s%s", (const void*)part,
+                          *reinterpret_cast<const UInt32*>(part + 0x20), (void*)t, vis, alpha,
+                          name.c_str(), chance.c_str(), part == sel ? "  <- SELECTED" : "");
+            out.push_back(b);
+        }
+    }
+    return out;
+}
+
 bool GetVatsPick(VatsPick* out)
 {
     if (!out) return false;
     *out = VatsPick{};
     out->queued = GetVatsQueuedCount();
-    auto limbs = GetVatsLimbs();
+    std::vector<VatsLimb> limbs;
+    uintptr_t key = 0;
+    const bool engine = ReadVatsPartsFromEngine(limbs, &key);
+    if (!engine) limbs = GetVatsLimbs();
+    static int last_src = -1;
+    if ((int)engine != last_src) {
+        last_src = (int)engine;
+        F3A_INFO("VATS parts: read from %s", engine ? "the game's list of the target's parts"
+                                                     : "the markers on screen");
+    }
     out->count = (int)limbs.size();
     for (size_t i = 0; i < limbs.size() && i < 8; ++i) {
         std::snprintf(out->names[i], sizeof(out->names[i]), "%s", limbs[i].name.c_str());
@@ -4308,6 +4924,7 @@ bool GetVatsPick(VatsPick* out)
     for (size_t i = 0; i < limbs.size(); ++i) {
         if (!limbs[i].selected) continue;
         out->index = (int)i + 1;
+        out->sel_key = engine ? key : reinterpret_cast<uintptr_t>(limbs[i].tile);
         std::snprintf(out->name, sizeof(out->name), "%s", limbs[i].name.c_str());
         std::snprintf(out->chance, sizeof(out->chance), "%s", limbs[i].chance.c_str());
         break;
@@ -4522,7 +5139,7 @@ bool WorldSettling()
     return t != 0 && GetTickCount() - t < kWorldSettleMs;
 }
 
-void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID)
+void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID, const Vec3* offset)
 {
     auto* p = rt::Player();
     if (!p || !targetRefr) {
@@ -4560,8 +5177,12 @@ void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID)
     // From here the world is in motion: settle before touching it again.
     g_teleport_at.store(GetTickCount() | 1u);
     ForgetHostiles();
-    char rv = reinterpret_cast<PFN>(0x00528730)(p, const_cast<void*>(targetRefr),
-                                                0.0f, 0.0f, 0.0f);
+    // Beside the target, not in it: MoveTo puts the player on the target's
+    // own origin, which for a mailbox or a locker is inside it - and from
+    // there the next walk went nowhere (2026-10-24, Springvale).
+    const float ox = offset ? offset->x : 0.0f, oy = offset ? offset->y : 0.0f,
+                oz = offset ? offset->z : 0.0f;
+    char rv = reinterpret_cast<PFN>(0x00528730)(p, const_cast<void*>(targetRefr), ox, oy, oz);
     F3A_INFO("Teleport: ret=%d player (%.0f,%.0f,%.0f) -> (%.0f,%.0f,%.0f) "
              "target refID=%08X at (%.0f,%.0f,%.0f) cell=%p",
              (int)rv, bx, by, bz, p->posX, p->posY, p->posZ,
@@ -4707,6 +5328,139 @@ int LockTier(int level)
 int LockSkillNeeded(int tier)
 {
     return tier >= 0 && tier < 5 ? tier * 25 : -1;
+}
+
+uint32_t LockKeyForm(const void* refr, uint32_t expectedRefID, std::string* keyName)
+{
+    if (keyName) keyName->clear();
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x48) || (expectedRefID && r->refID != expectedRefID)) return 0;
+    const UInt8* x = FindExtra(r, 0x2A);                 // kExtraData_Lock
+    if (!x || x == kExtraUnreadable) return 0;
+    // ExtraLock::Data { level, TESKey* key, flags } (FOSE GameExtraData.h).
+    const UInt8* data = *reinterpret_cast<const UInt8* const*>(x + 0x0C);
+    if (!Readable(data, 0x0C)) return 0;
+    auto* key = *reinterpret_cast<TESForm* const*>(data + 0x04);
+    if (!Readable(key, 0x10) || key->typeID != kFormType_Key) return 0;
+    if (keyName)
+        if (const char* nm = BaseFormName(key)) *keyName = GameStrToUtf8(nm);
+    return key->refID;
+}
+
+int LockState(const void* refr, uint32_t expectedRefID)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x48) || r->refID != expectedRefID) return -1;
+    int flags = -1;
+    if (ReadLockLevel(r, &flags) < 0) return 0;          // no lock
+    return flags < 0 ? -1 : (flags & 0x01) ? 1 : 0;      // bit 0 = locked (GetLocked)
+}
+
+namespace {
+// Laser tripwires are activate parents too: crossing the beam slams the
+// warehouse doors shut. Never something to lead the player to.
+bool LooksLikeTrap(const std::string& name)
+{
+    std::string s = name;
+    for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    static const char* const kWords[] = {
+        "laser", "czujnik", "linka", "tripwire", "trip wire", "лазер", "растяж",
+    };
+    for (const char* w : kWords)
+        if (s.find(w) != std::string::npos) return true;
+    return false;
+}
+
+// A door or activator with switches of its own, read into `out`.
+bool ReadSwitched(const TESObjectREFR* r, SwitchedRef* out)
+{
+    *out = SwitchedRef{};
+    const UInt8* x = FindExtra(r, 0x53);                 // kExtraData_ActivateRef
+    if (!x || x == kExtraUnreadable || !Readable(x, 0x18)) return false;
+    // ExtraActivateRef (constructor 0x0041F1C0): the parents' list at +0x0C,
+    // { item, next } nodes whose item is { TESObjectREFR* parent, float delay }
+    // - the game's own "is this one of my parents" walk, 0x0041F1E0, compares
+    // the item's first word with the reference - and a flags byte at +0x14,
+    // bit 0 "parent activate only".
+    out->parent_only = (x[0x14] & 0x01) != 0;
+    struct Node { const UInt8* item; const Node* next; };
+    const Node* n = reinterpret_cast<const Node*>(x + 0x0C);
+    for (int i = 0; n && i < 16; ++i) {
+        if (!Readable(n, 8)) break;
+        const UInt8* item = n->item;
+        n = n->next;
+        if (!Readable(item, 8)) continue;
+        auto* p = *reinterpret_cast<TESObjectREFR* const*>(item);
+        if (!Readable(p, 0x40) || (p->flags & 0x820)) continue;   // disabled / deleted
+        TESForm* pb = p->baseForm;
+        if (!Readable(pb, 0x10)) continue;
+        const char* nm = BaseFormName(pb);
+        if (!nm || !*nm) continue;                       // a hidden trigger, not a switch
+        Opener o;
+        o.refr     = p;
+        o.form_id  = p->refID;
+        o.name     = GameStrToUtf8(nm);
+        o.position = { p->posX, p->posY, p->posZ };
+        if (LooksLikeTrap(o.name)) continue;
+        out->openers.push_back(std::move(o));
+    }
+    if (out->openers.empty()) return false;
+    TESForm* base = r->baseForm;
+    const char* nm = Readable(base, 0x10) ? BaseFormName(base) : nullptr;
+    out->refr       = r;
+    out->form_id    = r->refID;
+    out->name       = nm && *nm ? GameStrToUtf8(nm) : std::string();
+    out->position   = { r->posX, r->posY, r->posZ };
+    out->is_door    = Readable(base, 0x10) && base->typeID == kFormType_Door;
+    out->open_state = out->is_door ? ReadDoorOpenState(r) : -1;
+    return true;
+}
+} // namespace
+
+std::vector<SwitchedRef> FindSwitchedRefs(const Vec3& around, float radius, int max_results)
+{
+    std::vector<SwitchedRef> out;
+    auto* p = rt::Player();
+    if (!p || !p->parentCell) return out;
+    const float r2 = radius * radius;
+    for (TESObjectCELL* cell : NearbyCells(p->parentCell)) {
+        if (!Readable(cell, 0xB4)) continue;
+        struct Node { TESObjectREFR* item; Node* next; };
+        auto* node = reinterpret_cast<Node*>(&cell->objectList);
+        for (int safety = 0; node && safety < 8192; ++safety) {
+            if (!Readable(node, 8)) break;
+            TESObjectREFR* r = node->item;
+            node = node->next;
+            if (!r || r == reinterpret_cast<TESObjectREFR*>(p) || !Readable(r, 0x48)) continue;
+            if (r->flags & 0x820) continue;
+            TESForm* base = r->baseForm;
+            if (!Readable(base, 0x10)) continue;
+            if (base->typeID != kFormType_Door && base->typeID != kFormType_Activator &&
+                base->typeID != kFormType_TalkingActivator)
+                continue;
+            float dx = r->posX - around.x, dy = r->posY - around.y;
+            if (!(dx * dx + dy * dy <= r2)) continue;    // NaN fails too
+            SwitchedRef s;
+            if (ReadSwitched(r, &s)) out.push_back(std::move(s));
+        }
+    }
+    std::sort(out.begin(), out.end(), [&around](const SwitchedRef& a, const SwitchedRef& b) {
+        float da = (a.position.x - around.x) * (a.position.x - around.x) +
+                   (a.position.y - around.y) * (a.position.y - around.y);
+        float db = (b.position.x - around.x) * (b.position.x - around.x) +
+                   (b.position.y - around.y) * (b.position.y - around.y);
+        return da < db;
+    });
+    if ((int)out.size() > max_results) out.resize(max_results);
+    return out;
+}
+
+bool GetSwitchedRef(const void* refr, uint32_t expectedRefID, SwitchedRef* out)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!out || !Readable(r, 0x48) || r->refID != expectedRefID || !IsLiveRef(refr, expectedRefID))
+        return false;
+    return ReadSwitched(r, out);
 }
 
 void RefreshLockLevels()
@@ -5407,9 +6161,12 @@ void DescribeRowParts(Tile* t, std::string& label, std::string& value)
     for (Tile* p = t; p; p = p->parent) {
         if (TileNameHas(p, "meter")) {
             float v = TileNum(p, kTileValue_user0);
-            char buf[16];
-            std::snprintf(buf, sizeof(buf), "%.0f", v);
-            value = buf;
+            // The mod's own sliders say what they set ("880 Hz"), not the step.
+            if (!settings_menu::SliderText(label, (int)std::lround(v), &value)) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%.0f", v);
+                value = buf;
+            }
             break;
         }
         if (TileNameHas(p, "toggle")) {
@@ -5464,6 +6221,147 @@ std::string NormalizeKeyNames(const std::string& label)
         out += NormalizeKeyNamePart(part);
         if (end == std::string::npos) break;
         start = end + 2;
+    }
+    return out;
+}
+
+// ---- Saved games ------------------------------------------------------------
+//
+// The load and save lists show a save's number and place; beside the list a
+// sighted player also sees the character's name, level and play time, and a
+// picture - which the game fills in only for the row under the mouse (the
+// panel was empty in a dump taken on the keyboard's row). Every .fos file
+// starts with all of it: "FO3SAVEGAME", the header's size, the version, then
+// fields each closed by '|': picture width, height, save number (uint32
+// each), the name and the karma title (uint16 length '|' text), the level
+// (uint32), the place and the play time "HHH.MM.SS" (strings again), in the
+// game's code page.
+struct SaveHeader {
+    uint32_t     number = 0;
+    uint32_t     level  = 0;
+    std::string  name, place, playtime;
+    std::wstring file;                  // lower case, no folder
+    FILETIME     written{};
+};
+
+std::wstring SaveDir()
+{
+    wchar_t docs[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, docs)))
+        return {};
+    const std::wstring base = std::wstring(docs) + L"\\My Games\\Fallout3\\";
+    wchar_t sub[MAX_PATH] = {};
+    GetPrivateProfileStringW(L"General", L"SLocalSavePath", L"Saves\\", sub, MAX_PATH,
+                             (base + L"Fallout.ini").c_str());
+    std::wstring dir = base + sub;
+    if (!dir.empty() && dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
+    return dir;
+}
+
+bool ReadSaveHeader(const std::wstring& path, SaveHeader* out)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    unsigned char b[512];
+    DWORD n = 0;
+    const BOOL read = ReadFile(h, b, sizeof(b), &n, nullptr);
+    GetFileTime(h, nullptr, nullptr, &out->written);
+    CloseHandle(h);
+    if (!read || n < 48 || std::memcmp(b, "FO3SAVEGAME", 11) != 0) return false;
+    size_t p = 11 + 4 + 4;                          // header size, version
+    auto bar = [&]() { if (p < n && b[p] == '|') { ++p; return true; } return false; };
+    auto u32 = [&](uint32_t* v) {
+        if (p + 4 > n) return false;
+        std::memcpy(v, b + p, 4);
+        p += 4;
+        return bar();
+    };
+    auto str = [&](std::string* s) {
+        if (p + 2 > n) return false;
+        uint16_t len = 0;
+        std::memcpy(&len, b + p, 2);
+        p += 2;
+        if (!bar() || p + len > n) return false;
+        *s = GameStrToUtf8(std::string(reinterpret_cast<const char*>(b + p), len).c_str());
+        p += len;
+        return bar();
+    };
+    uint32_t width = 0, height = 0;
+    std::string karma;
+    return bar() && u32(&width) && u32(&height) && u32(&out->number) &&
+           str(&out->name) && str(&karma) && u32(&out->level) &&
+           str(&out->place) && str(&out->playtime);
+}
+
+// Every save's header, read again when the list is older than a few seconds
+// (a save was just made, or deleted).
+std::mutex              g_saves_mx;
+std::vector<SaveHeader> g_saves;
+DWORD                   g_saves_at = 0;
+
+std::vector<SaveHeader> SaveHeaders()
+{
+    std::lock_guard<std::mutex> lk(g_saves_mx);
+    const DWORD now = GetTickCount();
+    if (g_saves_at && now - g_saves_at < 3000) return g_saves;
+    g_saves_at = now;
+    g_saves.clear();
+    const std::wstring dir = SaveDir();
+    if (dir.empty()) return g_saves;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW((dir + L"*.fos").c_str(), &fd);
+    if (f == INVALID_HANDLE_VALUE) return g_saves;
+    do {
+        SaveHeader s;
+        if (!ReadSaveHeader(dir + fd.cFileName, &s)) continue;
+        s.file = fd.cFileName;
+        for (auto& c : s.file) c = (wchar_t)towlower(c);
+        g_saves.push_back(std::move(s));
+    } while (FindNextFileW(f, &fd) && g_saves.size() < 1000);
+    FindClose(f);
+    return g_saves;
+}
+
+// What a save row's picture panel shows, for the row's prefix: "#0037" is save
+// 37; a word instead (AUTO, the quick save) is the auto- or quick-save file.
+std::string SaveDetails(const std::string& prefix)
+{
+    if (prefix.empty()) return {};
+    const auto saves = SaveHeaders();
+    const SaveHeader* hit = nullptr;
+    if (prefix[0] == '#') {
+        const uint32_t num = (uint32_t)std::strtoul(prefix.c_str() + 1, nullptr, 10);
+        for (const auto& s : saves)
+            if (s.number == num && s.file.find(L"autosave") == std::wstring::npos &&
+                s.file.find(L"quicksave") == std::wstring::npos) { hit = &s; break; }
+    } else {
+        std::string up = prefix;
+        for (auto& c : up) c = (char)std::toupper((unsigned char)c);
+        const wchar_t* want = up.find("AUTO") != std::string::npos ? L"autosave.fos" : L"quicksave.fos";
+        for (const auto& s : saves)
+            if (s.file == want) { hit = &s; break; }
+    }
+    if (!hit) return {};
+    char buf[128];
+    std::string out = hit->name;
+    std::snprintf(buf, sizeof(buf), strings::T(", poziom %u", ", level %u"), hit->level);
+    out += buf;
+    unsigned hh = 0, mm = 0, ss = 0;
+    if (std::sscanf(hit->playtime.c_str(), "%u.%u.%u", &hh, &mm, &ss) >= 2) {
+        if (hh) std::snprintf(buf, sizeof(buf), strings::T(", czas gry %u godz. %u min",
+                                                            ", played %u h %u min"), hh, mm);
+        else    std::snprintf(buf, sizeof(buf), strings::T(", czas gry %u min",
+                                                            ", played %u min"), mm);
+        out += buf;
+    }
+    FILETIME local;
+    SYSTEMTIME st;
+    if (FileTimeToLocalFileTime(&hit->written, &local) && FileTimeToSystemTime(&local, &st)) {
+        std::snprintf(buf, sizeof(buf), strings::T(", zapisano %u.%02u.%u o %u:%02u",
+                                                   ", saved %u.%02u.%u at %u:%02u"),
+                      st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute);
+        out += buf;
     }
     return out;
 }
@@ -5541,6 +6439,9 @@ std::optional<MenuSelection> GetKeyboardSelection()
                 continue;
             const float ci = TileNum(c, kTileValue_listindex);
             if (TileHiddenExplicitly(c) || ci < 0.0f) continue;
+            // A row with no text is a spare one the menu keeps ready: the save
+            // list holds 45 of them for 5 saves, and said "1 of 45".
+            if (!TileLabelDeep(c, 0)) continue;
             ++sel.count;
             if (ci == li) ++sameIndex;
         }
@@ -5553,6 +6454,15 @@ std::optional<MenuSelection> GetKeyboardSelection()
     if (OwningMenuType(listbox) == kMenuType_Start) {
         sel.label = NormalizeKeyNames(sel.label);
         sel.value = NormalizeKeyNames(sel.value);
+    }
+    // A saved game: what the panel beside the list shows a sighted player
+    // (name, level, play time), and when it was made, from the save file.
+    if (TileNameHas(best, "lb_saveload_template_item")) {
+        Tile* pre = FindChildByName(best, "lb_saveload_prefix", 1);
+        const char* raw = pre ? TileStringTrait(pre) : nullptr;
+        const std::string details = raw ? SaveDetails(GameStrToUtf8(raw)) : std::string();
+        if (!details.empty())
+            (sel.value.empty() ? sel.label : sel.value) += ", " + details;
     }
     return sel;
 }
@@ -5643,6 +6553,24 @@ bool ClickMenuBack()
     auto* ifm = rt::IFM();
     if (!ifm || !ifm->menuRoot) return false;
 
+    // The repair screens sit over the Pip-Boy's inventory (or a vendor's
+    // dialogue), so they are looked for first: their way out is a Cancel /
+    // Done button the generic names below miss (repair_menu.xml: RM_CancelButton
+    // id 12, the game's E; repair_services_menu.xml: RSM_DoneButton, E) -
+    // Backspace did nothing there. Pressed as a mouse click on it is.
+    for (UInt32 type : { (UInt32)kMenuType_RepairServices, (UInt32)kMenuType_Repair }) {
+        Tile* mt = FindVisibleMenuTile(type);
+        Menu* menu = mt ? FindMenuByType(type) : nullptr;
+        if (!menu) continue;
+        Tile* btn = FindChildByName(mt, type == kMenuType_Repair ? "RM_CancelButton" : "RSM_DoneButton", 8);
+        if (!btn || !TileVisible(btn)) continue;
+        UInt32 id = (UInt32)TileNum(btn, kTileValue_id);
+        F3A_INFO("ClickMenuBack: '%s' (id=%u) in menu 0x%X",
+                 btn->name.m_data ? btn->name.m_data : "?", id, type);
+        menu->HandleClick(id, btn);
+        return true;
+    }
+
     // Walk top-level menus; in each, look for a VISIBLE *back_button tile
     // (StartMenu's is `main_back_button`, str='Wstecz', id=5). Then press it
     // via the owning Menu's virtual HandleClick — a vtable call on the live
@@ -5660,11 +6588,27 @@ bool ClickMenuBack()
             auto* tm = reinterpret_cast<TileMenu*>(cn->child);
             Menu* m = tm->menu;
             if (m) {
-                // FO3 terminals (ComputersMenu) and the hacking screen have no
-                // back_button tile — sighted players leave them with the Tab
-                // control. Inject Tab so Backspace closes them too.
-                if ((m->typeID == kMenuType_Computers ||
-                     m->typeID == kMenuType_Hacking) && TileVisible(cn->child)) {
+                // The hacking screen: its own close (0x0063FE20) - what the
+                // gamepad's cancel and a missing word list run: the close trait
+                // 0x1772 on the menu's tile ([0x010761CC]+4) and the fade-out
+                // (0x00BFC470). The terminals' log-off below did nothing here
+                // - there is no terminal open yet while hacking - so a locked
+                // terminal could not be left. Guarded by its prologue
+                // (cmp [0x010761CC],0). MAIN THREAD.
+                if (m->typeID == kMenuType_Hacking && TileVisible(cn->child)) {
+                    const UInt8 want[] = { 0x83, 0x3D, 0xCC, 0x61, 0x07, 0x01, 0x00 };
+                    const auto* code = reinterpret_cast<const UInt8*>(0x0063FE20);
+                    if (!IsBadReadPtr(code, sizeof(want)) && std::memcmp(code, want, sizeof(want)) == 0) {
+                        reinterpret_cast<void(__cdecl*)(void)>(0x0063FE20)();
+                        F3A_INFO("ClickMenuBack: hacking screen closed via 0x63FE20");
+                    } else {
+                        F3A_WARN("ClickMenuBack: the hacking close code is not the expected one");
+                    }
+                    return true;
+                }
+                // FO3 terminals (ComputersMenu) have no back_button tile —
+                // sighted players leave them with the Tab control.
+                if (m->typeID == kMenuType_Computers && TileVisible(cn->child)) {
                     // FO3 terminals have no back_button tile and don't respond
                     // to injected keys (keyboard is DirectInput; SendInput is
                     // ignored — only mouse gets through). Call the engine's own
@@ -6232,6 +7176,27 @@ bool MoveEngineCursorTo(float x, float y)
     *reinterpret_cast<float*>(node + 0x58) = nx;
     *reinterpret_cast<float*>(node + 0x60) = nz;
     return true;
+}
+
+bool ParkCursorForVats()
+{
+    constexpr float kX = 4.0f, kY = 4.0f;          // tile space, top-left
+    auto* ifm = rt::IFM();
+    if (!Readable(ifm, 0x40)) return false;
+    const UInt8* raw = reinterpret_cast<const UInt8*>(ifm);
+    const int* pw = reinterpret_cast<const int*>(0x00F4CC4C);
+    const int* ph = reinterpret_cast<const int*>(0x00F4CC50);
+    if (!Readable(pw, 4) || !Readable(ph, 4)) return false;
+    const int W = *pw, H = *ph;
+    if (!(W >= 320 && W <= 16384 && H >= 200 && H <= 16384)) return false;
+    const float Fw = (H < W) ? (float)W / (float)H * 960.0f : 1280.0f;
+    const float Fh = (W < H) ? (float)H / (float)W * 1280.0f : 960.0f;
+    // Already there (the stored position, IFM+0x2C / +0x34)?
+    const float px = *reinterpret_cast<const float*>(raw + 0x2C);
+    const float pz = *reinterpret_cast<const float*>(raw + 0x34);
+    if (std::fabs(px - (kX - Fw * 0.5f)) <= 1.0f && std::fabs(pz - (Fh * 0.5f - kY)) <= 1.0f)
+        return true;
+    return MoveEngineCursorTo(kX, kY);
 }
 
 bool ClickMapMarkerTile(const void* tile)
@@ -8042,6 +9007,37 @@ Tile* FindChildExact(Tile* t, const char* name, int depth)
     return nullptr;
 }
 
+// The row the overlay highlights, from the screen itself: only the active
+// row draws its frame (lm_box copies the row's _JLMActive). -1 = none.
+int JlmActiveRow(Tile* jlm)
+{
+    for (int i = 0; i < 16; ++i) {
+        char nm[16];
+        std::snprintf(nm, sizeof(nm), "Item%d", i);
+        Tile* it = FindChildExact(jlm, nm, 4);
+        if (!it || !TileVisible(it)) continue;
+        if (Tile* box = FindChildExact(it, "lm_box", 0))
+            if (TileVisible(box)) return i;
+    }
+    return -1;
+}
+
+// Rows the overlay is drawing with an entry in them.
+int JlmShownRows(Tile* jlm)
+{
+    int n = 0;
+    for (int i = 0; i < 16; ++i) {
+        char nm[16];
+        std::snprintf(nm, sizeof(nm), "Item%d", i);
+        Tile* it = FindChildExact(jlm, nm, 4);
+        if (!it || !TileVisible(it)) continue;
+        Tile* txt = FindChildExact(it, "lm_button_text", 3);
+        const char* s = txt ? TileStrTrait(txt, kTileValue_string) : nullptr;
+        if (s && *s) ++n;
+    }
+    return n;
+}
+
 void CopyTrimmed(char* dst, size_t cap, const char* src)
 {
     dst[0] = '\0';
@@ -8060,25 +9056,63 @@ bool GetLootMenuInfo(LootMenuInfo* out)
 {
     if (!out) return false;
     *out = LootMenuInfo{};
-    if (!InitJlmTraits()) return false;
+    // The overlay's own state traits, when they resolve. The tiles on screen
+    // back every one of them up: in play the overlay stood on screen ("Automat"
+    // in the dump, 2026-10-24) and nothing was ever read from it.
+    const bool traits = InitJlmTraits();
 
     Tile* hud = FindVisibleMenuTile(kMenuType_HUDMain);
-    if (!hud) return false;
-    Tile* jlm = FindChildExact(hud, "JLM", 6);
-    if (!jlm) return false;
+    Tile* jlm = hud ? FindChildExact(hud, "JLM", 6) : nullptr;
+    const float jv     = (traits && jlm) ? TileNum(jlm, g_jlm.visible) : 0.0f;
+    const bool  drawn  = jlm && TileVisible(jlm);
+    Tile* head = jlm ? FindChildExact(jlm, "Headline_Title", 3) : nullptr;
+    const char* tTitle = (traits && jlm) ? TileStrTrait(jlm, g_jlm.title) : nullptr;
+    const char* hTitle = head ? TileStrTrait(head, kTileValue_string) : nullptr;
+    const int   active = jlm ? JlmActiveRow(jlm) : -1;
 
-    if (TileNum(jlm, g_jlm.visible) == 0.0f) return false;
-    CopyTrimmed(out->title, sizeof(out->title), TileStrTrait(jlm, g_jlm.title));
-    // Visible with no container name means the overlay is holding stale state
-    // and has nothing to show — same check the New Vegas mod makes.
-    if (!out->title[0]) return false;
+    // 0 read, 1 no HUD, 2 no overlay tile, 3 not showing, 4 showing, no name.
+    int reason = 0;
+    if (!hud) reason = 1;
+    else if (!jlm) reason = 2;
+    else if (jv == 0.0f && !drawn) reason = 3;
+    else {
+        CopyTrimmed(out->title, sizeof(out->title), tTitle);
+        if (!out->title[0]) CopyTrimmed(out->title, sizeof(out->title), hTitle);
+        // Showing with no container name: stale state, nothing to show - the
+        // same check the New Vegas mod makes.
+        if (!out->title[0]) reason = 4;
+    }
+    static int last_reason = -1;
+    static std::string last_title;
+    if (reason != last_reason || (reason == 0 && last_title != out->title)) {
+        last_reason = reason;
+        last_title = out->title;
+        static const char* const kWhy[] = { "read", "no HUD", "no overlay tile",
+                                            "not showing", "showing, no name" };
+        F3A_INFO("Loot menu read: %s | drawn=%d _JLMVisible=%g title='%s' headline='%s' "
+                 "index=%g total=%g active row=%d rows=%d",
+                 kWhy[reason], (int)drawn, jv,
+                 tTitle ? GameStrToUtf8(tTitle).c_str() : "",
+                 hTitle ? GameStrToUtf8(hTitle).c_str() : "",
+                 (traits && jlm) ? TileNum(jlm, g_jlm.index) : -1.0f,
+                 (traits && jlm) ? TileNum(jlm, g_jlm.total) : -1.0f,
+                 active, jlm ? JlmShownRows(jlm) : 0);
+    }
+    if (reason != 0) return false;
 
     out->visible  = true;
-    out->index    = (int)TileNum(jlm, g_jlm.index);
-    out->offset   = (int)TileNum(jlm, g_jlm.offset);
-    out->total    = (int)TileNum(jlm, g_jlm.total);
-    out->stealing = TileNum(jlm, g_jlm.stealing) != 0.0f;
-    CopyTrimmed(out->weight, sizeof(out->weight), TileStrTrait(jlm, g_jlm.weight));
+    out->index    = traits ? (int)TileNum(jlm, g_jlm.index) : 0;
+    out->offset   = traits ? (int)TileNum(jlm, g_jlm.offset) : 0;
+    out->total    = traits ? (int)TileNum(jlm, g_jlm.total) : 0;
+    out->stealing = traits && TileNum(jlm, g_jlm.stealing) != 0.0f;
+    if (traits) CopyTrimmed(out->weight, sizeof(out->weight), TileStrTrait(jlm, g_jlm.weight));
+    // The highlighted row as drawn wins over the index trait; the count of
+    // drawn entries stands in for a total that did not read.
+    if (active >= 0) out->index = active;
+    if (out->total <= 0) {
+        const int rows = JlmShownRows(jlm);
+        if (rows > 0) out->total = out->offset + rows;
+    }
 
     // The highlighted row is the tile named after the in-window index; the
     // absolute position is that plus the scroll offset.

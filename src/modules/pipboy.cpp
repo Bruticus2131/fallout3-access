@@ -1,6 +1,7 @@
 #include "f3a/modules.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/game_access.h"
+#include "f3a/polling_loop.h"
 #include "f3a/tolk_bridge.h"
 #include "f3a/strings.h"
 #include "f3a/config.h"
@@ -108,6 +109,60 @@ void AnnounceSelection(bool force, bool mute = false, bool interrupt = true)
     }
 }
 
+// The date and time the Data page shows at its top: "poniedziałek,
+// 20 sierpnia 2277, godzina 18:44". The weekday from the calendar - the game's
+// own sleep screen calls 20.08.2277 a Monday, as the Gregorian calendar does.
+std::string ClockText()
+{
+    game::GameClock c;
+    if (!poll::GameClockNow(&c)) return {};
+    // Sakamoto's day of the week, 0 = Sunday.
+    static const int kT[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    const int m = c.month + 1;
+    const int y = m < 3 ? c.year - 1 : c.year;
+    const int dow = (y + y / 4 - y / 100 + y / 400 + kT[c.month] + c.day) % 7;
+    const char* day = nullptr;
+    switch (dow) {
+        case 0: day = strings::T("niedziela", "Sunday"); break;
+        case 1: day = strings::T("poniedziałek", "Monday"); break;
+        case 2: day = strings::T("wtorek", "Tuesday"); break;
+        case 3: day = strings::T("środa", "Wednesday"); break;
+        case 4: day = strings::T("czwartek", "Thursday"); break;
+        case 5: day = strings::T("piątek", "Friday"); break;
+        default: day = strings::T("sobota", "Saturday"); break;
+    }
+    const char* month = nullptr;
+    switch (c.month) {
+        case 0:  month = strings::T("stycznia", "January"); break;
+        case 1:  month = strings::T("lutego", "February"); break;
+        case 2:  month = strings::T("marca", "March"); break;
+        case 3:  month = strings::T("kwietnia", "April"); break;
+        case 4:  month = strings::T("maja", "May"); break;
+        case 5:  month = strings::T("czerwca", "June"); break;
+        case 6:  month = strings::T("lipca", "July"); break;
+        case 7:  month = strings::T("sierpnia", "August"); break;
+        case 8:  month = strings::T("września", "September"); break;
+        case 9:  month = strings::T("października", "October"); break;
+        case 10: month = strings::T("listopada", "November"); break;
+        default: month = strings::T("grudnia", "December"); break;
+    }
+    const int h = (int)c.hour % 24;
+    const int min = (int)((c.hour - (float)(int)c.hour) * 60.0f) % 60;
+    char buf[160];
+    if (strings::Language() == "en") {
+        // Weekday, month day, year, and the time as the game's own screens
+        // give it (6:44 PM).
+        std::snprintf(buf, sizeof(buf), "%s, %s %d, %d, %d:%02d %s", day, month, c.day, c.year,
+                      h % 12 == 0 ? 12 : h % 12, min, h < 12 ? "AM" : "PM");
+    } else {
+        // Polish, Russian and the rest: the day before the month (its name
+        // in the genitive), the time on the 24-hour clock.
+        std::snprintf(buf, sizeof(buf), "%s, %d %s %d, %s%d:%02d", day, c.day, month, c.year,
+                      strings::Polish() ? "godzina " : "", h, min);
+    }
+    return buf;
+}
+
 bool AnnounceTabIfChanged()
 {
     std::string tab = game::GetActivePipBoyTabName();
@@ -121,6 +176,11 @@ bool AnnounceTabIfChanged()
         tolk::Speak(line, tolk::Priority::Ui, true);
     } else {
         tolk::Speak(tab, tolk::Priority::Ui, true);
+    }
+    // The Data page shows the date and time at its top: said after its name.
+    if (game::GetActivePipBoyTab() == game::PipBoyTab::Data) {
+        const std::string clock = ClockText();
+        if (!clock.empty()) tolk::Speak(clock, tolk::Priority::Ui, false);
     }
     return true;
 }

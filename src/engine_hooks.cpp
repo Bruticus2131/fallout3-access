@@ -8,6 +8,7 @@
 #include "f3a/logger.h"
 
 #include <windows.h>
+#include <intrin.h>
 #include <cstdint>
 #include <cstring>
 
@@ -103,24 +104,96 @@ constexpr uintptr_t kShotSites[] = { 0x00778C3A, 0x007B794A, 0x007CA29B };
 ShotAimProvider g_shot_provider = nullptr;
 uintptr_t       g_shot_original = kShotDirection;
 int             g_shot_patched  = 0;
+volatile DWORD  g_last_shot_at  = 0;
 
-void __cdecl PrepareShot(unsigned char* player)
+// Where the shot leaves from, as the function itself takes it (0x007735AE):
+// its fifth argument, a point, when there is one; else the node in its
+// second - the weapon's "ProjectileNode" at both player call sites - at its
+// world position (+0x8C).
+bool ShotOrigin(const uint32_t* args, float out[3])
 {
+    if (IsBadReadPtr(args, 0x18)) return false;
+    const float* at = reinterpret_cast<const float*>(args[5]);
+    if (!at && args[2]) at = reinterpret_cast<const float*>(args[2] + 0x8C);
+    if (!at || IsBadReadPtr(at, 12)) return false;
+    out[0] = at[0]; out[1] = at[1]; out[2] = at[2];
+    return true;
+}
+
+// What the game measures a point's direction FROM (0x00773A8C): the centre of
+// the player's 3D bound - a per-thread cache when it holds the player, else
+// the reference's 3D (+0x5C, then +0x14) - its bound at +0x20.
+bool ShotMeasuredFrom(const unsigned char* player, float out[3])
+{
+    const unsigned char* root = nullptr;
+    auto* tls = reinterpret_cast<unsigned char* const*>(__readfsdword(0x2C));
+    const DWORD index = *reinterpret_cast<const DWORD*>(0x01179AF4);
+    const unsigned char* slot = tls && !IsBadReadPtr(tls + index, 4) ? tls[index] : nullptr;
+    if (slot && !IsBadReadPtr(slot + 0x248, 8) &&
+        *reinterpret_cast<const unsigned char* const*>(slot + 0x24C) == player) {
+        root = *reinterpret_cast<const unsigned char* const*>(slot + 0x248);
+    } else if (!IsBadReadPtr(player + 0x5C, 4)) {
+        auto* rs = *reinterpret_cast<const unsigned char* const*>(player + 0x5C);
+        if (rs && !IsBadReadPtr(rs + 0x14, 4))
+            root = *reinterpret_cast<const unsigned char* const*>(rs + 0x14);
+    }
+    if (!root || IsBadReadPtr(root + 0x20, 4)) return false;
+    auto* c = *reinterpret_cast<const float* const*>(root + 0x20);
+    if (!c || IsBadReadPtr(c, 12)) return false;
+    out[0] = c[0]; out[1] = c[1]; out[2] = c[2];
+    return true;
+}
+
+// `args` = the stack as the call left it: the return address, then the
+// function's seven arguments.
+//
+// The game aims the shot from the body's centre to the point, but fires it
+// from the muzzle - in a line parallel to that one, forty-odd units above it
+// in the third person, whatever the range. So the point handed over is the
+// one that makes the body-centre line run the way muzzle -> target does.
+void __cdecl PrepareShot(unsigned char* player, const uint32_t* args)
+{
+    g_last_shot_at = GetTickCount();
     float p[3];
     ShotAimProvider prov = g_shot_provider;
     if (!player || !prov || !prov(p)) return;
     if (IsBadWritePtr(player + 0x8E4, 0x10)) return;
+    float from[3] = {}, centre[3] = {};
+    bool moved = false;
+    const bool haveFrom = ShotOrigin(args, from);
+    const bool haveCentre = ShotMeasuredFrom(player, centre);
+    const float* pos = reinterpret_cast<const float*>(player + 0x30);
+    if (haveFrom && haveCentre && !IsBadReadPtr(pos, 12)) {
+        auto nearby = [&](const float* v) {
+            const float dx = v[0] - pos[0], dy = v[1] - pos[1], dz = v[2] - pos[2];
+            return dx * dx + dy * dy + dz * dz <= 300.0f * 300.0f;   // NaN fails too
+        };
+        if (nearby(from) && nearby(centre)) {
+            for (int i = 0; i < 3; ++i) p[i] = centre[i] + (p[i] - from[i]);
+            moved = true;
+        }
+    }
     *reinterpret_cast<void**>(player + 0x8E4) = nullptr;
     float* at = reinterpret_cast<float*>(player + 0x8E8);
     at[0] = p[0]; at[1] = p[1]; at[2] = p[2];
     static DWORD s_logged = 0;
     if (GetTickCount() - s_logged > 1000) {
         s_logged = GetTickCount();
-        F3A_INFO("ShotAim: the shot is carried to (%.0f,%.0f,%.0f)", p[0], p[1], p[2]);
+        if (moved)
+            F3A_INFO("ShotAim: from the muzzle (%.0f,%.0f,%.0f), the game measures from "
+                     "(%.0f,%.0f,%.0f) - point set to (%.0f,%.0f,%.0f)",
+                     from[0], from[1], from[2], centre[0], centre[1], centre[2], p[0], p[1], p[2]);
+        else
+            F3A_INFO("ShotAim: the shot is carried to (%.0f,%.0f,%.0f) (muzzle unknown: origin "
+                     "%d (%.0f,%.0f,%.0f) [arg2 %08X arg5 %08X], body centre %d (%.0f,%.0f,%.0f), "
+                     "player (%.0f,%.0f,%.0f))", p[0], p[1], p[2], (int)haveFrom, from[0], from[1],
+                     from[2], args && !IsBadReadPtr(args, 0x18) ? args[2] : 0u,
+                     args && !IsBadReadPtr(args, 0x18) ? args[5] : 0u, (int)haveCentre, centre[0],
+                     centre[1], centre[2], pos[0], pos[1], pos[2]);
     }
 }
 
-void (__cdecl* g_prepare_shot)(unsigned char*) = &PrepareShot;
+void (__cdecl* g_prepare_shot)(unsigned char*, const uint32_t*) = &PrepareShot;
 
 // Runs in place of the game's call: everything kept as it came (ecx = the
 // player, the seven arguments on the stack), our point set, then on into the
@@ -130,9 +203,11 @@ __declspec(naked) void ShotDirection_Thunk()
     __asm {
         pushad
         pushfd
+        lea eax, [esp + 0x24]          // the stack as the call left it
+        push eax
         push ecx
         call dword ptr [g_prepare_shot]
-        add esp, 4
+        add esp, 8
         popfd
         popad
         jmp dword ptr [g_shot_original]
@@ -275,6 +350,8 @@ bool InstallHooks()
 }
 
 void SetShotAimProvider(ShotAimProvider provider) { g_shot_provider = provider; }
+
+unsigned long LastPlayerShotAt() { return g_last_shot_at; }
 void SetMenuEnterFilter(EnterFilter filter) { g_enter_filter = filter; }
 
 void RemoveHooks() {}

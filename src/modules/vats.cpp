@@ -8,6 +8,7 @@
 #include "f3a/logger.h"
 
 #include <windows.h>
+#include <cstdint>
 #include <cstdio>
 
 namespace f3a::modules::vats {
@@ -29,6 +30,12 @@ int  g_force_pick = 0;   // ticks left in which to speak the pick regardless
 // sampled on the main thread, so at the moment it opens there may be nothing
 // to read yet; "no targets" is said only if there still is none after this.
 int  g_open_wait = 0;
+// The opening line comes after the tutorial, not over it.
+bool g_open_queue = false;
+// Ticks until the target is said after A or D, whether its name changed or
+// not: two raiders are both "Bandyta", and the switch between them said
+// nothing at all (log 2026-10-24).
+int  g_ad_answer = 0;
 
 // Which limb VATS is aimed at is the GAME's business, not ours: the menu shows
 // the name label only on the selected body part, and that is what we read. We
@@ -36,17 +43,19 @@ int  g_open_wait = 0;
 // drifted out of step with the game the moment the player clicked anything.
 int  g_last_count = 0;
 std::string g_last_pick;
-// Where we BELIEVE the cycle is, used only when the game marks no selection.
-// Without it a failure to read the marker means total silence, which is the
-// worst outcome of the three: wrong is recoverable, silent is not.
-int  g_fallback = 0;
-// The part the last W/S press moved the cursor onto, waiting for the game to
-// confirm it by marking it selected.
-std::string g_want;
-// The part last SPOKEN, and the game's selection last SEEN. A change of the
-// game's selection is read out at once (as the FNV mod does) unless it is the
-// part a W/S press has just announced — then it would only be said twice.
-std::string g_spoken_part;
+// W and S belong to the GAME: its VATS input steps the selected part to the
+// next or previous one of the target's own list on the press of W or S (or
+// the mouse wheel). A press is answered with the part the game selected, read
+// back; nothing is predicted. Predicting the next part from a list of our own
+// and putting the cursor on it fought the game's own step - a bloatfly's
+// "Głowa" was said twice while the game went to "Mózg" (log 2026-10-24).
+int  g_ws_wait = 0;            // ticks a W/S press still waits for its answer
+DWORD g_park_until = 0;        // keep the game's cursor in the corner until then
+bool  g_park_said = false;
+constexpr int kWsAnswerTicks = 6;
+// The game's selection last seen: which part (an identity, so two parts with
+// one name still count as a change) and its name.
+uintptr_t   g_seen_key = 0;
 std::string g_seen_sel;
 
 // Body parts and targets are the ENGINE's job, not ours.
@@ -123,49 +132,25 @@ void PollVatsKeys()
     // lands on a part whose name and hit chance read exactly the same as the
     // one before, and staying silent then is indistinguishable from the key
     // having done nothing at all. That is what "w i s nie czytaj\u0105" was.
-    // W and S step the selection by moving the ENGINE's cursor onto the next
-    // marker — which is how Fallout 3 picks a body part. The keys themselves are
-    // not consumed (watching a key does not eat it), so if a future build of
-    // the game ever does answer them directly, both paths agree.
     // A and D belong to the GAME. It switches targets with them by itself, and
     // the error beep that looked like a bug was the game saying there was no
     // other target to switch to — a true answer to a fair question. We only
     // watch the keys, so the target gets read out when it changes.
     bool ka = KeyEdge('A', g_kA), kd = KeyEdge('D', g_kD);
     if (ka || kd) {
-        g_fallback   = 0;      // a new target has its own parts
         g_force_sel  = 20;     // ~1.5 s: answer the press out loud
         g_force_pick = 0;
+        g_ad_answer  = 5;      // the game switches, then the name is said
     }
     bool kw = KeyEdge('W', g_kW), ks = KeyEdge('S', g_kS);
     if (kw || ks) {
-        // Answered AT ONCE, like the FNV mod: the next part and its hit chance,
-        // read straight from the part markers (each carries its own chance).
-        // No waiting for the game to confirm first — the cursor is moved onto
-        // the part in the same breath, and the game follows it.
-        g_want.clear();
+        // The game steps; AnnouncePick says where it went.
         game::VatsPick p;
-        int count = poll::VatsPickState(&p) ? p.count : 0;
-        if (count <= 0) {
+        if (!poll::VatsPickState(&p) || p.count <= 0)
             tolk::Speak(strings::T("Brak wyboru.", "Nothing to select."),
                         tolk::Priority::Combat, true);
-        } else {
-            // Step from the part the GAME has selected when it marks one, so the
-            // order follows what is really selected; from our own counter
-            // otherwise.
-            int base = (p.index > 0 && p.index <= count) ? p.index - 1 : g_fallback;
-            if (base < 0 || base >= count) base = 0;
-            g_fallback = (base + (kw ? 1 : count - 1)) % count;
-            if (g_fallback < 8 && p.names[g_fallback][0]) {
-                g_want = p.names[g_fallback];
-                std::string say = g_want;
-                if (p.chances[g_fallback][0])
-                    say += std::string(", ") + p.chances[g_fallback];
-                g_spoken_part = g_want;
-                tolk::Speak(say, tolk::Priority::Combat, true);
-            }
-            poll::RequestVatsCursorTo(g_fallback);
-        }
+        else
+            g_ws_wait = kWsAnswerTicks;
     }
     bool sp = KeyEdge(VK_SPACE, g_kSpace);
     bool h  = KeyEdge('H', g_kH);
@@ -265,14 +250,21 @@ void AnnounceSelection()
     }
     bool changed = (text != g_last_sel);
     g_last_sel = text;
-    if (!force && !(changed && g_force_sel > 0)) return;
+    // A or D always gets its answer a moment after the press: the name read
+    // once the game has switched, the same name too (another "Bandyta").
+    bool answer = false;
+    if (g_ad_answer > 0 && --g_ad_answer == 0) answer = true;
+    if (!force && !answer && !(changed && g_force_sel > 0)) return;
     g_force_sel = 0;
+    g_ad_answer = 0;
+    const bool queue = g_open_queue;
+    g_open_queue = false;
     if (text.empty()) {
         tolk::Speak(strings::Render(strings::Key::VatsNoTargets),
-                    tolk::Priority::Combat, true);
+                    tolk::Priority::Combat, !queue);
         return;
     }
-    tolk::Speak(text, tolk::Priority::Combat, true);
+    tolk::Speak(text, tolk::Priority::Combat, !queue);
 }
 
 void OnOpen()
@@ -290,20 +282,32 @@ void OnOpen()
     g_force_sel = 0;
     g_force_pick = 0;
     g_open_wait = 0;
+    g_open_queue = false;
+    g_ad_answer = 0;
     g_kH     = (GetAsyncKeyState('H') & 0x8000) != 0;
     g_last_pick.clear();
     g_last_count = 0;
-    g_fallback = 0;
-    g_want.clear();
-    g_spoken_part.clear();
+    g_ws_wait = 0;
+    g_seen_key = 0;
     g_seen_sel.clear();
+    // VATS also picks the part under the game's mouse cursor, and the camera
+    // closing in slides the markers under a cursor left mid-screen: W stepped
+    // the part, then it changed again by itself (log 2026-10-30). The cursor
+    // goes to the corner for the opening zoom, then is left alone, for a
+    // player who does use the mouse.
+    g_park_until = GetTickCount() + 1500;
+    g_park_said = false;
 
     // First open this session: play the tutorial. The selection is read on the
     // following ticks (tutorial isn't interrupted because it's higher-priority
     // and AnnounceSelection only speaks on change).
+    // The target follows it, queued: the first VATS of a session used to
+    // say the tutorial and then never who was targeted.
     if (config::Get().vats_tutorial && !g_tutorial_done) {
         g_tutorial_done = true;
         SpeakTutorial();
+        g_open_queue = true;
+        g_open_wait = 6;
         return;
     }
     // Opening VATS says WHO is targeted, and nothing else. The resource
@@ -316,7 +320,7 @@ void OnOpen()
 void OnClose()
 {
     g_last_sel.clear(); g_last_ap = -1; g_last_queued = -1;
-    g_force_sel = 0; g_open_wait = 0;
+    g_force_sel = 0; g_open_wait = 0; g_open_queue = false; g_ad_answer = 0;
 }
 // Announce the selected body part whenever the GAME changes it — by our key,
 // by a mouse click, by switching target. Reading it back this way is also the
@@ -327,28 +331,76 @@ void OnClose()
 void AnnouncePick()
 {
     game::VatsPick p;
-    if (!poll::VatsPickState(&p) || p.index <= 0 || !p.name[0]) return;
-    if (g_seen_sel == p.name) return;
-    bool first = g_seen_sel.empty();
-    g_seen_sel = p.name;
-    g_fallback = p.index - 1;
-    // The part VATS opens on is taken in silently, as the FNV mod does: the
-    // target's name is what opening VATS says.
-    if (first) { g_spoken_part = p.name; return; }
-    if (g_spoken_part == p.name) return;          // already said by W/S
-    if (!g_want.empty())
-        F3A_INFO("VATS pick: W/S announced '%s', the game selected '%s'",
-                 g_want.c_str(), p.name);
-    std::string say = p.name;
-    if (p.chance[0]) say += std::string(", ") + p.chance;
-    g_spoken_part = p.name;
-    g_last_pick = say;
-    // Queued, not cutting in: after A/D this follows the target's name.
-    tolk::Speak(say, tolk::Priority::Combat, false);
+    const bool have = poll::VatsPickState(&p) && p.index > 0 && p.name[0];
+    std::string say;
+    if (have) {
+        say = p.name;
+        if (p.chance[0]) say += std::string(", ") + p.chance;
+        const bool changed = p.sel_key ? p.sel_key != g_seen_key : g_seen_sel != p.name;
+        if (changed) {
+            const bool first = !g_seen_key && g_seen_sel.empty();
+            if (g_ws_wait > 0 && !first)
+                F3A_INFO("VATS W/S: the game went from '%s' to '%s' (%d of %d)",
+                         g_seen_sel.c_str(), p.name, p.index, p.count);
+            g_seen_key = p.sel_key;
+            g_seen_sel = p.name;
+            // The part VATS opens on is taken in silently, as the FNV mod
+            // does: the target's name is what opening VATS says.
+            if (first) return;
+            // The answer to W or S cuts in; a change of the game's own (a new
+            // target after A or D, the wheel) is queued after what is said.
+            const bool answer = g_ws_wait > 0;
+            g_ws_wait = 0;
+            g_last_pick = say;
+            tolk::Speak(say, tolk::Priority::Combat, answer);
+            return;
+        }
+    }
+    // A press that changed nothing (a target with one part): the part it
+    // stays on is said, so the key is never met with silence. The game's step
+    // skips parts whose marker is hidden - a radroach behind the shooting
+    // range's counter showed only its head - so with one part left that is
+    // said too, or it sounds like W and S do nothing.
+    if (g_ws_wait > 0 && --g_ws_wait == 0) {
+        // The game takes W/S only for a gun aimed at a target with parts
+        // (see game::VatsPartChoice); otherwise it keeps the part it shows,
+        // and the reason is said - not the same part, again and again.
+        char detail[200];
+        int why = 0;
+        const int choice = game::VatsPartChoice(&why, detail, sizeof(detail));
+
+        F3A_INFO("VATS W/S: the game stayed on '%s' (%d part(s) to choose from; part choice %d, "
+                 "reason %d: %s)", have ? p.name : "", p.count, choice, why, detail);
+        if (choice == 0) {
+            const char* r =
+                why == 4 || why == 3
+                    ? strings::T("Bronią białą i wręcz nie wybierzesz części ciała.",
+                                 "Melee and unarmed attacks can't pick a body part.")
+                : why == 2 ? strings::T("Ten cel nie ma części ciała do wyboru.",
+                                        "This target has no body parts to pick.")
+                           : strings::T("Gra nie pozwala teraz wybrać części ciała.",
+                                        "The game doesn't let you pick a body part now.");
+            tolk::Speak(r, tolk::Priority::Combat, true);
+            return;
+        }
+        if (have && p.count == 1)
+            say += strings::T(". Tylko tę część widać.", ". Only this part is in view.");
+        if (have) tolk::Speak(say, tolk::Priority::Combat, true);
+        else tolk::Speak(strings::T("Brak wyboru.", "Nothing to select."),
+                         tolk::Priority::Combat, true);
+    }
 }
 
 void OnTick(float)
 {
+    if (g_park_until && (LONG)(GetTickCount() - g_park_until) < 0) {
+        if (game::ParkCursorForVats() && !g_park_said) {
+            g_park_said = true;
+            F3A_INFO("VATS: the game's cursor parked in the corner, clear of the markers");
+        }
+    } else {
+        g_park_until = 0;
+    }
     PollVatsKeys();        // sets the "a key was pressed" windows below
     AnnounceSelection();   // the target — only after A or D
     // The A/D window closes on its own: without this a target change long

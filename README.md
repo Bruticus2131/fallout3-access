@@ -79,10 +79,12 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 
 1. **Fallout 3** or **Fallout 3 GOTY** — [Steam](https://store.steampowered.com/app/22300/Fallout_3/) / GOG, at game version **1.7.0.3**.
 2. **FOSE v1.3 beta 2** — the Fallout Script Extender.
-3. **[Loot Menu Updated](https://www.nexusmods.com/fallout3/mods/27191)** — required.
-   It replaces the container screen with a list drawn on the HUD, and the mod
-   reads that list out: container name, the highlighted entry, its place in the
-   list and whether it is equipped. Without it, looting is far harder to follow.
+3. **[Loot Menu](https://www.nexusmods.com/fallout3/mods/24347)** and
+   **[Loot Menu Updated](https://www.nexusmods.com/fallout3/mods/27191)** — both
+   required: the original first, the update over it. Together they replace the
+   container screen with a list drawn on the HUD, and the mod reads that list
+   out: container name, the highlighted entry, its place in the list and whether
+   it is equipped. Without them, looting is far harder to follow.
 4. A screen reader (NVDA recommended) or any SAPI voice installed.
 
 ## Installation
@@ -90,10 +92,11 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
 1. **Install Fallout 3.**
 2. **Downgrade the game to 1.7.0.3 (Steam only).** The current Steam build (1.7.0.4, "Anniversary" update) is not supported by FOSE. Download the **[Fallout Anniversary Patcher](https://www.nexusmods.com/fallout3/mods/24913)** from Nexus Mods (free account required), extract its contents into your Fallout 3 folder (where `Fallout3.exe` is) and run `Patcher.exe`. Wait until it reports success, then press Enter.
 3. **Install FOSE.** Download *FOSE v1.3 beta 2* from <https://fose.silverlock.org>, open the archive and copy `fose_loader.exe` and all `fose_*.dll` files into the Fallout 3 folder, next to `Fallout3.exe`.
-4. **Install this mod.** The easiest way is the installer, `fallout3-access-setup-<version>.exe` from the [Releases page](../../releases). To install by hand instead, download `fallout3-access-v<version>.zip` from the same page and extract it **into the Fallout 3 folder**. The archive already has the right layout:
+4. **Install Loot Menu, then Loot Menu Updated** — both required, in this order. Download the original **[Loot Menu](https://www.nexusmods.com/fallout3/mods/24347)** and **[Loot Menu Updated](https://www.nexusmods.com/fallout3/mods/27191)** from Nexus Mods (free account required). Extract Loot Menu **into the Fallout 3 folder** first, then Loot Menu Updated over it, letting it overwrite files, so that `F3LootMenu.dll` ends up in `Data\FOSE\Plugins`. The mod's installer does this step for you when it can download from Nexus Mods (Premium account); if it reports that Loot Menu is missing, install both by hand this way.
+5. **Install this mod.** The easiest way is the installer, `fallout3-access-setup-<version>.exe` from the [Releases page](../../releases). To install by hand instead, download `fallout3-access-v<version>.zip` from the same page and extract it **into the Fallout 3 folder**. The archive already has the right layout:
    - `Data\FOSE\Plugins\fallout3_access.dll` and `Fallout3Access.ini` → the plugin itself,
    - `Data\FOSE\Plugins\Fallout3Access\` → the walk graphs and the door table (`*.dat`, ready made for Fallout 3 and all five DLCs) and the audio descriptions. **Copy all of it**: without this folder, long walks and walks to other places stay off. Nothing has to be generated and no Python is needed.
-5. **Start the game with `Fallout3.exe`** (not `fose_loader.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
+6. **Start the game with `Fallout3.exe`** (not `fose_loader.exe`). With NVDA running you should immediately hear the mod's load announcement, and "Main menu opened" once the menu is up.
 
 ## Keyboard reference  
 
@@ -106,7 +109,7 @@ The game is navigated with its own keys (arrows, Enter); the mod speaks what hap
 | Arrow Up / Down | move between items (the mod reads the focused item) |
 | Arrow Left / Right | change a slider / stepper value (the mod reads the new value) |
 | Enter | activate the focused item |
-| **Backspace** | go back one menu level *(added by this mod)* |
+| **Backspace** | go back one menu level; also leaves a terminal, the hacking screen (a locked one too) and the repair screens *(added by this mod)* |
 | Mouse hover | reads the item under the cursor |
 
 ### Global (mod)
@@ -158,7 +161,7 @@ Explore and travel without sight:
 | `;` (semicolon) | **beacon guidance**: you walk, the mod plays a positional sonar ping at the target — panned by direction, higher-pitched ahead and lower behind, faster as you close in. Press again to stop. |
 | `.` (period) | beacon guidance to the current quest marker |
 | `\` (backslash) | **auto-walk**: the mod walks you there, following a navmesh path around walls and through load doors. Press again to stop; W / A / S / D stop it too. |
-| End | **activate** the selected object without aiming — opens the door, reads the book, loots the container |
+| End | **activate** the selected object without aiming — opens the door, reads the book, loots the container; within 300 units by default (Settings → Accessibility, "Reach of the End key"; no limit is a choice there) |
 | Alt + Home | last resort: teleport to the selected object when it cannot be reached on foot |
 | G | say what is under the crosshair |
 | N | **Pip-Boy sonar**: one sweep of sound travels round you, clockwise from straight ahead, and everything nearby answers from its own direction — an enemy growls, a container with loot rings, a door knocks, a person hums, an item ticks; louder when close, quieter and lower behind you. Then a short count of what was heard. |
@@ -172,6 +175,11 @@ it controls speed precisely and slows into turns instead of skidding off ledges.
 It plays the game's walk and run animations, so you hear real footsteps.
 A quest marker is followed **live**: if the objective changes while you are on
 your way, the walk retargets instead of finishing at a stale marker.
+Auto-walk can also **jump down** off a ledge onto the ground below (a wall, a
+balcony, rubble) when that saves a long way round. It only does so for drops
+low enough that the fall does not hurt (the game's own `fJumpFallHeightMin`).
+Before each drop it checks with the game that no wall stands on the edge, and
+it says "Jumping down" as you go over.
 
 ### World map (Pip-Boy → Data → World Map)
 
@@ -235,13 +243,15 @@ caps.
 | V.A.T.S. key | enter VATS; the mod reads target, body part and hit chance |
 | A / D | in VATS: previous / next target |
 | W / S | in VATS: next / previous body part, read at once with its hit chance |
-| `]` | hold to aim (free aim): locks onto the nearest enemy fighting you and says who and how far; while held, a tone says the shot would hit |
-| `,` (comma) | aim the view at the selected or nearest target (free aim, no VATS) |
-| `=` | skip an objective that cannot be completed blind (advances the quest stage — use deliberately) |
+| Aim (the game's own: right mouse button, or the key you bind it to) | hold to aim: locks onto the nearest enemy fighting you and says who and how far; while held, a tone says the shot would hit. With no fight on, it takes the creature the objective points at or the shooting range's targets, one per raise (switch off in Settings → Accessibility, "Aim help") |
+| `=` | skip an objective that cannot be completed blind (advances the quest stage); off until you switch it on in Settings → Accessibility ("Skipping quest stages") |
 
 ## Configuration
 
-Edit `Data\FOSE\Plugins\Fallout3Access.ini`:
+The most used settings are in the game itself: **Settings → Accessibility**, beside Gameplay,
+Display, Audio and Controls. A change works at once and is written to the INI.
+
+Everything else: edit `Data\FOSE\Plugins\Fallout3Access.ini`:
 
 - `[General] Language` — `auto` (default: the game's language, read from
   `Fallout3.esm` and checked again once the game has loaded its plugins —
@@ -264,15 +274,20 @@ Useful `[Voice]` settings:
 | `CrosshairNames` | say the NAME of what you are looking at, not just the verb |
 | `CrosshairDistance` | add the distance to that announcement (off by default) |
 | `HideEmptyContainers` | leave empty containers out of the scanner (`0` lists them, marked "pusty") |
-| `TargetCue`, `TargetCueHz` | while aiming with `]`, a tone when the shot would hit the target, and its pitch |
+| `TargetCue`, `TargetCueHz` | while aiming, a tone when the shot would hit the target, and its pitch |
 | `ItemCard` | after an item's name, read its card (and a stat's description) as the screen shows it |
 | `NativeWalk` | auto-walk drives the player directly (`0` falls back to holding the movement keys) |
-| `AutoWalkSpeed` | auto-walk speed in game units per second |
 | `WalkAnimation` | play the game's walk/run animation while auto-walking (this is what gives you real footstep sounds) |
 | `FootstepCue` | synthesized step clicks, used only when the animation is off |
 | `NearbyScanRadius`, `NearbyScanMaxItems` | how far and how much X (nearby objects) reads |
 | `ScannerRadius` | how far the PgUp/PgDn scanner reaches outdoors (default 8000 units, about 125 m); indoors it covers the whole interior |
 | `CompassUnits` | `0` = clock face ("three o'clock"), `1` = degrees |
+| `AimHelp` | the game's own Aim locks onto the enemy and carries the shot; `0` for a sighted player who aims with the mouse |
+| `CutsceneCue` | a soft chime when a scene takes the controls away and another when it gives them back; put your own `cutscene_start.wav` / `cutscene_end.wav` in `Fallout3Access\sounds` to replace it |
+| `AudioDescEvents` | what the people round you do, read from the game as it happens (sits down, gets up, draws a weapon, passes out, dies): `0` never, `1` in scenes (default), `2` always |
+| `AudioDescPeople` | the written descriptions of how people look, on first sight (off by default) |
+| `ActivateRange` | how far End (using the scanner's target without aiming) reaches, in game units (default 300; `0` = no limit) |
+| `SkipStage` | `1` lets the `=` key move the tracked quest one stage on (off by default) |
 
 ## Troubleshooting
 

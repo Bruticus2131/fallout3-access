@@ -385,6 +385,10 @@ void OnOpen()  { g_last.clear(); g_last_box = nullptr; g_on_container = false;
                      g_want_container = game::ContainerFocusSide() == 1;
                      g_on_container = g_want_container;
                  }
+                 // A body opened with E: searched (the scanner says so).
+                 if (!InBarter())
+                     if (uint32_t id = game::GetCrosshairActorID(); id && game::IsKnownDead(id))
+                         game::NoteSearched(id);
                  AnnounceContents(); OnTick(0); }
 void OnClose() { if (InBarter()) barter::Close();
                  g_last.clear(); g_last_box = nullptr;

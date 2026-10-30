@@ -1,4 +1,5 @@
 #include "f3a/modules.h"
+#include "f3a/audio_beacon.h"
 #include "f3a/game_access.h"
 #include "f3a/polling_loop.h"
 #include "f3a/menu_dispatch.h"
@@ -15,6 +16,7 @@
 namespace Gdiplus { using std::min; using std::max; }
 #include <gdiplus.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +37,12 @@ namespace {
 //   [stage <quest form id> <stage>]   the quest reaches that stage, seen
 //                                     happen while playing (never a stage a
 //                                     save was made in) and the quest running
+//   [stage <quest> <stage> +<seconds>]  that long after it: a stage set as an
+//                                     animation STARTS, whose result shows
+//                                     only seconds on (the birthday cake:
+//                                     stage 16 as Andy starts cutting, the saw
+//                                     in the cake 2.7 s later - said at once,
+//                                     "pieces scattered" came before the cut)
 //   [npc <name>]                      the first look at someone of that name
 //   [npc <name> @<quest form id>]     ...while that quest is running (the
 //                                     prologue has a Dad and an Amata of
@@ -58,6 +66,8 @@ struct Entry {
     enum class Kind { Stage, Npc, Movie } kind = Kind::Stage;
     uint32_t    quest = 0;            // stage: the quest; npc: the quest context (0 = any)
     int         stage = 0;
+    float       wait = 0.0f;          // stage: seconds after the stage is reached
+    DWORD       due_at = 0;           // stage: waiting until then (0 = not waiting)
     std::string npc;                  // npc: the name as the game shows it; movie: the file
     double      at = 0.0;             // movie: seconds into the film
     std::vector<std::string> lines;
@@ -144,10 +154,14 @@ bool Load(const std::wstring& path)
             std::string h = Trim(line.substr(1, line.size() - 2));
             Entry e;
             if (h.rfind("stage ", 0) == 0) {
-                unsigned q = 0; int st = 0;
-                if (std::sscanf(h.c_str() + 6, "%x %d", &q, &st) != 2) { cur = nullptr; continue; }
+                unsigned q = 0; int st = 0; float wait = 0.0f;
+                const int got = std::sscanf(h.c_str() + 6, "%x %d +%f", &q, &st, &wait);
+                if (got < 2) { cur = nullptr; continue; }
                 e.kind = Entry::Kind::Stage; e.quest = q; e.stage = st;
-                char tag[48]; std::snprintf(tag, sizeof(tag), "q%08X_s%d", q, st);
+                e.wait = (got == 3 && wait > 0.0f && wait < 60.0f) ? wait : 0.0f;
+                char tag[48];
+                if (e.wait > 0.0f) std::snprintf(tag, sizeof(tag), "q%08X_s%d_w%.0f", q, st, e.wait);
+                else std::snprintf(tag, sizeof(tag), "q%08X_s%d", q, st);
                 e.tag = tag;
             } else if (h.rfind("npc ", 0) == 0) {
                 std::string rest = TakeIds(Trim(h.substr(4)), &e.ids);
@@ -395,7 +409,7 @@ void CheckStages()
         // within one frame.
         for (auto& e : g_entries)
             if (e.kind == Entry::Kind::Stage && e.quest == q.id && e.stage > from && e.stage <= st &&
-                !e.played)
+                !e.played && !e.due_at)
                 due.push_back(&e);
     }
     if (due.empty()) return;
@@ -409,7 +423,30 @@ void CheckStages()
     std::sort(due.begin(), due.end(), [](Entry* a, Entry* b) {
         return a->quest != b->quest ? a->quest < b->quest : a->stage < b->stage;
     });
-    for (Entry* e : due) Enqueue(*e, "stage reached");
+    for (Entry* e : due) {
+        if (e->wait > 0.0f) {
+            e->due_at = (GetTickCount() + static_cast<DWORD>(e->wait * 1000.0f)) | 1;
+            F3A_INFO("AudioDesc: '%s' stage reached, said in %.1f s", e->tag.c_str(), e->wait);
+        } else {
+            Enqueue(*e, "stage reached");
+        }
+    }
+}
+
+// The descriptions waiting out their seconds after the stage.
+void CheckWaits()
+{
+    const DWORD now = GetTickCount();
+    for (auto& e : g_entries) {
+        if (!e.due_at || (LONG)(now - e.due_at) < 0) continue;
+        e.due_at = 0;
+        Enqueue(e, "its wait after the stage over");
+    }
+}
+
+void ClearWaits()
+{
+    for (auto& e : g_entries) e.due_at = 0;
 }
 
 // Someone looked at for the first time - under the crosshair, or the one who
@@ -495,7 +532,7 @@ void RepeatKey()
 {
     if (hotkeys::ShiftHeldNow()) {
         g_enabled = !g_enabled;
-        if (!g_enabled) g_queue.clear();
+        if (!g_enabled) { g_queue.clear(); ClearWaits(); }
         // Back on: where the quests stand now is read afresh, silently - the
         // stages passed while it was off are not said all at once.
         if (g_enabled) for (auto& q : g_qstate) q.known = false;
@@ -517,16 +554,25 @@ void RepeatKey()
 
 } // namespace
 
+// A cutscene: the player cannot walk (see CheckCutscene).
+bool  g_cut_on = false;
+DWORD g_cut_since = 0;
+
 void OnLoadingClosed(bool gameLoad)
 {
     // Through a door: nothing changes - a scene that starts with the door (the
     // vault exit) is said once the new place is up (Tick waits out the load).
     if (!gameLoad) return;
+    // A load ends a scene silently: nothing on screen ended. A save made in
+    // a scene starts one again, with its chime.
+    g_cut_on = false;
+    g_cut_since = 0;
     // A game was loaded (or started): where the quests stand is read afresh,
     // silently, once the load has settled; nothing from before it is said,
     // and everything may be described again (an earlier save replayed).
     for (auto& q : g_qstate) { q.known = false; q.running = false; }
     for (auto& e : g_entries) if (e.kind != Entry::Kind::Movie) e.played = false;
+    ClearWaits();
     g_seen_actors.clear();
     g_queue.clear();
     g_shots.clear();
@@ -572,8 +618,190 @@ void LoadForLanguage()
         LoadAliases(dir + (gamePl ? L"\\audiodesc_pl.txt" : L"\\audiodesc_en.txt"));
 }
 
+// On or off from the Settings menu (the game's thread); applied in Tick, which
+// owns the queue - as Shift+F7 does it.
+std::atomic<int> g_set_enabled{ -1 };
+
+void SetEnabled(bool on) { g_set_enabled.store(on ? 1 : 0); }
+
+// A cutscene: a script has taken the player's walking away
+// (DisablePlayerControls - the birth, Dad's speech, the vault door; all but
+// one of the game's 51 calls take looking round with it), and it ends when
+// the player can walk again. Held 300 ms each way, so a frame of a scripted
+// turn is not a scene. A soft chime marks the start and the end ([Voice]
+// CutsceneCue); the player's own WAVs win.
+//
+// Only the game's controls decide. A menu over the game - the pause menu, a
+// message, a conversation, V.A.T.S., a loading screen - neither starts nor
+// ends a scene: while one is up the state is held, and looked at again once
+// play is back. (Each pause and message box in the prologue sounded "scene
+// over", and "scene starts" again after it - user, 2026-10-30.)
+void CheckCutscene()
+{
+    const auto m = menu::ActiveMenu();
+    if (!poll::IsGameplayActive() || menu::IsOpen(menu::Id::Loading) ||
+        !(m == menu::Id::None || m == menu::Id::HUDMain)) {
+        g_cut_since = 0;
+        return;
+    }
+    const int ctl = game::PlayerControlsDisabled();
+    if (ctl < 0) { g_cut_since = 0; return; }     // unreadable: nothing changes
+    const bool now = (ctl & 0x01) != 0;            // movement taken
+    const DWORD t = GetTickCount();
+    if (now == g_cut_on) { g_cut_since = 0; return; }
+    if (!g_cut_since) { g_cut_since = t ? t : 1; return; }
+    if (t - g_cut_since < 300) return;
+    g_cut_on = now;
+    g_cut_since = 0;
+    F3A_INFO("Cutscene: %s (controls disabled 0x%02X)", now ? "begins" : "ends", ctl < 0 ? 0 : ctl);
+    if (!config::Get().cutscene_cue || !config::IsEnabled()) return;
+    const std::wstring wav = config::DataDir() + (now ? L"\\sounds\\cutscene_start.wav"
+                                                      : L"\\sounds\\cutscene_end.wav");
+    audio::Chime(now, wav.c_str());
+}
+
+// ---- what people do, from the game's own facts -----------------------------------
+//
+// The written scene texts said what a scene was MEANT to look like, and were
+// not always true (a guard "fights the roaches" whether or not he does). These
+// lines come from the actors themselves, read as it happens: sitting down,
+// getting up, lying down, drawing or putting away a weapon, passing out,
+// coming round, dying, breaking into a run. Said in the gaps between voices
+// like the rest, a few people at a time, the nearest first. In scenes only by
+// default ([Voice] AudioDescEvents), where a script holds the controls and
+// the player can only listen.
+struct Watched {
+    uint32_t id = 0;
+    const void* refr = nullptr;
+    std::string name;
+    game::ActorFacts said;       // the state last said (or seen while silent)
+    game::ActorFacts seen;       // the state now, waiting to hold
+    DWORD seen_at = 0;
+    DWORD alive_at = 0;          // last time it was in range
+};
+std::vector<Watched> g_watch;
+DWORD g_events_at = 0;
+
+constexpr DWORD  kEventEveryMs   = 250;
+constexpr DWORD  kEventHoldMs    = 400;   // a change must hold this long to be said
+constexpr size_t kEventMaxQueued = 3;     // never pile up behind a long speech
+
+bool SameFacts(const game::ActorFacts& a, const game::ActorFacts& b)
+{
+    return a.life == b.life && a.sit_sleep == b.sit_sleep && a.weapon == b.weapon &&
+           a.running == b.running;
+}
+
+// The sit/sleep states as GetSitting and GetSleeping group them: 2-3 on the
+// way to a seat, 4 seated (7-9 the same for a bed).
+bool Sitting(int s) { return s >= 2 && s <= 4; }
+bool Asleep(int s)  { return s >= 7 && s <= 9; }
+bool Dead(int l)    { return l == 1 || l == 2; }
+
+// What changed from `was` to `now`, as one short sentence about `name`.
+std::string DescribeChange(const std::string& name, const game::ActorFacts& was,
+                           const game::ActorFacts& now, bool scene)
+{
+    const char* f = nullptr;
+    if (was.life >= 0 && now.life >= 0 && was.life != now.life) {
+        if (Dead(now.life) && !Dead(was.life))
+            f = strings::T("%s ginie.", "%s dies.");
+        else if (now.life == 3)
+            f = strings::T("%s traci przytomność.", "%s passes out.");
+        else if (was.life == 3 && now.life == 0)
+            f = strings::T("%s odzyskuje przytomność.", "%s comes round.");
+        else if (now.life == 5)
+            f = strings::T("%s jest skrępowany.", "%s is restrained.");
+    }
+    if (!f && was.sit_sleep >= 0 && now.sit_sleep >= 0 && was.sit_sleep != now.sit_sleep) {
+        if (Asleep(now.sit_sleep) && !Asleep(was.sit_sleep))
+            f = strings::T("%s kładzie się spać.", "%s lies down to sleep.");
+        else if (Asleep(was.sit_sleep) && now.sit_sleep == 0)
+            f = strings::T("%s wstaje z łóżka.", "%s gets out of bed.");
+        else if (Sitting(now.sit_sleep) && !Sitting(was.sit_sleep))
+            f = strings::T("%s siada.", "%s sits down.");
+        else if (Sitting(was.sit_sleep) && now.sit_sleep == 0)
+            f = strings::T("%s wstaje.", "%s stands up.");
+    }
+    if (!f && was.weapon >= 0 && now.weapon >= 0 && was.weapon != now.weapon)
+        f = now.weapon ? strings::T("%s wyciąga broń.", "%s draws a weapon.")
+                       : strings::T("%s chowa broń.", "%s puts the weapon away.");
+    // Breaking into a run: only in a scene - outside one people run all the
+    // time on their errands.
+    if (!f && scene && was.running == 0 && now.running == 1)
+        f = strings::T("%s zaczyna biec.", "%s starts running.");
+    if (!f) return {};
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), f, name.c_str());
+    return buf;
+}
+
+void CheckEvents()
+{
+    const int mode = config::Get().audio_desc_events;
+    const DWORD now = GetTickCount();
+    if (mode <= 0) { g_watch.clear(); return; }
+    if (now - g_events_at < kEventEveryMs) return;
+    g_events_at = now;
+    // A scene: the controls taken by a script (see CheckCutscene), or a
+    // conversation - its lines wait for the gaps like every description.
+    const bool scene = g_cut_on || menu::IsOpen(menu::Id::Dialog);
+    const bool speak = mode >= 2 || scene;
+    // Who is round the player: farther in a scene, where they are the scene.
+    auto around = game::ScanNearby(scene ? 2000 : 900, 8, /*actors_only*/true, false);
+    std::string line;
+    int said = 0;
+    for (const auto& e : around) {
+        if (!e.refr || !e.form_id || e.name.empty()) continue;
+        game::ActorFacts f;
+        if (!game::ReadActorFacts(e.refr, e.form_id, &f)) continue;
+        Watched* w = nullptr;
+        for (auto& x : g_watch) if (x.id == e.form_id) { w = &x; break; }
+        if (!w) {
+            // First seen: only where it stands; nothing it did is known.
+            Watched nw;
+            nw.id = e.form_id; nw.refr = e.refr; nw.name = e.name;
+            nw.said = nw.seen = f; nw.seen_at = now; nw.alive_at = now;
+            g_watch.push_back(nw);
+            continue;
+        }
+        w->refr = e.refr;
+        w->alive_at = now;
+        if (!SameFacts(f, w->seen)) { w->seen = f; w->seen_at = now; continue; }
+        if (SameFacts(f, w->said) || now - w->seen_at < kEventHoldMs) continue;
+        const game::ActorFacts was = w->said;
+        w->said = f;
+        // An enemy's death is the kill cue's to tell.
+        if (Dead(f.life) && game::IsKnownHostile(w->id)) continue;
+        if (!speak) continue;
+        const std::string s = DescribeChange(w->name, was, f, scene);
+        if (s.empty()) continue;
+        F3A_INFO("AudioDesc: event '%s' (life %d->%d sit %d->%d weapon %d->%d run %d->%d)",
+                 s.c_str(), was.life, f.life, was.sit_sleep, f.sit_sleep, was.weapon, f.weapon,
+                 was.running, f.running);
+        if (said++ >= 3) continue;             // a crowd: the nearest three
+        if (!line.empty()) line += ' ';
+        line += s;
+    }
+    // Forget who has been out of range for a while.
+    for (size_t i = 0; i < g_watch.size();) {
+        if (now - g_watch[i].alive_at > 5000) g_watch.erase(g_watch.begin() + i);
+        else ++i;
+    }
+    if (line.empty() || g_queue.size() >= kEventMaxQueued) return;
+    if (g_queue.empty()) g_queued_at = now;
+    g_queue.push_back(line);
+    g_last = { line };
+}
+
 void Tick(float)
 {
+    CheckCutscene();
+    if (const int want = g_set_enabled.exchange(-1); want >= 0 && (want != 0) != g_enabled) {
+        g_enabled = want != 0;
+        if (!g_enabled) { g_queue.clear(); ClearWaits(); }
+        if (g_enabled) for (auto& q : g_qstate) q.known = false;
+    }
     // Only between games (the main menu, where the language is settled), so a
     // scene half way through is never forgotten.
     if (strings::Language() != g_loaded_lang && !poll::IsGameplayActive()) {
@@ -581,14 +809,18 @@ void Tick(float)
                  strings::Language().c_str());
         LoadForLanguage();
     }
-    if (!g_enabled || !config::Get().audio_desc || g_entries.empty()) return;
-    CheckMovies();                         // films play outside gameplay too
-    if (!poll::IsGameplayActive() && !menu::IsOpen(menu::Id::Race)) return;
+    if (!g_enabled || !config::Get().audio_desc) { g_watch.clear(); return; }
+    if (!g_entries.empty()) CheckMovies();  // films play outside gameplay too
+    if (!poll::IsGameplayActive() && !menu::IsOpen(menu::Id::Race)) { g_watch.clear(); return; }
     // Nothing over a loading screen or a film (the "years later" cards): a
     // scene's description waits until the scene is on screen.
     if (menu::IsOpen(menu::Id::Loading) || game::CurrentMovie(nullptr, nullptr, nullptr)) return;
-    CheckStages();
-    CheckActors();
+    if (!g_entries.empty()) {
+        CheckStages();
+        CheckWaits();
+        if (config::Get().audio_desc_people) CheckActors();
+    }
+    CheckEvents();
     SpeakQueued();
     DWORD now = GetTickCount();
     for (size_t i = 0; i < g_shots.size();) {

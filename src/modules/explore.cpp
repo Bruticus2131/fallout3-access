@@ -10,6 +10,7 @@
 #include "f3a/itemvalue.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -261,8 +262,14 @@ void NextKey()
 
 } // namespace
 
+// On or off from the Settings menu (the game's thread); taken here.
+std::atomic<int> g_set_on{ -1 };
+
+void SetOn(bool on) { g_set_on.store(on ? 1 : 0); }
+
 void Tick(float dt)
 {
+    if (const int want = g_set_on.exchange(-1); want >= 0) g_on = want != 0;
     if (!g_on) return;                 // Shift+O decides (it starts as the INI says)
     if (!autowalk::IsWalking() || !InWorld()) { g_timer = 0.0f; return; }
     g_timer += dt;

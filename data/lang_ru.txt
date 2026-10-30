@@ -996,23 +996,8 @@ ru: ", не сражается"
 en: "No enemy nearby."
 ru: "Поблизости нет врагов."
 
-en: " is not an enemy. Not aiming."
-ru: " — не враг. Не прицеливаюсь."
-
-en: "Target: "
-ru: "Цель: "
-
 en: "Target %d of %d"
 ru: "Цель %d из %d"
-
-en: "Aiming at: "
-ru: "Прицеливаюсь в: "
-
-en: "No target. Select one with the scanner (C or X)."
-ru: "Нет цели. Выберите её сканером (C или X)."
-
-en: ". Fire."
-ru: ". Огонь."
 
 en: "Target lost. Tracking stopped."
 ru: "Цель потеряна. Слежение остановлено."
@@ -1047,8 +1032,8 @@ ru: ", сейчас "
 en: "View leveled."
 ru: "Взгляд выровнен."
 
-en: "No line of fire. Obstacle %.0f units ahead of you, %.0f above the floor. Move closer or go around."
-ru: "Нет линии огня. Препятствие в %.0f единицах перед вами, на %.0f над полом. Подойдите ближе или обойдите."
+en: "No line of fire. Obstacle %s ahead of you, %.0f above the floor."
+ru: "Нет линии огня. Препятствие в %s перед вами, на %.0f над полом."
 
 en: ", can't lock on. Face the targets, in first person."
 ru: ", не удаётся навестись. Повернитесь к мишеням, в виде от первого лица."
@@ -1193,9 +1178,6 @@ ru: "Прицеливаюсь в ближайший объект: %.0f един�
 
 en: "Nothing that could be hit."
 ru: "Нечего поразить."
-
-en: "Dump not available on this screen."
-ru: "Дамп недоступен на этом экране."
 
 en: "Dump saved to the dump file."
 ru: "Дамп сохранён в файл."
@@ -1451,3 +1433,315 @@ ru: ", взлом %d"
 
 en: "Careful: the target is behind a locked door, and that door is the only way out. Alt Home again teleports anyway."
 ru: "Осторожно: цель за запертой дверью, и выйти оттуда можно только через неё. Alt Home ещё раз - телепорт всё равно."
+
+en: "Jumping down."
+ru: "Спрыгиваю."
+
+en: "You have the key. Opening the door."
+ru: "У вас есть ключ. Открываю дверь."
+
+en: " The key: "
+ru: " Ключ: "
+
+en: " Your Lockpick: %d, bobby pins: %d."
+ru: " Ваш навык взлома: %d, шпилек: %d."
+
+en: " Bobby pins: %d."
+ru: " Шпилек: %d."
+
+en: "a closed passage"
+ru: "закрытый проход"
+
+en: "The passage is closed. It opens with: "
+ru: "Проход закрыт. Его открывает: "
+
+en: "The way is shut by: "
+ru: "Путь закрывает: "
+
+en: ". It opens with: "
+ru: ". Открывает: "
+
+en: " Leading you there."
+ru: " Веду туда."
+
+en: "Open."
+ru: "Открыто."
+
+en: "Open. Walking on to: "
+ru: "Открыто. Иду дальше к: "
+
+en: "Crosshair on the door."
+ru: "Прицел на двери."
+
+en: "The door is in front of you."
+ru: "Дверь перед вами."
+
+en: "Crosshair on: "
+ru: "Прицел на: "
+
+en: ". Press E."
+ru: ". Нажмите E."
+
+en: " is in front of you. Press E."
+ru: " перед вами. Нажмите E."
+
+en: "It didn't open: "
+ru: "Не открылось: "
+
+en: "Stuck in the same place several times. I can't see a way to: "
+ru: "Несколько раз застрял на одном месте. Не вижу пути к: "
+
+en: ". Only this part is in view."
+ru: ". Видна только эта часть."
+
+en: "Accessibility"
+ru: "Доступность"
+
+en: "Distance with the crosshair"
+ru: "Расстояние у прицела"
+
+en: "Off"
+ru: "Выкл"
+
+en: "On"
+ru: "Вкл"
+
+en: "Pitch of the aim cue"
+ru: "Высота сигнала прицела"
+
+en: ", level %u"
+ru: ", уровень %u"
+
+en: ", played %u h %u min"
+ru: ", в игре %u ч %u мин"
+
+en: ", played %u min"
+ru: ", в игре %u мин"
+
+en: ", saved %u.%02u.%u at %u:%02u"
+ru: ", сохранено %u.%02u.%u в %u:%02u"
+
+en: "No clear shot nearby, move closer or go around."
+ru: "Рядом нет чистого выстрела, подойдите ближе или обойдите."
+
+en: "Clear shot %s to the left."
+ru: "Чистый выстрел: %s влево."
+
+en: "Clear shot %s to the right."
+ru: "Чистый выстрел: %s вправо."
+
+en: "off"
+ru: "выкл"
+
+en: "%d degrees"
+ru: "%d градусов"
+
+en: "Menu name when it opens"
+ru: "Название меню при открытии"
+
+en: "Item details after the name"
+ru: "Описание предмета после названия"
+
+en: "Messages and tutorials"
+ru: "Сообщения и обучение"
+
+en: "Control hints"
+ru: "Подсказки управления"
+
+en: "Never"
+ru: "Никогда"
+
+en: "Once"
+ru: "Один раз"
+
+en: "Always"
+ru: "Всегда"
+
+en: "Name under the crosshair"
+ru: "Название под прицелом"
+
+en: "Directions"
+ru: "Направления"
+
+en: "Clock"
+ru: "Часы"
+
+en: "Degrees"
+ru: "Градусы"
+
+en: "Aim cue"
+ru: "Сигнал прицела"
+
+en: "Shot correction"
+ru: "Коррекция выстрела"
+
+en: "The mouse breaks the aim"
+ru: "Мышь прерывает прицеливание"
+
+en: "Exploration mode"
+ru: "Режим исследования"
+
+en: "Hide empty containers"
+ru: "Скрывать пустые контейнеры"
+
+en: "Scanner range"
+ru: "Дальность сканера"
+
+en: "Audio description"
+ru: "Тифлокомментарий"
+
+en: "VATS tutorial"
+ru: "Обучение VATS"
+
+en: "I can't read the game's walking speed. Walk stopped."
+ru: "Не удаётся прочитать скорость ходьбы из игры. Ходьба остановлена."
+
+en: "Aim help"
+ru: "Помощь в прицеливании"
+
+en: "Cutscene cue"
+ru: "Сигнал заставки"
+
+en: "%s dies."
+ru: "%s погибает."
+
+en: "%s passes out."
+ru: "%s теряет сознание."
+
+en: "%s comes round."
+ru: "%s приходит в себя."
+
+en: "%s is restrained."
+ru: "%s связан."
+
+en: "%s lies down to sleep."
+ru: "%s ложится спать."
+
+en: "%s gets out of bed."
+ru: "%s встаёт с кровати."
+
+en: "%s sits down."
+ru: "%s садится."
+
+en: "%s stands up."
+ru: "%s встаёт."
+
+en: "%s draws a weapon."
+ru: "%s достаёт оружие."
+
+en: "%s puts the weapon away."
+ru: "%s убирает оружие."
+
+en: "%s starts running."
+ru: "%s бросается бежать."
+
+en: "What people do"
+ru: "Что делают люди"
+
+en: "In scenes"
+ru: "В сценах"
+
+en: "How people look"
+ru: "Внешность людей"
+
+en: ", companion"
+ru: ", спутник"
+
+en: ", dead, searched"
+ru: ", мёртв, обыскан"
+
+en: "companions"
+ru: "спутники"
+
+en: "Melee and unarmed attacks can't pick a body part."
+ru: "В ближнем бою и без оружия часть тела не выбрать."
+
+en: "This target has no body parts to pick."
+ru: "У этой цели нет частей тела для выбора."
+
+en: "The game doesn't let you pick a body part now."
+ru: "Игра сейчас не даёт выбрать часть тела."
+
+en: "Sunday"
+ru: "воскресенье"
+
+en: "Monday"
+ru: "понедельник"
+
+en: "Tuesday"
+ru: "вторник"
+
+en: "Wednesday"
+ru: "среда"
+
+en: "Thursday"
+ru: "четверг"
+
+en: "Friday"
+ru: "пятница"
+
+en: "Saturday"
+ru: "суббота"
+
+en: "January"
+ru: "января"
+
+en: "February"
+ru: "февраля"
+
+en: "March"
+ru: "марта"
+
+en: "April"
+ru: "апреля"
+
+en: "May"
+ru: "мая"
+
+en: "June"
+ru: "июня"
+
+en: "July"
+ru: "июля"
+
+en: "August"
+ru: "августа"
+
+en: "September"
+ru: "сентября"
+
+en: "October"
+ru: "октября"
+
+en: "November"
+ru: "ноября"
+
+en: "December"
+ru: "декабря"
+
+en: "The crosshair won't take it. Step closer, or use End, which works without aiming."
+ru: "Прицел не наводится на этот объект. Подойдите ближе или нажмите End — он работает без прицеливания."
+
+en: "A door in the way: "
+ru: "Дверь на пути: "
+
+en: ". Open it with E and I'll go on."
+ru: ". Откройте её клавишей E, и я пойду дальше."
+
+en: "Skipping quest stages is off. Switch it on in Settings, Accessibility."
+ru: "Пропуск этапов заданий выключен. Включите его в Настройках, в разделе «Доступность»."
+
+en: " is too far: "
+ru: " слишком далеко: "
+
+en: ". Get closer."
+ru: ". Подойдите ближе."
+
+en: "no limit"
+ru: "без ограничения"
+
+en: "Reach of the End key"
+ru: "Дальность клавиши End"
+
+en: "Skipping quest stages (=)"
+ru: "Пропуск этапов заданий (=)"

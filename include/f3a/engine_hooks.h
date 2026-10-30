@@ -27,6 +27,10 @@ void SetMenuEnterFilter(EnterFilter filter);
 using ShotAimProvider = bool (*)(float out[3]);
 void SetShotAimProvider(ShotAimProvider provider);
 
+// When the player last fired a ranged weapon (GetTickCount), 0 never: the
+// evidence for a hit when the game keeps no record of who dealt it.
+unsigned long LastPlayerShotAt();
+
 // Install every patch. Returns false if any one was not installed; the mod
 // carries on either way.
 bool InstallHooks();

@@ -611,25 +611,54 @@ Invoke-Step "mod" {
 
 $premium = Test-NexusKey
 
-# Loot Menu Updated is a REQUIREMENT, not a nicety: it replaces the container
-# screen with a list drawn on the HUD, and the mod reads that list out - the
+# A mod's archive put where the game wants it, however it was packed: with
+# Data\ at the top (into the game folder), or Data's own folders (FOSE, menus,
+# textures...) at the top (into Data) - perhaps inside one more folder.
+function Copy-ModArchive([string] $Dir) {
+    $root = $Dir
+    $dataDirs = @("fose", "menus", "textures", "meshes", "sound")
+    for ($i = 0; $i -lt 3; $i++) {
+        $kids = @(Get-ChildItem -LiteralPath $root)
+        $subDirs = @($kids | Where-Object { $_.PSIsContainer })
+        if ($subDirs | Where-Object { $_.Name -ieq "Data" }) { Copy-Tree $root $GamePath; return }
+        if ($subDirs | Where-Object { $dataDirs -contains $_.Name.ToLower() }) {
+            Copy-Tree $root (Join-Path $GamePath "Data"); return
+        }
+        $topFiles = @($kids | Where-Object { -not $_.PSIsContainer -and
+                      @(".txt", ".md", ".jpg", ".png", ".html") -notcontains $_.Extension.ToLower() })
+        if ($subDirs.Count -eq 1 -and $topFiles.Count -eq 0) { $root = $subDirs[0].FullName; continue }
+        break
+    }
+    Copy-Tree $root $GamePath
+}
+
+# Loot Menu is a REQUIREMENT, not a nicety: it replaces the container screen
+# with a list drawn on the HUD, and the mod reads that list out - the
 # container, the highlighted entry, its place in the list, whether it is worn.
+# Two mods: the original Loot Menu, then Loot Menu Updated over it (it needs
+# the original's files and replaces some of them).
 function Install-LootMenu {
     $dll = Join-Path $GamePath "Data\FOSE\Plugins\F3LootMenu.dll"
-    if (Test-Path $dll) { Write-Step (T "Loot Menu Updated już jest — pomijam" "Loot Menu Updated is already there — skipping"); return }
+    if (Test-Path $dll) { Write-Step (T "Loot Menu już jest — pomijam" "Loot Menu is already there — skipping"); return }
 
-    $file = Get-NexusFile -ModId 27191
-    if ($file) {
-        $dir = Join-Path $script:Work "lootmenu"
+    $all = $true
+    foreach ($id in @(24347, 27191)) {
+        $file = Get-NexusFile -ModId $id
+        if (-not $file) { $all = $false; break }
+        $dir = Join-Path $script:Work "lootmenu$id"
         Expand-Any $file $dir
-        Copy-Tree $dir $GamePath
-        if (Test-Path $dll) { Write-Step (T "Loot Menu Updated zainstalowany" "Loot Menu Updated installed"); return }
-        Write-Step (T "Rozpakowałem Loot Menu, ale nie widzę F3LootMenu.dll" "Loot Menu was unpacked, but F3LootMenu.dll is not there")
+        Copy-ModArchive $dir
     }
+    if ($all -and (Test-Path $dll)) {
+        Write-Step (T "Loot Menu i Loot Menu Updated zainstalowane" "Loot Menu and Loot Menu Updated installed")
+        return
+    }
+    if ($all) { Write-Step (T "Rozpakowałem Loot Menu, ale nie widzę F3LootMenu.dll" "Loot Menu was unpacked, but F3LootMenu.dll is not there") }
 
-    Write-Step (T "UWAGA: brakuje wymaganego moda Loot Menu Updated." "WARNING: the required mod Loot Menu Updated is missing.")
-    Write-Step (T "Pobierz go ręcznie: https://www.nexusmods.com/fallout3/mods/27191" "Download it by hand: https://www.nexusmods.com/fallout3/mods/27191")
-    Write-Step (T "i wypakuj do folderu gry (plik trafia do Data\FOSE\Plugins)." "and unpack it into the game folder (the file goes to Data\FOSE\Plugins).")
+    Write-Step (T "UWAGA: brakuje wymaganych modów Loot Menu i Loot Menu Updated." "WARNING: the required mods Loot Menu and Loot Menu Updated are missing.")
+    Write-Step (T "Pobierz je ręcznie, najpierw Loot Menu: https://www.nexusmods.com/fallout3/mods/24347" "Download them by hand, first Loot Menu: https://www.nexusmods.com/fallout3/mods/24347")
+    Write-Step (T "potem Loot Menu Updated: https://www.nexusmods.com/fallout3/mods/27191" "then Loot Menu Updated: https://www.nexusmods.com/fallout3/mods/27191")
+    Write-Step (T "i wypakuj oba po kolei do folderu gry - drugi nadpisuje pliki pierwszego (F3LootMenu.dll trafia do Data\FOSE\Plugins)." "and unpack both, in that order, into the game folder - the second overwrites files of the first (F3LootMenu.dll goes to Data\FOSE\Plugins).")
 }
 
 # The path differs from the stable download: 1.3 beta 2 lives under /beta/.

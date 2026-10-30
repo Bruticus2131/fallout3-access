@@ -267,7 +267,7 @@ bool Load(const wchar_t* ini_path)
     s.aim_bones           = ReadBool(L"Voice", L"AimBones",         false, ini_path);
     s.hostile_from_combat = ReadBool(L"Voice", L"HostileFromCombat", true, ini_path);
     s.aim_mouse_takeover  = ReadBool(L"Voice", L"AimMouseTakeover",  true, ini_path);
-    s.autowalk_speed      = ReadInt (L"Voice", L"AutoWalkSpeed",    160,  ini_path);
+    s.aim_help            = ReadBool(L"Voice", L"AimHelp",           true, ini_path);
     s.quest_arrive_dist   = ReadInt (L"Voice", L"QuestArriveDist",  0,    ini_path);
     s.footstep_cue        = ReadBool(L"Voice", L"FootstepCue",       true, ini_path);
     s.walk_animation      = ReadBool(L"Voice", L"WalkAnimation",     true, ini_path);
@@ -281,6 +281,9 @@ bool Load(const wchar_t* ini_path)
     s.explore_radius        = ReadInt (L"Voice", L"ExploreRadius",      900,  ini_path);
     if (s.explore_radius < 200 || s.explore_radius > 4000) s.explore_radius = 900;
     s.audio_desc            = ReadBool(L"Voice", L"AudioDescription",   true,  ini_path);
+    s.cutscene_cue          = ReadBool(L"Voice", L"CutsceneCue",        true,  ini_path);
+    s.audio_desc_events     = ReadInt (L"Voice", L"AudioDescEvents",    1,     ini_path);
+    s.audio_desc_people     = ReadBool(L"Voice", L"AudioDescPeople",    false, ini_path);
     s.audio_desc_capture    = ReadBool(L"Voice", L"AudioDescCapture",   false, ini_path);
     s.engine_path           = ReadBool(L"Voice", L"EnginePath", true, ini_path);
     s.hint_mode             = ReadInt (L"Voice", L"Hints", 1, ini_path);
@@ -290,6 +293,9 @@ bool Load(const wchar_t* ini_path)
     s.compass_units         = ReadInt (L"Voice", L"CompassUnits",       0, ini_path);
     s.autowalk_turn_gain    = ReadInt (L"Voice", L"AutoWalkTurnGain",   4, ini_path);
     s.activate_pick_radius  = ReadInt (L"Voice", L"ActivatePickRadius", 150, ini_path);
+    s.activate_range        = ReadInt (L"Voice", L"ActivateRange",      300, ini_path);
+    if (s.activate_range < 0) s.activate_range = 0;
+    s.skip_stage            = ReadBool(L"Voice", L"SkipStage",          false, ini_path);
 
     std::string lang = ReadStr(L"General", L"Language", "auto", ini_path);
     for (auto& ch : lang) if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
@@ -335,7 +341,6 @@ bool Load(const wchar_t* ini_path)
     h.crosshair_info   = ReadKey(L"Hotkeys", L"CrosshairInfo",   h.crosshair_info,   ini_path);
     h.view_toggle      = ReadKey(L"Hotkeys", L"ViewToggle",      h.view_toggle,      ini_path);
     h.item_info        = ReadKey(L"Hotkeys", L"ItemInfo",        h.item_info,        ini_path);
-    h.aim_target       = ReadKey(L"Hotkeys", L"AimTarget",       h.aim_target,       ini_path);
     h.attack_key       = ReadKey(L"Hotkeys", L"AttackKey",       h.attack_key,       ini_path);
     h.drop_item        = ReadKey(L"Hotkeys", L"DropItem",        h.drop_item,        ini_path);
     h.sonar            = ReadKey(L"Hotkeys", L"Sonar",           h.sonar,            ini_path);
@@ -344,7 +349,6 @@ bool Load(const wchar_t* ini_path)
     h.sweep_next       = ReadKey(L"Hotkeys", L"SweepNext",       h.sweep_next,       ini_path);
     h.audio_desc_repeat = ReadKey(L"Hotkeys", L"AudioDescRepeat", h.audio_desc_repeat, ini_path);
     h.press_row        = ReadKey(L"Hotkeys", L"PressRow",        h.press_row,        ini_path);
-    h.aim_hold         = ReadKey(L"Hotkeys", L"AimHold",         h.aim_hold,         ini_path);
     h.container_side   = ReadKey(L"Hotkeys", L"ContainerSide",   h.container_side,   ini_path);
     h.aim_calibrate    = ReadKey(L"Hotkeys", L"AimCalibrate",    h.aim_calibrate,    ini_path);
     h.aim_up           = ReadKey(L"Hotkeys", L"AimUp",           h.aim_up,           ini_path);
@@ -361,6 +365,84 @@ bool Load(const wchar_t* ini_path)
 }
 
 const Settings& Get() { return g_settings; }
+Settings& Mutable() { return g_settings; }
+
+// The INI is edited as bytes, line by line: its comments are in two code
+// pages (most UTF-8, a few lines cp1250) and some lines end in CR LF, others
+// in LF, and all of that is left as it was. WritePrivateProfileString would
+// have dropped the comment after the value. The value keeps the width of the
+// old one where it can, so the comments stay in their column.
+bool WriteIniInt(const char* section, const char* key, int value)
+{
+    if (!g_ini_path[0] || !section || !key) return false;
+    std::string text;
+    {
+        FILE* f = _wfopen(g_ini_path, L"rb");
+        if (!f) return false;
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+        std::fclose(f);
+    }
+    const std::string val = std::to_string(value);
+    auto trim = [](std::string s) {
+        size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t\r");
+        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    };
+    bool inSection = false, done = false;
+    size_t sectionEnd = std::string::npos;          // where to add the key if missing
+    size_t pos = 0;
+    while (pos < text.size() && !done) {
+        size_t eol = text.find('\n', pos);
+        size_t next = eol == std::string::npos ? text.size() : eol + 1;
+        std::string line = text.substr(pos, next - pos);
+        std::string t = trim(line.substr(0, line.find(';')));
+        if (!t.empty() && t.front() == '[') {
+            if (inSection && sectionEnd == std::string::npos) sectionEnd = pos;
+            inSection = _stricmp(trim(t.substr(1, t.find(']') - 1)).c_str(), section) == 0;
+        } else if (inSection) {
+            size_t eq = line.find('=');
+            if (eq != std::string::npos && _stricmp(trim(line.substr(0, eq)).c_str(), key) == 0) {
+                // The old value: after '=' and its spaces, up to a comment or the end.
+                size_t vs = line.find_first_not_of(" \t", eq + 1);
+                if (vs == std::string::npos) vs = line.size();
+                size_t ve = line.find(';', vs);
+                const bool comment = ve != std::string::npos;
+                if (!comment) ve = line.find_first_of("\r\n", vs);
+                if (ve == std::string::npos) ve = line.size();
+                std::string field = val;
+                if (comment && field.size() < ve - vs) field.resize(ve - vs, ' ');
+                else if (comment) field += ' ';
+                line = line.substr(0, vs) + field + line.substr(ve);
+                text.replace(pos, next - pos, line);
+                done = true;
+                break;
+            }
+        }
+        pos = next;
+    }
+    if (!done) {
+        // No such key yet: at the end of its section, or a new section.
+        const std::string add = std::string(key) + " = " + val + "\n";
+        if (inSection && sectionEnd == std::string::npos) sectionEnd = text.size();
+        if (sectionEnd != std::string::npos) {
+            if (sectionEnd > 0 && text[sectionEnd - 1] != '\n') text.insert(sectionEnd++, "\n");
+            text.insert(sectionEnd, add);
+        } else {
+            if (!text.empty() && text.back() != '\n') text += '\n';
+            text += std::string("[") + section + "]\n" + add;
+        }
+    }
+    FILE* f = _wfopen(g_ini_path, L"wb");
+    if (!f) {
+        F3A_INFO("Config: could not write %s=%d to the INI", key, value);
+        return false;
+    }
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    F3A_INFO("Config: [%s] %s = %d written to the INI", section, key, value);
+    return true;
+}
 
 unsigned GameTextCodepage() { return g_game_cp.load(); }
 

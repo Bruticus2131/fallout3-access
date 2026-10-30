@@ -79,6 +79,7 @@ struct WorldEntity {
     Vec3        position;
     bool        hostile  = false;
     bool        dead     = false;     // actors: a body (the game's GetDead)
+    bool        teammate = false;     // actors: the player's companion (GetPlayerTeammate)
     // Bodies and containers: 1 = something in/on them, 0 = nothing, -1 = could
     // not tell.
     int         items    = -1;
@@ -105,6 +106,23 @@ bool IsFixture(const WorldEntity& e);
 // engine (Actor::GetCombatTarget, a virtual slot), not guessed from a field.
 // MAIN THREAD ONLY (a virtual call); returns false anywhere else.
 bool IsHostileToPlayer(const void* refr);
+
+// Did the PLAYER deal this actor its last hit (1), someone else (0), or is
+// there no hit to read (negative: -1 an unknown process, -2 a far-away actor,
+// whose process keeps none, -3 no hit recorded, -4 one with no attacker)?
+// And did the player kill it: 1 yes, 0 someone else, negative can't tell.
+// Plain reads of what the game's own GetHitLocation and IsKiller read.
+int LastHitByPlayer(const void* actor);
+// Is this reference gone from the world since it was scanned: freed, taken
+// (picked up), disabled or deleted, or no longer in a cell? Plain reads.
+bool RefGone(const void* refr, uint32_t expectedRefID);
+int KilledByPlayer(const void* actor);
+
+// Bodies the player has searched this session: their inventory opened (E or
+// End) or something taken from them through the loot overlay. Any thread.
+void NoteSearched(uint32_t refid);
+bool WasSearched(uint32_t refid);
+void ClearSearched();
 
 // Map markers (places) within `radius` of the player in this worldspace —
 // they live in the worldspace's persistent cell, not the loaded ones, so the
@@ -258,6 +276,12 @@ float GetPlayerAVMax(uint32_t avCode);
 // 0..24; -1 when it can't be read. MAIN THREAD (LookupFormByID).
 float GetGameHour();
 
+// The game's date and time: the GameYear (0x35), GameMonth (0x36, 0 =
+// January), GameDay (0x37) and GameHour (0x38) globals - what the Pip-Boy's
+// Data page shows. False when they can't be read. MAIN THREAD.
+struct GameClock { int year = 0, month = 0, day = 0; float hour = 0.0f; };
+bool ReadGameClock(GameClock* out);
+
 // The sleep / wait screen's own texts: the question, the hours chosen, the
 // time now (SWM_HowManyText, SWM_HoursChosen, SWM_CurrentTime). Empty when
 // the screen is not up.
@@ -300,6 +324,10 @@ uint32_t GetCrosshairRefID(uint32_t* out_type = nullptr);
 // refID of the crosshair ref if it's an actor (NPC/Creature), else 0 — for the
 // line-of-sight aim cue (a sound when the crosshair is on an enemy).
 uint32_t GetCrosshairActorID();
+// The reference the game would activate with E now (InterfaceManager+0xFC,
+// its own pick along the view, within its activation range), 0 for none.
+// Plain reads, any thread.
+uint32_t CrosshairRefId();
 
 // ---- World map ----
 //
@@ -380,6 +408,22 @@ uint8_t GetUseKeyScancode();
 // stopped — which, without a screen, IS the sound of still walking.
 bool StopActorMovementAnim(void* actor);
 
+// The sequence playing in the movement slot (the walk or run cycle) right
+// now, null when none is. `ok` false when the actor's animation data cannot
+// be read. `group` gets its animation group (3 walk, 7 run; -1 none).
+// MAIN THREAD only.
+const void* ActorMovementSequence(void* actor, bool* ok, int* group = nullptr);
+
+// Keep the walk/run cycle in step with `speed` (units/s): the movement
+// animation's pace is set to speed / the animation's own speed, on the
+// player's first- and third-person animation data. `pace` and `animSpeed`
+// get what was set, `before` what was there (for the log). False when no
+// movement animation is playing. RestoreMovementAnimPace puts back what the
+// walk found. MAIN THREAD only.
+bool SetMovementAnimPace(void* actor, float speed, float* pace = nullptr,
+                         float* animSpeed = nullptr, float* before = nullptr);
+void RestoreMovementAnimPace(void* actor);
+
 // ---- Aiming at an object's real body ----
 //
 // The centre of a reference's COLLISION shape, in world coordinates — the point
@@ -414,6 +458,7 @@ struct VatsLimb {
     std::string chance;    // "95%"
     int  part_id = 0;      // the game's own body-part id, stable per limb
     bool selected = false; // this is the limb VATS is currently aimed at
+    float alpha = 0.0f;    // how drawn it is (0 = not shown)
     float x = 0.0f, y = 0.0f;   // top-left, absolute tile coordinates
     float w = 0.0f, h = 0.0f;   // size, so the centre can be aimed at
 };
@@ -437,6 +482,10 @@ struct VatsPick {
     // SOMETHING rather than go silent, and it says this list's entry instead.
     char names[8][48] = {};
     char chances[8][16] = {};   // each part's own hit chance, same order
+    // Which part is selected, as an identity rather than a name: two parts
+    // can read the same, and stepping from one to the other is still a change.
+    // 0 = none.
+    uintptr_t sel_key = 0;
     // Filled by the main-thread sampler, not by GetVatsPick: the target's name
     // (GetVatsSelectionText; empty = no target shown) and whether this record
     // was taken in the VATS session that is open now.
@@ -444,6 +493,21 @@ struct VatsPick {
     bool sampled = false;
 };
 bool GetVatsPick(VatsPick* out);
+// For the F11 dump: VATS's input mode (pad or W/S), its selected part and
+// every target's parts with their markers. Empty when VATS is not open.
+std::vector<std::string> DebugVatsState();
+// Can a body part be chosen in VATS now (the game's own test before it takes
+// W/S)? 1 yes, 0 no, -1 can't tell. `reason` when not: 1 the game's process
+// flag (+0x124), 2 a target with no parts, 3 no weapon, 4 a melee or unarmed
+// attack. `detail` gets the values read, for the log. Plain reads.
+int VatsPartChoice(int* reason, char* detail = nullptr, size_t detailSize = 0);
+// VATS also selects the body part under the game's own mouse cursor, and its
+// markers move as the camera closes in on a part: a marker sliding under a
+// cursor left mid-screen took the selection away from W/S. This puts the
+// game's cursor (not Windows') in the top-left corner, clear of them. True
+// when it is there. Plain reads and two float writes the engine picks up in
+// its own cursor update: any thread.
+bool ParkCursorForVats();
 
 // Shots currently on the VATS queue, counted from the on-screen list. -1 when
 // it can't be read. Main thread only.
@@ -505,6 +569,24 @@ void ReleaseStuckMenuModifiers();
 
 // Is a weapon drawn?
 bool IsWeaponOut();
+
+// What an actor is doing, as the game's own conditions read it - for audio
+// description from the engine's facts rather than from a script. Plain reads,
+// any thread; -1 where a value cannot be read.
+//   life      actor+0xFC (GetUnconscious/GetRestrained/GetDead): 0 alive,
+//             1 dying, 2 dead, 3 unconscious, 5 restrained
+//   sit_sleep actor+0x19C (vtable +0x214, 0x0070C8C0): 4 sitting, 9 asleep,
+//             1-5 getting to / out of a seat, 6-10 a bed, 0 neither
+//   weapon    the process's IsWeaponOut byte (+0x135)
+//   running   the mover's movement flags, bit 0x200
+struct ActorFacts { int life = -1, sit_sleep = -1, weapon = -1, running = -1; };
+bool ReadActorFacts(const void* refr, uint32_t refid, ActorFacts* out);
+
+// The player controls a script has taken away (DisablePlayerControls), as the
+// GetPlayerControlsDisabled condition reads them: bit 0 movement, 1 looking,
+// 2 Pip-Boy, 3 fighting, 4 POV switch, 5 rollover text, 6 sneaking. -1 when
+// it cannot be read. A plain read, any thread.
+int PlayerControlsDisabled();
 
 // Turn the player toward a world point using the engine's OWN actor-facing
 // routine (the one Command Extender's FaceObject calls). Goes through the
@@ -618,6 +700,12 @@ void AimLookAtBiased(const Vec3& target, float pitchBiasRad);
 // height. False when the 3D is not ready.
 bool GetCameraPos(Vec3* out);
 
+// A ledge a walk would step off (`ledge` on it, `landing` below, a little way
+// out): true when nothing stands across it - two of the engine's rays from
+// just behind the edge, at knee and chest height, out over it. False = a wall
+// (a floor's edge at a building's wall, lower ground outside). MAIN THREAD.
+bool LedgeLooksOpen(const Vec3& ledge, const Vec3& landing);
+
 // The engine's own view raycast — the one that decides what is under the
 // crosshair. Returns true if anything was hit; `outRefId` names it (0 for
 // scenery with no reference) and `outDist` gives the range. This is the mod's
@@ -674,12 +762,16 @@ std::vector<RayHit> RayScanAhead(float yawSpanDeg, float pitchSpanDeg,
 // Main thread only (it calls into the game). Returns false on a build whose
 // prologue guards do not match, so callers can fall back.
 bool AimPlayerAtRad(float pitchRad, float yawRad);
+// Turn the player (and the camera) to `yawRad` (0 = north), leaving the pitch:
+// the yaw half of AimPlayerAtRad, for steering a walk. MAIN THREAD only.
+bool SteerYawRad(float yawRad);
 
 // Same, expressed as "look at this world point"; `up` lifts the aim point off
 // the target's origin (torso height, typically 100).
 // `dzBias` shifts the aim point vertically, in game units. It corrects for the
 // eye height and the target's aim point in one number — see the definition.
 bool AimPlayerAtPoint(const Vec3& target, float up, float dzBias = 0.0f);
+
 
 // How far the player's view has drifted from the last aim we applied, in
 // radians (yaw and pitch). False when no aim has been applied yet. Measured a
@@ -725,7 +817,8 @@ void SetPlayerAngleDeg(int axisAscii, float degrees);
 // given reference (cell-aware). Last-resort navigation when a target can't be
 // walked to. MUST be called on the MAIN thread.
 // `expectedRefID` guards a stale pointer (0 = unchecked; callers pass it).
-void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID);
+void TeleportPlayerToRef(const void* targetRefr, uint32_t expectedRefID,
+                         const Vec3* offset = nullptr);
 
 // For a moment after a teleport the game is still moving the player: it
 // re-attaches the player and the camera and loads and frees the cells round
@@ -767,6 +860,43 @@ bool IsLoadDoor(const void* doorRefr);
 // needs (0, 25, 50, 75, 100; -1 = the key only).
 int LockTier(int level);
 int LockSkillNeeded(int tier);
+
+// The key a locked reference opens with: its form id, and its name in
+// `keyName` when asked. 0 when the lock has no key. Memory reads only.
+uint32_t LockKeyForm(const void* refr, uint32_t expectedRefID, std::string* keyName = nullptr);
+// Is it locked now: 1 locked, 0 not (or no lock at all), -1 unreadable.
+int LockState(const void* refr, uint32_t expectedRefID);
+
+// ---- What opens what ----
+// A door or an activator that something else opens: the game's own list of
+// its "activate parents" (ExtraActivateRef, extra type 0x53, set in the
+// editor) - the switches that activate it when they are used. The Overseer's
+// desk slides off the tunnel when the electric switch on it is pressed; the
+// tunnel's secret door opens with the switch beside it (Fallout3.esm).
+struct Opener {
+    const void* refr = nullptr;
+    uint32_t    form_id = 0;
+    std::string name;
+    Vec3        position{};
+};
+struct SwitchedRef {
+    const void* refr = nullptr;
+    uint32_t    form_id = 0;
+    std::string name;              // its own name; empty for a nameless one
+    Vec3        position{};
+    bool        is_door = false;
+    int         open_state = -1;   // doors: 1 open, 0 closed, -1 unknown
+    bool        parent_only = false;   // only a switch opens it, never the hand
+    std::vector<Opener> openers;
+};
+// The switched references within `radius` (2D) of `around` in the loaded
+// cells, nearest first. Openers with no name (hidden triggers) and traps
+// (laser tripwires, which close doors too) are left out, and a reference
+// left with none is too. Memory reads only, any thread.
+std::vector<SwitchedRef> FindSwitchedRefs(const Vec3& around, float radius, int max_results);
+
+// The switched reference with this id, if it is in the loaded cells.
+bool GetSwitchedRef(const void* refr, uint32_t expectedRefID, SwitchedRef* out);
 
 // The real level of every "leveled" lock near the player (one whose level
 // grows with the place's level: 25 plus that level for the Super-Duper Mart's

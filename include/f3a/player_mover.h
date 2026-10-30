@@ -4,16 +4,20 @@
 #include <vector>
 #include "f3a/game_access.h"
 
-// Driving the player by TAKING OVER the engine's movement update, instead of
-// holding W/A/S/D through SendInput.
+// Driving the player during a walk. Since 2026-10-30 THE ENGINE WALKS: the
+// game's own Auto Move (PlayerCharacter+0x5B0) holds Forward, and the hook
+// only turns the player toward the route every frame - speed, walk or run,
+// sneaking, animations and footsteps are the game's. What follows describes
+// the older way, kept for a game build whose auto-move code differs: TAKING
+// OVER the engine's movement update instead of holding W/A/S/D through
+// SendInput.
 //
 // The engine calls PlayerMover::Update every frame to turn input into motion.
 // We hook that vtable slot: while a walk is active the original never runs, so
 // nothing overwrites what we do — which is why we can finally write the heading
 // directly (writing rotZ while the input pipeline was still running is what made
 // the player spin in place). Movement itself goes through the actor's own move
-// routine with an exact displacement vector, so we control speed precisely and
-// can slow down into turns instead of skidding off ledges.
+// routine with an exact displacement vector, at the game's own walk or run speed.
 //
 // This is the technique the FNV accessibility mod uses; its "AI driven" flag
 // turned out to be its own gate, not New Vegas's script function, so nothing
@@ -37,7 +41,8 @@ bool Available();
 void ProbePath();
 
 // Steer toward a world point this frame. Call every tick while walking; the
-// goal is consumed by the next engine movement update. `run` picks run speed.
+// goal is consumed by the next engine movement update. `run` false keeps to a
+// walk; true moves the way the player would (CurrentSpeed).
 //
 // Restating the goal is also what keeps the walk alive: a goal that stops being
 // refreshed for a moment makes the mover stop by itself. Whatever goes wrong
@@ -45,15 +50,40 @@ void ProbePath();
 // the player cannot be left walking on with nothing driving them.
 void SetGoal(float x, float y, bool run);
 
-// The same, plus the route's next real corner. The walk steers at a point a
-// little ahead along the route (smoother), but brakes for whichever is the
-// sharper turn — that point or the corner — so a bend is never taken at full
-// speed just because the look-ahead had already rounded it (the FNV mod's rule).
+// The same, plus the route's next real corner (kept for the callers; the walk
+// no longer brakes for it - its speed is the game's, turns included).
 void SetGoalWithCorner(float x, float y, bool run, float cornerX, float cornerY);
 
-// A point to stop ON, not walk through: at walking pace, easing in over the
-// last stretch, holding still once within `stopRadius`. For a spot the game
-// checks with a small trigger box (where to stand for a quest photo).
+// Follow a stretch of route: pts[0] is where the leg being walked starts,
+// pts[1] its end, and so on (at most kRouteMax points). The hook works out
+// the point to steer at by itself, EVERY FRAME, as the FNV mod's does: a
+// point worked out on the walk's own tick (every 80 ms) was walked past
+// between two ticks on stairs, where it lies only a few steps ahead, and the
+// player braked and turned back for it - three steps, a stop, three steps.
+constexpr size_t kRouteMax = 12;
+void SetRoute(const game::Vec3* pts, size_t n);
+
+// The speed a walk moves at now (units/s): the game's own walk or run speed,
+// as the player's Caps Lock (always run) and the Run key say, and nothing
+// else - it never brakes for turns. 0 before the first step.
+float CurrentSpeed();
+
+// Once, after the walk stopped because the game's speed could not be read (a
+// game build this was not made for): there is no other speed to walk at.
+bool SpeedUnreadable();
+
+// Once, after the player pressed a movement key during a walk: the game
+// cancelled its auto-move, so the player has taken over and the walk ends.
+bool UserTookOver();
+
+// A game was loaded: for its first frames, whatever walking the save kept
+// (the game's auto-move, the mover's "moving forward" state, the walk cycle)
+// is cleared, unless a walk has started or a movement key is held.
+void OnGameLoaded();
+
+// A point to stop ON, not walk through: at the game's walking speed, never
+// stepping past it, holding still once within `stopRadius`. For a spot the
+// game checks with a small trigger box (where to stand for a quest photo).
 void SetGoalPrecise(float x, float y, float stopRadius);
 
 // Stop driving: the engine goes back to processing the player's own input.

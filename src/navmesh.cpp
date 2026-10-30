@@ -12,6 +12,8 @@
 #include <utility>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <mutex>
 
 // FO3 1.7 navmesh layout, reverse-engineered from live dumps:
 //
@@ -45,6 +47,7 @@ struct Tri {
     Vec3     pos[3];
     Vec3     centroid;
     uint64_t vkey[3];   // quantized vertex keys (for shared-edge detection)
+    bool     water = false;   // NVTR flag 0x200
 };
 
 uint64_t QuantKey(const Vec3& p)
@@ -111,6 +114,7 @@ void GatherMeshFromCell(UInt8* cell, std::vector<Tri>& tris)
                 out.vkey[i] = QuantKey(out.pos[i]);
             }
             if (!ok) continue;
+            out.water = (tri[6] & 0x200) != 0;
             out.centroid = {
                 (out.pos[0].x + out.pos[1].x + out.pos[2].x) / 3.0f,
                 (out.pos[0].y + out.pos[1].y + out.pos[2].y) / 3.0f,
@@ -264,6 +268,33 @@ constexpr float kGoalFallbackDist  = 800.0f;
 
 constexpr float kAvoidRadius = 120.0f;   // a doorway's worth of triangles
 
+bool StandingSpotNear(const Vec3& at, float minDist, float maxDist, Vec3* out)
+{
+    if (!out || !std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z)) return false;
+    std::vector<Tri> tris;
+    if (!GatherCellTriangles(tris)) return false;
+    // Points well inside each triangle near by: its middle and half way from
+    // there to each corner - never on an edge, which may be a wall's foot.
+    bool found = false;
+    float best = 1e30f;
+    for (const Tri& t : tris) {
+        if (t.water) continue;
+        const float cdx = t.centroid.x - at.x, cdy = t.centroid.y - at.y;
+        if (cdx * cdx + cdy * cdy > (maxDist + 300.0f) * (maxDist + 300.0f)) continue;
+        Vec3 cand[4] = { t.centroid };
+        for (int k = 0; k < 3; ++k)
+            cand[k + 1] = { 0.5f * (t.centroid.x + t.pos[k].x), 0.5f * (t.centroid.y + t.pos[k].y),
+                            0.5f * (t.centroid.z + t.pos[k].z) };
+        for (const Vec3& c : cand) {
+            const float dx = c.x - at.x, dy = c.y - at.y;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            if (d < minDist || d > maxDist || std::fabs(c.z - at.z) > 120.0f) continue;
+            if (d < best) { best = d; *out = c; found = true; }
+        }
+    }
+    return found;
+}
+
 bool GroundZ(float x, float y, float nearZ, float* outZ)
 {
     if (!outZ) return false;
@@ -301,7 +332,7 @@ constexpr float kWallMargin = 32.0f;
 namespace {
 bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
                 std::vector<Vec3>& out_waypoints, const std::vector<Vec3>* avoid,
-                float clearance = 40.0f, float margin = kWallMargin);
+                float clearance = 40.0f, float margin = kWallMargin, bool withDrops = true);
 }
 
 bool BuildPath(const Vec3& from, const Vec3& to,
@@ -367,7 +398,8 @@ bool RetraceOn(const std::vector<Tri>& tris, const std::vector<Vec3>& route,
     out.clear();
     if (route.size() < 2) return false;
     std::vector<Vec3> mine;
-    if (!PathOnTris(tris, route.front(), route.back(), mine, nullptr, clearance, kWallMargin) ||
+    if (!PathOnTris(tris, route.front(), route.back(), mine, nullptr, clearance, kWallMargin,
+                    /*withDrops=*/false) ||
         mine.size() < 2)
         return false;
     const Vec3& e = mine.back(); const Vec3& g = route.back();
@@ -405,32 +437,256 @@ bool RetraceWithMargin(const std::vector<Vec3>& route, std::vector<Vec3>& out, f
 }
 
 namespace {
-bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
-                std::vector<Vec3>& out_waypoints, const std::vector<Vec3>* avoid,
-                float clearance, float margin)
-{
-    out_waypoints.clear();
+float PlaneZ(const Tri& t, float x, float y);   // below, with the corners
 
-    // Edge -> triangles sharing it (by quantized vertex positions, so the
-    // graph spans all navmeshes in the cell wherever their edges coincide).
-    std::unordered_map<uint64_t, std::vector<int>> edgeTris;
+float Dist2D(const Vec3& a, const Vec3& b)
+{
+    float dx = a.x - b.x, dy = a.y - b.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+// --- How the triangles connect -------------------------------------------
+//
+// A way from one triangle into the next: the opening crossed (`a`, `b`; which
+// is left is worked out walking on), the vertex keys of its ends when they are
+// the triangles' own corners (for the wall margin), and whether it is a drop -
+// one way, off a ledge: then `a` is the point on the ledge and `b` the
+// landing below.
+struct Link {
+    int      to;
+    Vec3     a, b;
+    uint64_t ka = 0, kb = 0;
+    bool     drop = false;
+};
+
+// An edge only one triangle has: a wall, a ledge, or where this navmesh meets
+// another without sharing corners.
+struct OpenEdge { int tri; int e; Vec3 p, q; };
+
+// Drops: a ledge the player can step off, onto other walkable ground below.
+// Never higher than a fall the game lets go unpunished (fJumpFallHeightMin,
+// 256 units - from higher a fall hurts), with some room to spare.
+constexpr float kDropMin     = 40.0f;   // less is a step
+constexpr float kDropReach   = 40.0f;   // the landing, this far out from the edge
+constexpr float kDropPenalty = 256.0f;  // a walk this much longer is still taken
+constexpr float kDropBanNear = 48.0f;
+
+std::mutex        g_ban_mx;
+std::vector<Vec3> g_banned_drops;       // ledges with a wall behind them (see BanDrop)
+
+float SafeDropHeight()
+{
+    // The game setting {vtable, value, name} at 0x00F61130 (1.7.0.3).
+    static float s_h = -1.0f;
+    if (s_h < 0.0f) {
+        s_h = 256.0f;
+        const auto* name = reinterpret_cast<const char* const*>(0x00F61138);
+        const auto* val  = reinterpret_cast<const float*>(0x00F61134);
+        if (Readable(name, 4) && Readable(*name, 19) &&
+            std::strcmp(*name, "fJumpFallHeightMin") == 0 && Readable(val, 4) &&
+            std::isfinite(*val) && *val >= 64.0f && *val <= 4096.0f)
+            s_h = *val;
+    }
+    return s_h - 36.0f;
+}
+
+bool DropBanned(const Vec3& ledge)
+{
+    std::lock_guard<std::mutex> lk(g_ban_mx);
+    for (const Vec3& b : g_banned_drops)
+        if (Dist2D(b, ledge) <= kDropBanNear && std::fabs(b.z - ledge.z) <= 64.0f) return true;
+    return false;
+}
+
+// Two open edges on one line, at one height, from opposite sides: the
+// opening between them is where they overlap.
+bool SeamOverlap(const std::vector<Tri>& tris, const OpenEdge& u, const OpenEdge& v,
+                 Vec3* a, Vec3* b)
+{
+    const float dx = u.q.x - u.p.x, dy = u.q.y - u.p.y;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 8.0f) return false;
+    const float ux = dx / len, uy = dy / len;
+    auto off = [&](const Vec3& p) { return (p.x - u.p.x) * uy - (p.y - u.p.y) * ux; };
+    if (std::fabs(off(v.p)) > 2.0f || std::fabs(off(v.q)) > 2.0f) return false;
+    // From opposite sides of the line - not two floors lying over each other.
+    if (off(tris[u.tri].centroid) * off(tris[v.tri].centroid) >= 0.0f) return false;
+    const float t0 = (v.p.x - u.p.x) * ux + (v.p.y - u.p.y) * uy;
+    const float t1 = (v.q.x - u.p.x) * ux + (v.q.y - u.p.y) * uy;
+    if (std::fabs(t1 - t0) < 1e-3f) return false;
+    const float lo = (std::max)(0.0f, (std::min)(t0, t1));
+    const float hi = (std::min)(len, (std::max)(t0, t1));
+    if (hi - lo < 12.0f) return false;
+    auto zu = [&](float t) { return u.p.z + (u.q.z - u.p.z) * (t / len); };
+    auto zv = [&](float t) { return v.p.z + (v.q.z - v.p.z) * ((t - t0) / (t1 - t0)); };
+    if (std::fabs(zu(lo) - zv(lo)) > 24.0f || std::fabs(zu(hi) - zv(hi)) > 24.0f) return false;
+    *a = { u.p.x + ux * lo, u.p.y + uy * lo, 0.5f * (zu(lo) + zv(lo)) };
+    *b = { u.p.x + ux * hi, u.p.y + uy * hi, 0.5f * (zu(hi) + zv(hi)) };
+    return true;
+}
+
+uint64_t SquareKey(float x, float y, float size)
+{
+    const int cx = (int)std::floor(x / size), cy = (int)std::floor(y / size);
+    return ((uint64_t)(uint32_t)cx << 32) | (uint32_t)cy;
+}
+
+void BuildLinks(const std::vector<Tri>& tris, bool withDrops,
+                std::vector<std::vector<Link>>& adj, std::unordered_set<uint64_t>& wallCorner,
+                int* seamCount, int* dropCount)
+{
+    const int N = (int)tris.size();
+    adj.assign(N, {});
+    *seamCount = *dropCount = 0;
+
+    // Edges two triangles share (by quantized corners, so the graph spans all
+    // the navmeshes wherever their corners coincide).
+    std::unordered_map<uint64_t, std::vector<std::pair<int, int>>> edgeTris;   // (tri, edge)
     edgeTris.reserve(tris.size() * 3);
-    for (int i = 0; i < (int)tris.size(); ++i) {
-        for (int e = 0; e < 3; ++e) {
-            uint64_t k = EdgeKey(tris[i].vkey[e], tris[i].vkey[(e + 1) % 3]);
-            edgeTris[k].push_back(i);
+    for (int i = 0; i < N; ++i)
+        for (int e = 0; e < 3; ++e)
+            edgeTris[EdgeKey(tris[i].vkey[e], tris[i].vkey[(e + 1) % 3])].push_back({ i, e });
+    std::vector<OpenEdge> open;
+    for (auto& kv : edgeTris) {
+        auto& l = kv.second;
+        if (l.size() == 1) {
+            const Tri& t = tris[l[0].first];
+            const int e = l[0].second;
+            open.push_back({ l[0].first, e, t.pos[e], t.pos[(e + 1) % 3] });
+            continue;
+        }
+        for (size_t x = 0; x < l.size(); ++x)
+            for (size_t y = 0; y < l.size(); ++y) {
+                if (x == y) continue;
+                const Tri& t = tris[l[x].first];
+                const int e = l[x].second;
+                adj[l[x].first].push_back({ l[y].first, t.pos[e], t.pos[(e + 1) % 3],
+                                            t.vkey[e], t.vkey[(e + 1) % 3], false });
+            }
+    }
+
+    // Seams: where two navmeshes meet without sharing corners - along the
+    // cell borders of the wasteland (by Springvale 34 of 40 corners on the
+    // border had no partner on the other side, so the walk found no way from
+    // one cell into the next and took the game's route). The game joins them
+    // through each mesh's list of outside links; here an edge of each lies
+    // on the same line at the same height, and the overlap is the opening.
+    std::vector<char> seamed(open.size(), 0);
+    {
+        constexpr float kSq = 256.0f;
+        std::unordered_map<uint64_t, std::vector<int>> grid;
+        for (int k = 0; k < (int)open.size(); ++k) {
+            const OpenEdge& o = open[k];
+            const int x0 = (int)std::floor(((std::min)(o.p.x, o.q.x) - 2.0f) / kSq);
+            const int x1 = (int)std::floor(((std::max)(o.p.x, o.q.x) + 2.0f) / kSq);
+            const int y0 = (int)std::floor(((std::min)(o.p.y, o.q.y) - 2.0f) / kSq);
+            const int y1 = (int)std::floor(((std::max)(o.p.y, o.q.y) + 2.0f) / kSq);
+            for (int cx = x0; cx <= x1 && cx - x0 < 32; ++cx)
+                for (int cy = y0; cy <= y1 && cy - y0 < 32; ++cy)
+                    grid[((uint64_t)(uint32_t)cx << 32) | (uint32_t)cy].push_back(k);
+        }
+        std::unordered_set<uint64_t> tried;
+        for (auto& kv : grid) {
+            const auto& l = kv.second;
+            for (size_t x = 0; x < l.size(); ++x)
+                for (size_t y = x + 1; y < l.size(); ++y) {
+                    const int u = l[x], v = l[y];
+                    if (open[u].tri == open[v].tri) continue;
+                    const uint64_t key = ((uint64_t)(uint32_t)(std::min)(u, v) << 32) |
+                                         (uint32_t)(std::max)(u, v);
+                    if (!tried.insert(key).second) continue;
+                    Vec3 a, b;
+                    if (!SeamOverlap(tris, open[u], open[v], &a, &b)) continue;
+                    adj[open[u].tri].push_back({ open[v].tri, a, b, 0, 0, false });
+                    adj[open[v].tri].push_back({ open[u].tri, a, b, 0, 0, false });
+                    seamed[u] = seamed[v] = 1;
+                    ++*seamCount;
+                }
         }
     }
 
-    std::vector<std::vector<int>> adj(tris.size());
-    for (auto& kv : edgeTris) {
-        auto& list = kv.second;
-        for (size_t a = 0; a < list.size(); ++a)
-            for (size_t b = a + 1; b < list.size(); ++b) {
-                adj[list[a]].push_back(list[b]);
-                adj[list[b]].push_back(list[a]);
-            }
+    // The corners on the mesh's real edge: those of an edge only one triangle
+    // has, a seam's aside.
+    for (size_t k = 0; k < open.size(); ++k) {
+        if (seamed[k]) continue;
+        const Tri& t = tris[open[k].tri];
+        wallCorner.insert(t.vkey[open[k].e]);
+        wallCorner.insert(t.vkey[(open[k].e + 1) % 3]);
     }
+
+    if (!withDrops) return;
+    // Drops: past a real edge, a little way out, walkable ground lower down -
+    // not so low that the fall hurts, and no ground out there at the ledge's
+    // own height (then it is a gap between meshes, not a ledge). Whether a
+    // wall stands on the edge the mesh cannot tell; the walk asks the game
+    // before going (see BanDrop).
+    const float maxDrop = SafeDropHeight();
+    constexpr float kSq = 128.0f;
+    std::unordered_map<uint64_t, std::vector<int>> under;
+    for (int i = 0; i < N; ++i) {
+        const Tri& t = tris[i];
+        const int x0 = (int)std::floor((std::min)({ t.pos[0].x, t.pos[1].x, t.pos[2].x }) / kSq);
+        const int x1 = (int)std::floor((std::max)({ t.pos[0].x, t.pos[1].x, t.pos[2].x }) / kSq);
+        const int y0 = (int)std::floor((std::min)({ t.pos[0].y, t.pos[1].y, t.pos[2].y }) / kSq);
+        const int y1 = (int)std::floor((std::max)({ t.pos[0].y, t.pos[1].y, t.pos[2].y }) / kSq);
+        for (int cx = x0; cx <= x1 && cx - x0 < 64; ++cx)
+            for (int cy = y0; cy <= y1 && cy - y0 < 64; ++cy)
+                under[((uint64_t)(uint32_t)cx << 32) | (uint32_t)cy].push_back(i);
+    }
+    for (size_t k = 0; k < open.size(); ++k) {
+        if (seamed[k]) continue;
+        const OpenEdge& o = open[k];
+        const Tri& U = tris[o.tri];
+        if (U.water) continue;
+        const float dx = o.q.x - o.p.x, dy = o.q.y - o.p.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 16.0f) continue;
+        float nx = dy / len, ny = -dx / len;          // out of the triangle
+        const float mx = 0.5f * (o.p.x + o.q.x), my = 0.5f * (o.p.y + o.q.y);
+        if ((U.centroid.x - mx) * nx + (U.centroid.y - my) * ny > 0.0f) { nx = -nx; ny = -ny; }
+        static const float kAlong[3] = { 0.25f, 0.5f, 0.75f };
+        const int s0 = len < 96.0f ? 1 : 0, s1 = len < 96.0f ? 2 : 3;
+        int lastTo = -1;
+        for (int si = s0; si < s1; ++si) {
+            const float f = kAlong[si];
+            const Vec3 E{ o.p.x + dx * f, o.p.y + dy * f, o.p.z + (o.q.z - o.p.z) * f };
+            Vec3 P{ E.x + nx * kDropReach, E.y + ny * kDropReach, 0.0f };
+            auto it = under.find(SquareKey(P.x, P.y, kSq));
+            if (it == under.end()) continue;
+            int best = -1;
+            float bestZ = -1e30f;
+            bool level = false;                       // ground out there at the ledge's height
+            for (int j : it->second) {
+                if (j == o.tri) continue;
+                const Tri& L = tris[j];
+                if (!PointInTri2D(P, L.pos[0], L.pos[1], L.pos[2])) continue;
+                const float z = PlaneZ(L, P.x, P.y);
+                const float h = E.z - z;
+                if (h < kDropMin && h > -kDropMin) { level = true; break; }
+                if (L.water || h < kDropMin || h > maxDrop) continue;
+                if (z > bestZ) { bestZ = z; best = j; }
+            }
+            if (level || best < 0 || best == lastTo || DropBanned(E)) continue;
+            P.z = bestZ;
+            Link lk{ best, E, P };
+            lk.drop = true;
+            adj[o.tri].push_back(lk);
+            lastTo = best;
+            ++*dropCount;
+        }
+    }
+}
+
+bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
+                std::vector<Vec3>& out_waypoints, const std::vector<Vec3>* avoid,
+                float clearance, float margin, bool withDrops)
+{
+    out_waypoints.clear();
+
+    std::vector<std::vector<Link>> adj;
+    std::unordered_set<uint64_t> wallCorner;
+    int seams = 0, drops = 0;
+    BuildLinks(tris, withDrops, adj, wallCorner, &seams, &drops);
 
     // The player is always standing on or beside walkable ground, so a generous
     // bound is fine for the start. The goal is the one that must be judged
@@ -448,7 +704,7 @@ bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
     // A* over triangle centroids.
     const int N = (int)tris.size();
     std::vector<float> g(N, 1e30f);
-    std::vector<int>   came(N, -1);
+    std::vector<int>   came(N, -1), via(N, -1);
     std::vector<char>  closed(N, 0);
     using PQ = std::pair<float, int>;            // (fScore, tri)
     std::priority_queue<PQ, std::vector<PQ>, std::greater<PQ>> open;
@@ -482,12 +738,19 @@ bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
         if (cur == goal) { found = true; break; }
         if (closed[cur]) continue;
         closed[cur] = 1;
-        for (int nb : adj[cur]) {
+        for (int li = 0; li < (int)adj[cur].size(); ++li) {
+            const Link& L = adj[cur][li];
+            const int nb = L.to;
             if (closed[nb]) continue;
-            float tentative = g[cur] + Dist(tris[cur].centroid, tris[nb].centroid);
+            const float step = L.drop
+                ? Dist2D(tris[cur].centroid, L.a) + Dist2D(L.a, L.b) +
+                  Dist2D(L.b, tris[nb].centroid) + kDropPenalty
+                : Dist(tris[cur].centroid, tris[nb].centroid);
+            float tentative = g[cur] + step;
             if (tentative < g[nb]) {
                 g[nb] = tentative;
                 came[nb] = cur;
+                via[nb] = li;
                 float f = tentative + Dist(tris[nb].centroid, tris[goal].centroid);
                 open.push({ f, nb });
             }
@@ -495,7 +758,7 @@ bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
     }
     if (!found) return false;
 
-    // Reconstruct triangle path start..goal.
+    // Reconstruct triangle path start..goal, with the link taken into each.
     std::vector<int> triPath;
     for (int c = goal; c != -1; c = came[c]) triPath.push_back(c);
     std::reverse(triPath.begin(), triPath.end());
@@ -510,91 +773,93 @@ bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
         F3A_INFO("navmesh: target is off-mesh; path ends at the nearest reachable "
                  "ground (re-path from there).");
 
-    // The corners on the mesh's edge: those of an edge only one triangle has.
-    std::unordered_set<uint64_t> wallCorner;
-    for (const Tri& t : tris)
-        for (int e = 0; e < 3; ++e) {
-            auto it = edgeTris.find(EdgeKey(t.vkey[e], t.vkey[(e + 1) % 3]));
-            if (it != edgeTris.end() && it->second.size() == 1) {
-                wallCorner.insert(t.vkey[e]);
-                wallCorner.insert(t.vkey[(e + 1) % 3]);
-            }
-        }
-
-    // The way through: the edge each triangle shares with the next, seen
+    // The way through: the opening each triangle shares with the next, seen
     // walking on (which end is on the left). One waypoint per triangle at each
     // edge's middle walked a zigzag across every open floor; the taut line
-    // through the same edges bends only where it must, at an edge's end - an
-    // end at a wall drawn in by `margin` (never past the edge's middle), so
-    // the line goes round a wall's corner at that distance, not touching it.
-    std::vector<FunnelPortal> portals;
-    portals.reserve(triPath.size());
-    bool portals_ok = true;
+    // through the same openings bends only where it must, at an opening's end
+    // - an end at a wall drawn in by `margin` (never past the middle), so the
+    // line goes round a wall's corner at that distance, not touching it.
+    // A drop splits the line: up to the point on the ledge, then on from the
+    // landing below - both kept as waypoints, so the walk knows where it goes
+    // over the edge.
+    struct Stretch { Vec3 from, to; std::vector<FunnelPortal> portals; };
+    std::vector<Stretch> stretches(1);
+    stretches[0].from = from;
+    int dropsTaken = 0;
     for (size_t i = 0; i + 1 < triPath.size(); ++i) {
         const Tri& A = tris[triPath[i]];
-        const Tri& B = tris[triPath[i + 1]];
-        Vec3 shared[2];
-        uint64_t sharedKey[2] = { 0, 0 };
-        int n = 0;
-        for (int a = 0; a < 3 && n < 2; ++a)
-            for (int b = 0; b < 3; ++b)
-                if (A.vkey[a] == B.vkey[b]) { sharedKey[n] = A.vkey[a]; shared[n++] = A.pos[a]; break; }
-        if (n != 2) { portals_ok = false; break; }
+        const Link& L = adj[triPath[i]][via[triPath[i + 1]]];
+        if (L.drop) {
+            stretches.back().to = L.a;
+            Stretch next;
+            next.from = L.b;
+            stretches.push_back(std::move(next));
+            ++dropsTaken;
+            F3A_INFO("navmesh: the way drops %.0f units off a ledge at (%.0f,%.0f,%.0f)",
+                     L.a.z - L.b.z, L.a.x, L.a.y, L.a.z);
+            continue;
+        }
+        Vec3 shared[2] = { L.a, L.b };
         if (margin > 0.0f) {
             const Vec3 e0 = shared[0], e1 = shared[1];
-            float w = std::sqrt((e1.x - e0.x) * (e1.x - e0.x) + (e1.y - e0.y) * (e1.y - e0.y));
+            float w = Dist2D(e0, e1);
             if (w > 1e-3f) {
                 float f = (std::min)(margin, 0.5f * w) / w;   // a share of the edge
                 auto toward = [&](const Vec3& p, const Vec3& q) {
                     return Vec3{ p.x + (q.x - p.x) * f, p.y + (q.y - p.y) * f, p.z + (q.z - p.z) * f };
                 };
-                if (wallCorner.count(sharedKey[0])) shared[0] = toward(e0, e1);
-                if (wallCorner.count(sharedKey[1])) shared[1] = toward(e1, e0);
+                if (L.ka && wallCorner.count(L.ka)) shared[0] = toward(e0, e1);
+                if (L.kb && wallCorner.count(L.kb)) shared[1] = toward(e1, e0);
             }
         }
         FunnelPoint c{ A.centroid.x, A.centroid.y, A.centroid.z };
         FunnelPoint mid{ (shared[0].x + shared[1].x) * 0.5f, (shared[0].y + shared[1].y) * 0.5f, 0.0f };
         FunnelPoint s0{ shared[0].x, shared[0].y, shared[0].z };
         FunnelPoint s1{ shared[1].x, shared[1].y, shared[1].z };
-        if (funnel_detail::Cross(c, mid, s0) > 0.0f) portals.push_back({ s0, s1 });
-        else                                         portals.push_back({ s1, s0 });
+        if (funnel_detail::Cross(c, mid, s0) > 0.0f) stretches.back().portals.push_back({ s0, s1 });
+        else                                         stretches.back().portals.push_back({ s1, s0 });
     }
-    if (portals_ok) {
-        // The start first: the first bend can be far off, and the walk measures
-        // "on the route" against the leg from the point before.
-        out_waypoints.push_back(from);
-        for (const auto& p : PullString({ from.x, from.y, from.z }, { end.x, end.y, end.z }, portals))
-            out_waypoints.push_back({ p.x, p.y, p.z });
-        DropStraightPoints(out_waypoints, 4.0f);
-        // The bends sit on the mesh's edge, against what the way turns round.
-        if (int moved = InsetCornersOn(tris, out_waypoints, clearance))
-            F3A_INFO("navmesh: %d bend(s) moved off the walls", moved);
-    } else {
-        // An edge that would not match (two meshes meeting badly): the middle
-        // of every edge, as before.
-        for (size_t i = 0; i + 1 < triPath.size(); ++i) {
-            const Tri& A = tris[triPath[i]];
-            const Tri& B = tris[triPath[i + 1]];
-            Vec3 shared[2];
-            int n = 0;
-            for (int a = 0; a < 3 && n < 2; ++a)
-                for (int b = 0; b < 3; ++b)
-                    if (A.vkey[a] == B.vkey[b]) { shared[n++] = A.pos[a]; break; }
-            if (n == 2)
-                out_waypoints.push_back({ (shared[0].x + shared[1].x) * 0.5f,
-                                          (shared[0].y + shared[1].y) * 0.5f,
-                                          (shared[0].z + shared[1].z) * 0.5f });
-            else
-                out_waypoints.push_back(B.centroid);
-        }
-        out_waypoints.push_back(end);
-    }
+    stretches.back().to = end;
 
-    F3A_INFO("navmesh: path with %d waypoints over %d triangles.",
-             (int)out_waypoints.size(), N);
+    // The start first: the first bend can be far off, and the walk measures
+    // "on the route" against the leg from the point before.
+    out_waypoints.push_back(from);
+    for (size_t k = 0; k < stretches.size(); ++k) {
+        const Stretch& st = stretches[k];
+        if (k > 0) out_waypoints.push_back(st.from);          // the landing
+        for (const auto& p : PullString({ st.from.x, st.from.y, st.from.z },
+                                        { st.to.x, st.to.y, st.to.z }, st.portals))
+            out_waypoints.push_back({ p.x, p.y, p.z });
+    }
+    DropStraightPoints(out_waypoints, 4.0f);
+    // The bends sit on the mesh's edge, against what the way turns round.
+    if (int moved = InsetCornersOn(tris, out_waypoints, clearance))
+        F3A_INFO("navmesh: %d bend(s) moved off the walls", moved);
+
+    F3A_INFO("navmesh: path with %d waypoints over %d triangles (%d seam(s), %d drop(s) "
+             "on the mesh, %d taken).",
+             (int)out_waypoints.size(), N, seams, drops, dropsTaken);
     return true;
 }
 } // namespace
+
+void BanDrop(const Vec3& ledge)
+{
+    std::lock_guard<std::mutex> lk(g_ban_mx);
+    if (g_banned_drops.size() >= 256) g_banned_drops.erase(g_banned_drops.begin());
+    g_banned_drops.push_back(ledge);
+}
+
+void ClearBannedDrops()
+{
+    std::lock_guard<std::mutex> lk(g_ban_mx);
+    g_banned_drops.clear();
+}
+
+bool IsDropLeg(const Vec3& a, const Vec3& b)
+{
+    return a.z - b.z >= kDropMin - 4.0f && Dist2D(a, b) <= kDropReach + 24.0f;
+}
 
 namespace {
 int InsetCornersOn(const std::vector<Tri>& tris, std::vector<Vec3>& wp, float clearance);

@@ -27,6 +27,11 @@ void Ping(float azimuth_deg, float distance01);
 // aim cue (played when the crosshair is on an enemy). Distinct from Ping.
 void Cue(int freqHz, int ms);
 
+// A soft two-note chime, quiet and bell-like with a slow decay - not a beep:
+// rising (a scene begins) or falling (it ends). A WAV file at `wavPath`, when
+// it exists, is played instead (the player's own sound).
+void Chime(bool rising, const wchar_t* wavPath = nullptr);
+
 // One sonar sweep: a sound that travels once round the listener, clockwise
 // from straight ahead, over `total_ms`. Each blip sounds as the sweep passes
 // its bearing — panned to its side, quieter and lower when behind, louder when

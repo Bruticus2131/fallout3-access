@@ -1,6 +1,10 @@
 # Fallout 3 Access audio description - descriptions of scenes and characters (English).
 #
 # [stage <quest id> <stage>]   - when the quest reaches that stage
+# [stage <quest id> <stage> +<seconds>] - that many seconds later (the stage
+#                                comes before what the text says - at the
+#                                start of an animation whose result shows a
+#                                few seconds on)
 # [npc <name>]                 - on the first look at that character
 # [npc <name> @<quest id>]     - ...but only while that quest is running
 # [movie <file> <second>]      - at that second of a game film (intro, title cards)
@@ -161,13 +165,13 @@ Your neighbors from the vault stand around you, smiling at you.
 The Overseer - the leader of the vault - pushes his way to the front.
 
 [stage 00014E84 8]
-The Overseer hands you a Pip-Boy 3000 - a computer worn on the forearm, with a small screen.
+The Overseer comes up to you with a Pip-Boy 3000 - a computer worn on the forearm, with a small screen.
 
 [stage 00014E84 15]
-Andy, the vault's robot, hovers over to the cake and raises its blade.
+Andy, the vault's robot, hovers over to the cake.
 
-[stage 00014E84 16]
-All that is left of the cake is pieces scattered across the counter.
+[stage 00014E84 16 +4]
+Andy has cut into the cake with its buzz saw - pieces of cake are splattered all over the counter.
 
 [stage 00014E84 35]
 An intercom on the diner wall starts beeping. Dad walks over and answers it.
@@ -252,7 +256,7 @@ Amata: sixteen, dark hair pinned back, hazel eyes, a vault jumpsuit.
 Mr. Brotch, the teacher: a middle-aged Black man with close-cropped hair, in a vault jumpsuit.
 
 [stage 00014E85 50]
-You sit down at a school desk. Mr. Brotch stands in front of the class, next to a flag and a projector.
+You sit down at a school desk. Mr. Brotch walks to the front of the class, where a flag and a projector stand.
 
 [stage 00014E85 60]
 The projector shows the exam slides on the wall.
@@ -289,10 +293,13 @@ Overseer: gone almost completely gray, in a vault jumpsuit, his face tight with 
 Jonas lies lifeless on the floor.
 
 [stage 00014E86 120]
-You are in a rocky cave at the vault entrance. In front of you is a huge, round, cog-shaped door with the number 101 painted on it.
+The Overseer's desk slides aside and reveals the way into the secret tunnel.
+
+[stage 00014E86 140]
+You stand at the console that works the vault door - huge, round and cog-shaped, with the number 101 painted on it.
 
 [stage 00014E86 144]
-A mechanical arm pulls the enormous door out of its opening and rolls it aside with a deafening screech of metal. Behind it, a dark rock tunnel leads outside.
+The door is open: a mechanical arm has pulled it out of its frame and rolled it aside. Behind it, a dark rock tunnel leads outside.
 
 [stage 00014E86 150]
 You step out of the cave. Harsh sunlight blinds you - for the first time in your life you see the sky.

@@ -213,6 +213,55 @@ void Cue(int freqHz, int ms)
 }
 
 namespace {
+// One bell-like note mixed into L/R from sample `start`: the fundamental and
+// two soft overtones, a gentle 20 ms attack and a long exponential fade, so it
+// rings out instead of stopping. `pan` -1 left .. 1 right, kept mild.
+void ChimeNote(std::vector<float>& L, std::vector<float>& R, int start, float freq,
+               float amp, float pan)
+{
+    const int n = (int)L.size();
+    const int attack = kSampleRate * 20 / 1000;
+    const float tau = 0.42f * kSampleRate;                 // decay time constant
+    const float t = (pan + 1.0f) * 0.5f * 1.57079632679f;
+    const float gl = std::cos(t), gr = std::sin(t);
+    const float w = 6.2831853f / kSampleRate;
+    for (int i = 0; start + i < n; ++i) {
+        float env = std::exp(-(float)i / tau);
+        if (i < attack) env *= (float)i / attack;
+        if (env < 0.0005f && i > attack) break;
+        const float s = amp * env * (std::sin(w * freq * i) +
+                                     0.22f * std::sin(w * freq * 2.0f * i) +
+                                     0.06f * std::sin(w * freq * 3.0f * i));
+        L[(size_t)(start + i)] += s * gl;
+        R[(size_t)(start + i)] += s * gr;
+    }
+}
+} // namespace
+
+void Chime(bool rising, const wchar_t* wavPath)
+{
+    if (wavPath && *wavPath && GetFileAttributesW(wavPath) != INVALID_FILE_ATTRIBUTES &&
+        PlaySoundW(wavPath, nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT))
+        return;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_wave && !OpenLocked()) return;
+    // G4 and D5, a fifth apart: up for a scene beginning, down for its end.
+    const float lo = 392.0f, hi = 587.33f;
+    const int n = kSampleRate * 1600 / 1000;
+    std::vector<float> L((size_t)n, 0.0f), R((size_t)n, 0.0f);
+    const int second = kSampleRate * 150 / 1000;
+    ChimeNote(L, R, 0,      rising ? lo : hi, 0.16f, -0.25f);
+    ChimeNote(L, R, second, rising ? hi : lo, 0.14f,  0.25f);
+    std::vector<short> pcm((size_t)n * kChannels);
+    for (int i = 0; i < n; ++i) {
+        auto clip = [](float v) { return v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v; };
+        pcm[(size_t)i * 2 + 0] = (short)(clip(L[(size_t)i]) * 30000.0f);
+        pcm[(size_t)i * 2 + 1] = (short)(clip(R[(size_t)i]) * 30000.0f);
+    }
+    EmitLocked(pcm);
+}
+
+namespace {
 // One voice of the sonar, mixed into L/R starting at sample `start`.
 // The whole sweep is built as ONE buffer: waveOut plays queued buffers one
 // after another, never together, so separate blips could not overlap and the
