@@ -528,20 +528,22 @@ void CheckMovies()
 
 // ---- keys ---------------------------------------------------------------------------
 
+// Audio description on and off (Shift+F7 by default).
+void ToggleKey()
+{
+    g_enabled = !g_enabled;
+    if (!g_enabled) { g_queue.clear(); ClearWaits(); }
+    // Back on: where the quests stand now is read afresh, silently - the
+    // stages passed while it was off are not said all at once.
+    if (g_enabled) for (auto& q : g_qstate) q.known = false;
+    tolk::Speak(g_enabled
+                    ? strings::T("Audiodeskrypcja włączona.", "Audio description on.")
+                    : strings::T("Audiodeskrypcja wyłączona.", "Audio description off."),
+                tolk::Priority::Ui, true);
+}
+
 void RepeatKey()
 {
-    if (hotkeys::ShiftHeldNow()) {
-        g_enabled = !g_enabled;
-        if (!g_enabled) { g_queue.clear(); ClearWaits(); }
-        // Back on: where the quests stand now is read afresh, silently - the
-        // stages passed while it was off are not said all at once.
-        if (g_enabled) for (auto& q : g_qstate) q.known = false;
-        tolk::Speak(g_enabled
-                        ? strings::T("Audiodeskrypcja włączona.", "Audio description on.")
-                        : strings::T("Audiodeskrypcja wyłączona.", "Audio description off."),
-                    tolk::Priority::Ui, true);
-        return;
-    }
     if (g_last.empty()) {
         tolk::Speak(strings::T("Nie było jeszcze opisu.", "No description yet."),
                     tolk::Priority::Ui, true);
@@ -839,6 +841,7 @@ void Init()
     g_movies  = config::Get().intro_audio_desc;
     LoadForLanguage();
     hotkeys::Bind(config::Get().hotkeys.audio_desc_repeat, &RepeatKey);
+    hotkeys::Bind(config::Get().hotkeys.audio_desc_toggle, &ToggleKey);
     F3A_INFO("AudioDesc module ready (%s%s).", g_enabled ? "on" : "off",
              config::Get().audio_desc_capture ? ", capturing screenshots" : "");
 }

@@ -103,6 +103,41 @@ bool MarkerHere(const void* refr, uint32_t form, const game::Vec3& pos,
     return true;
 }
 
+// A thing known only from the game data (a note of a series lying far off:
+// no reference loaded) in another place than the player's: the first door
+// the way to it goes through. False when the door table has no way.
+bool SpaceDoor(uint32_t space, const game::Vec3& pos, game::Vec3* door, std::string* via)
+{
+    const uint32_t ps = game::PlayerSpaceId();
+    if (!ps || !space || ps == space || !worlddoors::Loaded()) return false;
+    worlddoors::Hop hop;
+    worlddoors::AreaFn area = [](uint32_t s, const game::Vec3& p) { return roadnet::Area(s, p); };
+    if (!worlddoors::NextDoor(ps, game::GetPlayerPosition(), space, pos, &hop, nullptr, &area))
+        return false;
+    *door = hop.pos;
+    *via = hop.to_name;
+    return true;
+}
+
+// "Name, in another place: X, the way goes through the door to Y, 1234
+// units, 2 o'clock" for such a thing.
+std::string SpaceLine(const std::string& name, uint32_t space, const game::Vec3& pos)
+{
+    const std::string where = worlddoors::SpaceName(space);
+    std::string line = name + strings::T(", w innym miejscu", ", in another place") +
+                       (where.empty() ? std::string() : ": " + where);
+    game::Vec3 door{};
+    std::string via;
+    if (SpaceDoor(space, pos, &door, &via)) {
+        game::WorldEntity me{};
+        me.position = door;
+        auto b = game::ComputeBearing(game::GetPlayerPosition(), game::GetPlayerYaw(), door);
+        line += strings::T(", droga przez drzwi do: ", ", the way goes through the door to: ") +
+                via + ", " + DistanceText(me, b) + ", " + strings::ClockDirection(b.relative_yaw);
+    }
+    return line;
+}
+
 // "Name, in another place: X, marker on the door to Y, 1234 units, 2
 // o'clock" for a target in another place - the real distance to the marker
 // the compass shows - or "" when there is no marker to give.
@@ -482,6 +517,12 @@ void AnnounceCurrent()
     // the Wasteland): its coordinates belong to that place, and a distance and
     // a clock bearing to them meant nothing. Where it is, instead; the
     // auto-walk finds the way through the doors.
+    // Known from the game data only (a note of a series, far off) and in
+    // another place: that place and the door the way goes through.
+    if (!e.refr && e.space && e.space != game::PlayerSpaceId()) {
+        tolk::Speak(SpaceLine(e.name, e.space, e.position) + ", " + idx, tolk::Priority::Ui, true);
+        return;
+    }
     if (e.refr && !game::TargetSharesPlayerSpace(e.refr)) {
         std::string line = MarkerLine(e.name, e.refr, e.form_id, e.position);
         if (line.empty()) {
@@ -610,7 +651,6 @@ void ScanNext()
         F3A_DEBUG("ScanNext ignored: not gameplay/HUD.");
         return;
     }
-    if (CategoryModHeld()) { CategoryStep(+1); return; }
     // Quests aren't tied to the physical cell scan and the journal can change
     // in the Pip-Boy any time — re-read it on every press so it never goes
     // stale, preserving the browse position.
@@ -625,10 +665,14 @@ void ScanNext()
     AnnounceCurrent();
 }
 
+// The scanner's categories: Shift+Page Down / Up by default, keys of their
+// own since the keys can be changed.
+void ScanCatNext() { if (GameplayAndHud()) CategoryStep(+1); }
+void ScanCatPrev() { if (GameplayAndHud()) CategoryStep(-1); }
+
 void ScanPrev()
 {
     if (!GameplayAndHud()) return;
-    if (CategoryModHeld()) { CategoryStep(-1); return; }
     if (g_category == Cat_Quest) { QuestStep(-1); return; }
     PruneGone();
     if (ScanListStale() || g_scan_index < 0) {
@@ -840,7 +884,9 @@ void AutoWalkToggle()
     // still on the way, and then the cached position is the wrong destination.
     if (e.kind == game::WorldEntity::Kind::Quest && autowalk::StartToQuest())
         return;
-    autowalk::StartTo(e.position, e.name, e.refr, e.form_id);
+    // A thing known from the game data only carries its place: the walk finds
+    // the doors to it.
+    autowalk::StartTo(e.position, e.name, e.refr, e.form_id, e.refr ? 0u : e.space);
 }
 
 // Press/release the game's Use/Activate key (default E = scancode 0x12). FO3
@@ -878,6 +924,15 @@ void ActivateTarget()
                     tolk::Priority::System, true);
         return;
     }
+    // Known from the game data only, not loaded (a note of a series far
+    // off): nothing to use from here, and a Use keypress would have taken
+    // whatever the crosshair is on.
+    if (!e.refr && e.space) {
+        tolk::Speak(e.name + strings::T(". To daleko stąd - najpierw tam dojdź.",
+                                        ". That is far from here - walk there first."),
+                    tolk::Priority::Ui, true);
+        return;
+    }
     // Within reach only (Settings: the End key's reach, 0 = any). Measured
     // to where the thing stands now, not where the scan saw it.
     if (const int range = config::Get().activate_range; range > 0 && e.refr && e.form_id) {
@@ -885,7 +940,12 @@ void ActivateTarget()
         game::GetRefPosition(e.refr, e.form_id, &at);
         const game::Vec3 me = game::GetPlayerPosition();
         const float dx = at.x - me.x, dy = at.y - me.y, dz = at.z - me.z;
-        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        // To the thing itself, not its origin: the Megaton bomb's origin is
+        // inside a model 600 units long, and beside it End said "too far:
+        // 332" (2026-10-31).
+        if (game::IsLiveRef(e.refr, e.form_id))
+            if (const float sd = game::RefSurfaceDistance(e.refr, me); sd >= 0.0f && sd < d) d = sd;
         if (!(d <= static_cast<float>(range))) {
             tolk::Speak(e.name + strings::T(" jest za daleko: ", " is too far: ") +
                             strings::FormatDistance(d) +
@@ -975,10 +1035,11 @@ void ItemInfo()
 // HP / AP / radiation readout (H). We only REQUEST it here (poll thread); the
 // actual GetActorValue reads happen on the main thread (calling game functions
 // off the main thread crashes), see polling_loop AnnounceStatus().
+// The level and the experience to the next one, anywhere (Shift+H).
+void LevelStatus() { poll::RequestLevelStatus(); }
+
 void PlayerStatus()
 {
-    // Shift+H: the level and the experience to the next one, anywhere.
-    if (hotkeys::ShiftHeldNow()) { poll::RequestLevelStatus(); return; }
     if (modules::barter::SpeakSummary()) return;   // in barter: the caps and the deal
     if (modules::sleepwait::SpeakSummary()) return; // sleep / wait: the time and the hours
     if (!GameplayAndHud()) return;   // the world only: silent in VATS and menus
@@ -1021,6 +1082,7 @@ struct AimTarget {
     uint32_t    refid = 0;
     bool        actor   = false;   // a person or a creature
     bool        hostile = false;   // ...that the game counts as an enemy
+    uint32_t    space   = 0;       // known from the game data only: its place
 };
 // Where on a reference to aim. A scan entry carries the object's ORIGIN, and
 // for an actor that is between its feet — hence the flat "+100 for a torso",
@@ -1080,6 +1142,7 @@ void FillAimPoint(AimTarget* out, const game::WorldEntity& e)
     out->name  = e.name;
     out->refr  = e.refr;
     out->refid = e.form_id;
+    out->space = e.refr ? 0u : e.space;
     out->actor   = e.kind == game::WorldEntity::Kind::Actor || game::RefIsActor(e.refr);
     out->hostile = game::IsKnownHostile(e.form_id);
     const char* how = nullptr;
@@ -1471,6 +1534,14 @@ void SayWalkHeading()
 // nowhere and its distance meant nothing. Where it is, instead.
 bool SayIfElsewhere(const AimTarget& at, bool face = false)
 {
+    // Known from the game data only, in another place: the door to it.
+    if (!at.refr && at.space && at.space != game::PlayerSpaceId()) {
+        game::Vec3 door{};
+        std::string via;
+        if (face && SpaceDoor(at.space, at.pos, &door, &via)) AimAtPoint(door, 100.0f);
+        tolk::Speak(SpaceLine(at.name, at.space, at.pos), tolk::Priority::Ui, true);
+        return true;
+    }
     if (!at.refr || game::TargetSharesPlayerSpace(at.refr)) return false;
     game::Vec3 m{};
     std::string via;
@@ -1539,100 +1610,120 @@ void TurnToCurrent()
     g_turn_correct_left = 0;
 }
 
+// Teleport beside the selected object (Alt+Home by default).
+// TELEPORT to the selected object (last resort when you can't walk
+// there — doors, broken navmesh). Native MoveTo to the scanner pick's ref.
+//
+// Logged because a plain Home once teleported the player onto the rifle
+// range mid-session, which only makes sense if Alt was read as held. If it
+// happens again the log says so instead of looking like magic.
+void TeleportKey()
+{
+    if (!GameplayAndHud()) return;
+    StopAimLoop(); g_level_on = false;      // stop any mouse-driven aim/level
+    F3A_INFO("Teleport key");
+    // Into a room behind a locked door: said first, done on a second
+    // press within a few seconds.
+    {
+        static DWORD    s_warned_at = 0;
+        static uint32_t s_warned_id = 0;
+        const void* tr = nullptr;
+        uint32_t tid = 0;
+        game::Vec3 tpos{};
+        if (autowalk::IsWalking() && autowalk::TargetRefr()) {
+            tr = autowalk::TargetRefr(); tid = autowalk::TargetFormId(); tpos = autowalk::TargetPos();
+        } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
+                   g_scan_list[g_scan_index].refr) {
+            tr = g_scan_list[g_scan_index].refr; tid = g_scan_list[g_scan_index].form_id;
+            tpos = g_scan_list[g_scan_index].position;
+        }
+        const DWORD now = GetTickCount();
+        const bool confirmed = tid && tid == s_warned_id && now - s_warned_at < 6000;
+        if (tr && !confirmed && BehindLockedDoor(tpos, tr)) {
+            s_warned_id = tid;
+            s_warned_at = now;
+            F3A_INFO("Teleport: %08X is behind a locked door - asked to confirm", tid);
+            tolk::Speak(strings::T("Uwaga: cel jest za zamkniętymi drzwiami, a wyjść stamtąd "
+                                   "można tylko przez nie. ",
+                                   "Careful: the target is behind a locked door, and that door "
+                                   "is the only way out. ") +
+                            hotkeys::KeyText(config::Get().hotkeys.teleport) +
+                            strings::T(" jeszcze raz teleportuje mimo to.", " again teleports anyway."),
+                        tolk::Priority::System, true);
+            return;
+        }
+        s_warned_id = 0;
+    }
+    // Prefer WHERE YOU'RE WALKING: if autowalk is active, teleport to its
+    // destination — not the scanner selection, which drifts as DLC quests
+    // auto-start/track (that's how Alt+Home landed on the Megaton bomb quest
+    // instead of the tracked "Idąc jego śladami").
+    if (autowalk::IsWalking() && autowalk::TargetRefr()) {
+        std::string nm = autowalk::TargetName();
+        const void* r  = autowalk::TargetRefr();
+        uint32_t    rid = autowalk::TargetFormId();
+        autowalk::Stop(); guide::Stop();
+        poll::RequestTeleport(r, rid);
+        tolk::Speak(strings::T("Teleportuję do: ", "Teleporting to: ") + nm,
+                    tolk::Priority::Ui, true);
+    } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
+               g_scan_list[g_scan_index].refr) {
+        const auto& e = g_scan_list[g_scan_index];
+        autowalk::Stop(); guide::Stop();
+        poll::RequestTeleport(e.refr, e.form_id);
+        tolk::Speak(strings::T("Teleportuję do: ", "Teleporting to: ") + e.name,
+                    tolk::Priority::Ui, true);
+    } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
+               g_scan_list[g_scan_index].space) {
+        // Known from the game data only: there is nothing loaded to teleport to.
+        tolk::Speak(g_scan_list[g_scan_index].name +
+                        strings::T(". To daleko stąd - najpierw tam dojdź.",
+                                   ". That is far from here - walk there first."),
+                    tolk::Priority::Ui, true);
+    } else {
+        tolk::Speak(strings::T("Najpierw wybierz obiekt skanerem, żeby się teleportować.",
+                               "Select an object with the scanner first to teleport."),
+                    tolk::Priority::System, true);
+    }
+    return;
+}
+
+// Keep the camera ON the target while it moves (Shift+Home by default;
+// see TrackTick). Again: stop.
+void TrackKey()
+{
+    if (!GameplayAndHud()) return;
+    StopAimLoop(); g_level_on = false;      // stop any mouse-driven aim/level
+    if (g_track_on) {
+        TrackStop(strings::T("Koniec śledzenia.", "Tracking stopped."));
+        return;
+    }
+    AimTarget at;
+    if (!PickAimTarget(&at) || !at.refr) {
+        tolk::Speak(strings::T("Nie ma kogo śledzić. Wybierz cel skanerem.",
+                               "Nothing to track. Select a target with the scanner."),
+                    tolk::Priority::System, true);
+        return;
+    }
+    if (SayIfElsewhere(at)) return;
+    g_track_on    = true;
+    g_track_refr  = at.refr;
+    g_track_refid = at.refid;
+    g_track_name  = at.name;
+    float d = AimAtPoint(at.pos, at.up);
+    tolk::Speak(strings::T("Śledzę: ", "Tracking: ") + at.name + ", " +
+                    strings::FormatDistance(d) +
+                    ". " + hotkeys::KeyText(config::Get().hotkeys.track_target) +
+                    strings::T(" kończy.", " stops."),
+                tolk::Priority::Ui, true);
+    return;
+}
+
 void CenterCamera()
 {
     if (!GameplayAndHud()) return;
     StopAimLoop(); g_level_on = false;      // stop any mouse-driven aim/level
 
-    // Alt+Home = TELEPORT to the selected object (last resort when you can't walk
-    // there — doors, broken navmesh). Native MoveTo to the scanner pick's ref.
-    //
-    // Logged because a plain Home once teleported the player onto the rifle
-    // range mid-session, which only makes sense if Alt was read as held. If it
-    // happens again the log says so instead of looking like magic.
-    if (hotkeys::AltActive()) {
-        F3A_INFO("CenterCamera: Alt held -> TELEPORT branch.");
-        // Into a room behind a locked door: said first, done on a second
-        // press within a few seconds.
-        {
-            static DWORD    s_warned_at = 0;
-            static uint32_t s_warned_id = 0;
-            const void* tr = nullptr;
-            uint32_t tid = 0;
-            game::Vec3 tpos{};
-            if (autowalk::IsWalking() && autowalk::TargetRefr()) {
-                tr = autowalk::TargetRefr(); tid = autowalk::TargetFormId(); tpos = autowalk::TargetPos();
-            } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
-                       g_scan_list[g_scan_index].refr) {
-                tr = g_scan_list[g_scan_index].refr; tid = g_scan_list[g_scan_index].form_id;
-                tpos = g_scan_list[g_scan_index].position;
-            }
-            const DWORD now = GetTickCount();
-            const bool confirmed = tid && tid == s_warned_id && now - s_warned_at < 6000;
-            if (tr && !confirmed && BehindLockedDoor(tpos, tr)) {
-                s_warned_id = tid;
-                s_warned_at = now;
-                F3A_INFO("Teleport: %08X is behind a locked door - asked to confirm", tid);
-                tolk::Speak(strings::T("Uwaga: cel jest za zamkniętymi drzwiami, a wyjść stamtąd "
-                                       "można tylko przez nie. Alt Home jeszcze raz teleportuje mimo to.",
-                                       "Careful: the target is behind a locked door, and that door "
-                                       "is the only way out. Alt Home again teleports anyway."),
-                            tolk::Priority::System, true);
-                return;
-            }
-            s_warned_id = 0;
-        }
-        // Prefer WHERE YOU'RE WALKING: if autowalk is active, teleport to its
-        // destination — not the scanner selection, which drifts as DLC quests
-        // auto-start/track (that's how Alt+Home landed on the Megaton bomb quest
-        // instead of the tracked "Idąc jego śladami").
-        if (autowalk::IsWalking() && autowalk::TargetRefr()) {
-            std::string nm = autowalk::TargetName();
-            const void* r  = autowalk::TargetRefr();
-            uint32_t    rid = autowalk::TargetFormId();
-            autowalk::Stop(); guide::Stop();
-            poll::RequestTeleport(r, rid);
-            tolk::Speak(strings::T("Teleportuję do: ", "Teleporting to: ") + nm,
-                        tolk::Priority::Ui, true);
-        } else if (g_scan_index >= 0 && g_scan_index < (int)g_scan_list.size() &&
-                   g_scan_list[g_scan_index].refr) {
-            const auto& e = g_scan_list[g_scan_index];
-            autowalk::Stop(); guide::Stop();
-            poll::RequestTeleport(e.refr, e.form_id);
-            tolk::Speak(strings::T("Teleportuję do: ", "Teleporting to: ") + e.name,
-                        tolk::Priority::Ui, true);
-        } else {
-            tolk::Speak(strings::T("Najpierw wybierz obiekt skanerem, żeby się teleportować.",
-                                   "Select an object with the scanner first to teleport."),
-                        tolk::Priority::System, true);
-        }
-        return;
-    }
-    // Shift+Home = keep the camera ON the target while it moves (see TrackTick).
-    if (hotkeys::ShiftActive()) {
-        if (g_track_on) {
-            TrackStop(strings::T("Koniec śledzenia.", "Tracking stopped."));
-            return;
-        }
-        AimTarget at;
-        if (!PickAimTarget(&at) || !at.refr) {
-            tolk::Speak(strings::T("Nie ma kogo śledzić. Wybierz cel skanerem.",
-                                   "Nothing to track. Select a target with the scanner."),
-                        tolk::Priority::System, true);
-            return;
-        }
-        if (SayIfElsewhere(at)) return;
-        g_track_on    = true;
-        g_track_refr  = at.refr;
-        g_track_refid = at.refid;
-        g_track_name  = at.name;
-        float d = AimAtPoint(at.pos, at.up);
-        tolk::Speak(strings::T("Śledzę: ", "Tracking: ") + at.name + ", " +
-                        strings::FormatDistance(d) +
-                        strings::T(". Shift Home kończy.", ". Shift Home stops."),
-                    tolk::Priority::Ui, true);
-        return;
-    }
     TrackStop(nullptr);   // a plain Home means "aim once" — drop any tracking
     if (autowalk::IsWalking()) { SayWalkHeading(); return; }
 
@@ -2022,6 +2113,11 @@ void Init()
     hotkeys::Bind(h.item_info,       &ItemInfo);
     hotkeys::Bind(h.lock_enemy,      &LockNearestEnemy);
     hotkeys::Bind(h.center_camera,   &CenterCamera);
+    hotkeys::Bind(h.track_target,    &TrackKey);
+    hotkeys::Bind(h.teleport,        &TeleportKey);
+    hotkeys::Bind(h.scan_cat_next,   &ScanCatNext);
+    hotkeys::Bind(h.scan_cat_prev,   &ScanCatPrev);
+    hotkeys::Bind(h.level_status,    &LevelStatus);
     hotkeys::Bind(h.drop_item,       &DropItem);
     hotkeys::Bind(h.press_row,       &PressRow);
     hotkeys::Bind(h.aim_calibrate,   &AimCalibrate);
@@ -2042,7 +2138,8 @@ void ResetSession()
     g_scan_index   = -1;
     g_category     = Cat_All;
     g_scan_cell    = nullptr;
-    game::ClearSearched();
+    // Searched bodies are NOT forgotten here: this runs after a door's
+    // loading screen too. The poll loop clears them on a game load.
     StopAimLoop();
     g_level_on     = false;
     g_turn_verify_at    = 0;

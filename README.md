@@ -40,13 +40,13 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   the G.O.A.T. — worked out from the quests' own scripts.
 - **Audio description** — the opening film in real time, and the scenes and
   people of the Vault 101 prologue, spoken in the gaps between voices.
-- **English and Polish** — the mod speaks the game's language by default
-  (Polish for the Polish release, English for any other), or the one you set.
+- **English, Polish, Russian and Spanish** — the mod speaks the game's
+  language by default, or the one you set.
 - **World map** — browse every known location with distance and bearing, and
   fast-travel there through the game's own travel path.
 - **Combat** — VATS is fully keyboard-driven (switch target, cycle body part,
-  hear hit chance); holding **]** aims at the enemy and a tone says when a shot
-  would hit; every hit and every kill is heard, for any enemy.
+  hear hit chance); holding the game's own Aim locks onto the enemy and a tone
+  says when a shot would hit; your own hits and kills are heard.
 - **Terminals and the hacking minigame** — screen text is read as it types out,
   candidate passwords and bracket pairs are listed and spelled, Enter enters
   the chosen one, each answer is read as the terminal writes it, and after a
@@ -55,15 +55,15 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   the sweet spot.
 - **Player status** on **H** (health and AP with their maximum, radiation,
   crippled limbs, weapon and ammo, caps, carry weight, time), location on
-  **L**, compass on **J**.
+  **L**, compass on **J**. Low health and your death are said as they happen.
 - **The console (~)** — every character you type or delete is spoken, the caret's
   moves too, a command brought back with Up / Down is read whole, what a command
   prints after Enter is read out, and PageUp / PageDown read the page of output
   that scrolls into view. The mod's own keys are off while the console is open
   (F11 still dumps it, with the console's state and last lines).
-- Localized game text handled code-page-aware (Polish cp1250 and Russian cp1251
-  detected from the game, a translation plugin included).
-- The mod speaks Polish, English or Russian; any other language can be added
+- Localized game text handled code-page-aware (Polish cp1250, Russian cp1251,
+  Spanish cp1252, detected from the game, a translation plugin included).
+- The mod speaks Polish, English, Russian or Spanish; any other language can be added
   with a text file (`Fallout3Access\lang_<code>.txt`, English → that language).
 - Works with both retail editions of patch 1.7.0.3 (standard and no-gore),
   detected automatically.
@@ -160,7 +160,7 @@ Explore and travel without sight:
 | Shift + Home | keep the camera on a moving target until you press it again |
 | `;` (semicolon) | **beacon guidance**: you walk, the mod plays a positional sonar ping at the target — panned by direction, higher-pitched ahead and lower behind, faster as you close in. Press again to stop. |
 | `.` (period) | beacon guidance to the current quest marker |
-| `\` (backslash) | **auto-walk**: the mod walks you there, following a navmesh path around walls and through load doors. Press again to stop; W / A / S / D stop it too. |
+| `\` (backslash) | **auto-walk**: the mod walks you there, following a navmesh path around walls and through load doors. Press again to stop; W / A / S / D stop it too, and it stops when you lose health. |
 | End | **activate** the selected object without aiming — opens the door, reads the book, loots the container; within 300 units by default (Settings → Accessibility, "Reach of the End key"; no limit is a choice there) |
 | Alt + Home | last resort: teleport to the selected object when it cannot be reached on foot |
 | G | say what is under the crosshair |
@@ -203,7 +203,7 @@ it says "Jumping down" as you go over.
 | Key | Action |
 | --- | --- |
 | Left / Right | switch between **your items** and the **container's** |
-| Up / Down | move through the items of that column (in the container's column the mod moves the selection itself — the game's keys only ever reach yours) |
+| Up / Down | move through the items of that column (the mod moves the selection itself, in both columns; a held key repeats) |
 | Shift + Left / Right | previous / next item category in that column |
 | Enter | the game's own take / put — stealing, karma and the "how many?" prompt behave as in the game |
 | `[` | toggle between the two columns |
@@ -243,7 +243,7 @@ caps.
 | V.A.T.S. key | enter VATS; the mod reads target, body part and hit chance |
 | A / D | in VATS: previous / next target |
 | W / S | in VATS: next / previous body part, read at once with its hit chance |
-| Aim (the game's own: right mouse button, or the key you bind it to) | hold to aim: locks onto the nearest enemy fighting you and says who and how far; while held, a tone says the shot would hit. With no fight on, it takes the creature the objective points at or the shooting range's targets, one per raise (switch off in Settings → Accessibility, "Aim help") |
+| the game's own Aim key (as bound in Controls) | hold to aim: locks onto the nearest enemy fighting you and says who and how far; while held, a tone says the shot would hit. With no fight on, it takes the creature the objective points at or the shooting range's targets, one per raise (switch off in Settings → Accessibility, "Aim help") |
 | `=` | skip an objective that cannot be completed blind (advances the quest stage); off until you switch it on in Settings → Accessibility ("Skipping quest stages") |
 
 ## Configuration
@@ -255,8 +255,9 @@ Everything else: edit `Data\FOSE\Plugins\Fallout3Access.ini`:
 
 - `[General] Language` — `auto` (default: the game's language, read from
   `Fallout3.esm` and checked again once the game has loaded its plugins —
-  Polish for the Polish release, Russian for a Russian one, English for any
-  other), or `pl` / `en` / `ru` to choose the language of the mod's own
+  Polish for the Polish release, Russian for a Russian one, Spanish for a
+  Spanish one, English for any other), or `pl` / `en` / `ru` / `es` to choose
+  the language of the mod's own
   messages. Another code (`de`...) speaks from `Fallout3Access\lang_<code>.txt`
   — pairs of lines, `en: "English text"` then `de: "translation"`; whatever is
   not in the file is spoken in English and logged as "no translation for",
@@ -264,7 +265,13 @@ Everything else: edit `Data\FOSE\Plugins\Fallout3Access.ini`:
   (Polish game → 1250, Russian → 1251, otherwise system ANSI). Set `1250` /
   `1251` / `1252` explicitly if item names sound garbled,
 - `[Modules]` — enable/disable feature modules,
-- `[Hotkeys]` — every key listed above, as DirectInput scancodes,
+- `[Hotkeys]` — every key listed above, as DirectInput scancodes. The same
+  keys can be changed in the game: Settings → Accessibility → Controls
+  remapping (Enter) shows a row per key. Left and Right step through the
+  keys, or F2 on a row and then the new key or a shortcut (Shift, Ctrl or Alt
+  held with it, e.g. Shift+Home); Backspace goes back. A key may do two
+  things: you are told so, and both work until you give one of them another
+  key,
 - `[Debug] StartGameCommand` — console command bound to F10.
 
 Useful `[Voice]` settings:
@@ -288,6 +295,7 @@ Useful `[Voice]` settings:
 | `AudioDescPeople` | the written descriptions of how people look, on first sight (off by default) |
 | `ActivateRange` | how far End (using the scanner's target without aiming) reaches, in game units (default 300; `0` = no limit) |
 | `SkipStage` | `1` lets the `=` key move the tracked quest one stage on (off by default) |
+| `NoteSeries` | once you have one note or holotape of a series (the Keller family transcripts and others), list the rest in the scanner's quest objects (on by default) |
 
 ## Troubleshooting
 
@@ -322,6 +330,7 @@ cmake --build build --config Release
   (likewise for Anchorage.esm, BrokenSteel.esm, PointLookout.esm)
   python tools/generate_world_doors.py --data "<FO3>/Data"
   python tools/generate_quest_objects.py --data "<FO3>/Data"
+  python tools/generate_note_series.py --data "<FO3>/Data"
   python tools/generate_item_values.py --data "<FO3>/Data"
   ```
   (`TestQAWorld.dat`, a developer test worldspace, is not shipped.)

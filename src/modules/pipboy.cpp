@@ -109,6 +109,62 @@ void AnnounceSelection(bool force, bool mute = false, bool interrupt = true)
     }
 }
 
+// The Items page, read from the menu itself (game::GetInventoryView): the
+// category by the menu's own tab number and the row by the list's own
+// selection. Guessed from the screen, a fading tab passed for the active one
+// ("Chemia", "Ubiór" for one press) and after Weapons -> Aid -> Weapons the
+// arrows read nothing until another tab was visited (2026-10-31).
+// -2 = not read since the Pip-Boy came up (said in full), -3 = to be taken
+// as already said (a page switch says the page name alone).
+int         g_inv_filter = -2;
+const void* g_inv_row = nullptr;
+std::string g_inv_text;
+
+// Take the page's state as already said (after a page switch, which says the
+// page name alone). False when the menu could not be read.
+bool InventoryCapture()
+{
+    game::InventoryView v;
+    if (!game::GetInventoryView(&v)) return false;
+    g_inv_filter = v.filter;
+    g_inv_row = v.row;
+    g_inv_text = v.text;
+    g_last_subtab = v.category;
+    if (!v.text.empty()) g_last_selection = v.text;
+    return true;
+}
+
+// Say what changed: a new category, then the row it lands on; or a new row.
+// `queue` = after something already said (the page name on opening). False
+// when the menu could not be read - the screen-reading path then stands in.
+bool InventoryTick(bool queue)
+{
+    if (g_inv_filter == -3) return InventoryCapture();
+    game::InventoryView v;
+    if (!game::GetInventoryView(&v)) return false;
+    if (v.filter != g_inv_filter) {
+        g_inv_filter = v.filter;
+        g_inv_row = v.row;
+        g_inv_text = v.text;
+        g_last_subtab = v.category;
+        if (!v.category.empty()) tolk::Speak(v.category, tolk::Priority::Ui, !queue);
+        if (!v.text.empty()) {
+            g_last_selection = v.text;
+            tolk::Speak(v.text, tolk::Priority::Ui, false);
+            ScheduleCard(v.text);
+        }
+        return true;
+    }
+    if (v.row == g_inv_row && v.text == g_inv_text) return true;
+    g_inv_row = v.row;
+    g_inv_text = v.text;
+    if (v.text.empty()) return true;
+    g_last_selection = v.text;
+    tolk::Speak(v.text, tolk::Priority::Ui, !queue);
+    ScheduleCard(v.text);
+    return true;
+}
+
 // The date and time the Data page shows at its top: "poniedziałek,
 // 20 sierpnia 2277, godzina 18:44". The weekday from the calendar - the game's
 // own sleep screen calls 20.08.2277 a Monday, as the Gregorian calendar does.
@@ -240,6 +296,8 @@ void OnOpen()
         // A page switch, not the Pip-Boy opening: the page name once (unless
         // the old page already said it), nothing else — as OnTick does.
         AnnounceTabIfChanged();
+        g_inv_filter = -3;
+        if (ItemsPage() && InventoryCapture()) return;
         g_last_subtab = game::GetActivePipBoySubTabName();
         AnnounceSelection(/*force*/true, /*mute*/true);
         return;
@@ -250,7 +308,11 @@ void OnOpen()
     g_last_kbd.clear();
     g_last_act.clear();
     g_card_due = 0;
+    g_inv_filter = -2;
     AnnounceTabIfChanged();
+    // The Items page: its category and row, after the page name.
+    if (ItemsPage() && InventoryTick(/*queue*/true)) return;
+    g_inv_filter = -3;                // said below: not again on the next tick
     AnnounceSubTabIfChanged(/*queue_after_tab=*/true);
     // On the Stats page read the vitals once: level, HP, AP, XP.
     std::string vitals = game::GetPipBoyVitals();
@@ -311,10 +373,15 @@ void OnTick(float)
     // still CAPTURED, so they are treated as already announced and the next
     // real move of the selection reads normally.
     if (AnnounceTabIfChanged()) {
+        g_inv_filter = -3;
+        if (ItemsPage() && InventoryCapture()) return;
         g_last_subtab = game::GetActivePipBoySubTabName();
         AnnounceSelection(/*force*/true, /*mute*/true);
         return;
     }
+    // The Items page from the menu itself; the screen-reading path below
+    // only when that cannot be read (another build).
+    if (ItemsPage() && InventoryTick(/*queue*/false)) return;
     // A new tab (Status, General, Chems, Weapons...): its name, and the row
     // it lands on after it - queued, so the name is not cut off by the row.
     if (AnnounceSubTabIfChanged(false)) {

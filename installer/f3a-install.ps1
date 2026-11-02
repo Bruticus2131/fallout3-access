@@ -517,11 +517,12 @@ function Install-Mod([string] $Zip) {
         # A fresh install speaks the language the installer was run in. An
         # update keeps the player's own choice, with the rest of their settings.
         # Russian: the mod speaks from lang_ru.txt (this log stays English).
-        $lang = if ($script:Pl) { "pl" } elseif ($Language -eq "ru") { "ru" } else { "en" }
+        $lang = if ($script:Pl) { "pl" } elseif ($Language -eq "ru") { "ru" } elseif ($Language -eq "es") { "es" } else { "en" }
         $text = [IO.File]::ReadAllText($iniPath)
         $text = $text -replace '(?m)^(Language\s*=\s*)[A-Za-z]+', ('${1}' + $lang)
         [IO.File]::WriteAllText($iniPath, $text, (New-Object Text.UTF8Encoding($false)))
         if ($lang -eq "ru") { Write-Step "Mod language set to Russian (Language = ru in Fallout3Access.ini)" }
+        elseif ($lang -eq "es") { Write-Step "Mod language set to Spanish (Language = es in Fallout3Access.ini)" }
         else { Write-Step (T "Język moda: polski (Language = pl w Fallout3Access.ini)" "Mod language set to English (Language = en in Fallout3Access.ini)") }
     }
     # Russian picked in the installer: the mod speaks Russian on an update
@@ -535,6 +536,18 @@ function Install-Mod([string] $Zip) {
         if ($fixed -ne $text) {
             [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
             Write-Step "Russian: Language = ru, GameTextCodepage = 1251 in Fallout3Access.ini"
+        }
+    }
+
+    # Spanish picked in the installer: the mod speaks Spanish on an update too
+    # (there was no Spanish before). The game's text needs no code page of its
+    # own: Spanish is read as Windows-1252, as English is.
+    if ($Language -eq "es") {
+        $text = [IO.File]::ReadAllText($iniPath)
+        $fixed = $text -replace '(?m)^(Language\s*=\s*)[A-Za-z]+', '${1}es'
+        if ($fixed -ne $text) {
+            [IO.File]::WriteAllText($iniPath, $fixed, (New-Object Text.UTF8Encoding($false)))
+            Write-Step "Spanish: Language = es in Fallout3Access.ini"
         }
     }
 

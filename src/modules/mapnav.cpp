@@ -58,6 +58,14 @@ PendingWalk g_walk;
 
 bool g_pgup = false, g_pgdn = false, g_enter = false, g_home = false, g_end = false;
 
+// Enter on a quest. The game takes that Enter too: it tracks the quest itself
+// and rebuilds the list with the highlight back on the FIRST row - and the
+// mod's click, a moment later on the highlighted row, tracked the first quest
+// again ("Więzy krwi" could not be tracked, 2026-11-01). So the quest is
+// named when Enter goes down, and seen to once the game is done with it.
+std::string g_track_name;
+DWORD       g_track_at = 0;      // GetTickCount when to look; 0 = nothing pending
+
 enum Filter { F_All = 0, F_Discovered, F_Undiscovered, F_Count };
 int g_filter = F_All;
 
@@ -214,6 +222,7 @@ void Tick(float)
             g_open = false; g_index = -1;
             g_confirm_pending.clear(); g_last_objectives.clear();
         }
+        g_track_at = 0;                  // the Pip-Boy closed under a pending Enter
         if (g_walk.on) {
             auto a = menu::ActiveMenu();
             if (poll::IsGameplayActive() && !poll::MenuModeActive() &&
@@ -255,11 +264,21 @@ void Tick(float)
         SeedKeys();
         if (!mapTab) g_open = false;     // the map's help is said again on the map
     }
+    if (g_track_at && (LONG)(GetTickCount() - g_track_at) >= 0) {
+        g_track_at = 0;
+        poll::RequestTrackQuest(g_track_name);
+    }
     if (!mapTab) {
         if (KeyEdge(VK_RETURN, &g_enter)) {
-            if (tab == game::kMapTabQuests && game::IsKeyboardSelectionIn("MM_QuestsList"))
-                poll::RequestTrackQuest();       // Enter tracks the highlighted quest
-            else if (tab == game::kMapTabNotes && game::IsKeyboardSelectionIn("MM_NotesList")) {
+            if (tab == game::kMapTabQuests && game::IsKeyboardSelectionIn("MM_QuestsList")) {
+                // Enter tracks the highlighted quest: named now, clicked (if
+                // the game has not tracked it itself) in a moment.
+                auto sel = game::GetKeyboardSelection();
+                g_track_name = sel ? sel->label : std::string();
+                g_track_at = GetTickCount() + 300;
+                if (!g_track_at) g_track_at = 1;
+                F3A_INFO("mapnav: Enter on the quest '%s'", g_track_name.c_str());
+            } else if (tab == game::kMapTabNotes && game::IsKeyboardSelectionIn("MM_NotesList")) {
                 poll::RequestOpenNote();         // ...opens the note / plays the holotape
                 g_note_said.clear();             // and its text is read again, whole
                 g_note_kind_said.clear();

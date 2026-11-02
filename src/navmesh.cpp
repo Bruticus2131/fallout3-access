@@ -200,6 +200,35 @@ uint64_t EdgeKey(uint64_t a, uint64_t b)
 //
 // So the fallback is now bounded: beyond `maxFallback` the answer is "not on
 // this navmesh", which is the honest one.
+// The height of a triangle's plane under (x, y).
+float TriZAt(const Tri& t, const Vec3& p)
+{
+    const Vec3 &a = t.pos[0], &b = t.pos[1], &c = t.pos[2];
+    const float d = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+    if (std::fabs(d) < 1e-6f) return (a.z + b.z + c.z) / 3.0f;
+    const float w1 = ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / d;
+    const float w2 = ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / d;
+    return w1 * a.z + w2 * b.z + (1.0f - w1 - w2) * c.z;
+}
+
+// How far a point is from a triangle's rim, in 3D.
+float RimDist(const Tri& t, const Vec3& p)
+{
+    float best = 1e30f;
+    for (int k = 0; k < 3; ++k) {
+        const Vec3& a = t.pos[k];
+        const Vec3& b = t.pos[(k + 1) % 3];
+        const float ex = b.x - a.x, ey = b.y - a.y, l2 = ex * ex + ey * ey;
+        float s = l2 > 1e-6f ? ((p.x - a.x) * ex + (p.y - a.y) * ey) / l2 : 0.0f;
+        s = s < 0.0f ? 0.0f : s > 1.0f ? 1.0f : s;
+        const float qx = a.x + ex * s - p.x, qy = a.y + ey * s - p.y,
+                    qz = a.z + (b.z - a.z) * s - p.z;
+        const float d = std::sqrt(qx * qx + qy * qy + qz * qz);
+        if (d < best) best = d;
+    }
+    return best;
+}
+
 int LocateTri(const std::vector<Tri>& tris, const Vec3& p, float maxFallback,
               bool* exact = nullptr)
 {
@@ -209,10 +238,24 @@ int LocateTri(const std::vector<Tri>& tris, const Vec3& p, float maxFallback,
     for (int i = 0; i < (int)tris.size(); ++i) {
         const Tri& t = tris[i];
         if (PointInTri2D(p, t.pos[0], t.pos[1], t.pos[2])) {
-            float az = (t.pos[0].z + t.pos[1].z + t.pos[2].z) / 3.0f;
-            float dz = std::fabs(az - p.z);
+            float dz = std::fabs(TriZAt(t, p) - p.z);
             if (dz < bestZ) { bestZ = dz; best = i; }
         }
+    }
+    // Only a level far below (or above) lies under the point, and a mesh at
+    // its own height is just beside it: the player wedged at the edge of a
+    // walkway, off its mesh, with the ground 425 units under him. Every route
+    // from there started on the ground and walked at a point he could not get
+    // down to (Megaton, 2026-11-01). The near one is taken.
+    constexpr float kLevelTol = 100.0f, kBesideReach = 160.0f;
+    if (best >= 0 && bestZ > kLevelTol) {
+        int alt = -1;
+        float altD = (std::min)(bestZ, kBesideReach);
+        for (int i = 0; i < (int)tris.size(); ++i) {
+            const float d = RimDist(tris[i], p);
+            if (d < altD) { altD = d; alt = i; }
+        }
+        if (alt >= 0) return alt;            // beside the mesh, not on it
     }
     if (best >= 0) { if (exact) *exact = true; return best; }
 
@@ -337,12 +380,12 @@ bool PathOnTris(const std::vector<Tri>& tris, const Vec3& from, const Vec3& to,
 
 bool BuildPath(const Vec3& from, const Vec3& to,
                std::vector<Vec3>& out_waypoints,
-               const std::vector<Vec3>* avoid)
+               const std::vector<Vec3>* avoid, bool withDrops)
 {
     out_waypoints.clear();
     std::vector<Tri> tris;
     if (!GatherCellTriangles(tris)) return false;
-    return PathOnTris(tris, from, to, out_waypoints, avoid);
+    return PathOnTris(tris, from, to, out_waypoints, avoid, 40.0f, kWallMargin, withDrops);
 }
 
 namespace {

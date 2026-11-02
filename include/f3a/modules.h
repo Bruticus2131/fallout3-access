@@ -76,8 +76,11 @@ namespace autowalk {
 void Init();
 void Shutdown();
 void Tick(float dt);
+// `space`: the place a target with no live reference is in (interior cell or
+// worldspace form id, from the game data - a note of a series far off); 0 =
+// work it out from the reference or the door table.
 void StartTo(const game::Vec3& pos, const std::string& name,
-             const void* refr = nullptr, uint32_t form_id = 0);
+             const void* refr = nullptr, uint32_t form_id = 0, uint32_t space = 0);
 // Walk to the LIVE quest marker, re-read each tick so the walk follows an
 // objective that advances mid-route. False if the tracked objective has no
 // marker. (StartTo walks to a fixed position instead.)

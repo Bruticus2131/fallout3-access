@@ -177,16 +177,19 @@ void ResumeTrip()
 
 // O: to the latest find said on the way; again: back to the trip. Shift+O
 // switches the announcements off and on.
+// Exploration announcements on and off (Shift+O by default).
+void ToggleKey()
+{
+    if (!InWorld()) return;
+    g_on = !g_on;
+    tolk::Speak(g_on ? strings::T("Tryb eksploracji włączony.", "Exploration mode on.")
+                     : strings::T("Tryb eksploracji wyłączony.", "Exploration mode off."),
+                tolk::Priority::Ui, true);
+}
+
 void GoKey()
 {
     if (!InWorld()) return;
-    if (hotkeys::ShiftHeldNow()) {
-        g_on = !g_on;
-        tolk::Speak(g_on ? strings::T("Tryb eksploracji włączony.", "Exploration mode on.")
-                         : strings::T("Tryb eksploracji wyłączony.", "Exploration mode off."),
-                    tolk::Priority::Ui, true);
-        return;
-    }
     // A walk started since the detour (End, a quest walk) replaced the trip:
     // O then means the latest find, not the old trip.
     if (g_resume.on && autowalk::IsWalking() && autowalk::TargetFormId() != g_detour_form)
@@ -311,6 +314,7 @@ void Init()
     g_on = config::Get().explore_mode;
     const auto& h = config::Get().hotkeys;
     hotkeys::Bind(h.explore_go, &GoKey);
+    hotkeys::Bind(h.explore_toggle, &ToggleKey);
     hotkeys::Bind(h.sweep_summary, &SummaryKey);
     hotkeys::Bind(h.sweep_next, &NextKey);
     F3A_INFO("Explore module ready (exploration %s, radius %d).", g_on ? "on" : "off",

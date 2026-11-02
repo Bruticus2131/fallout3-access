@@ -184,10 +184,12 @@ std::string ReadGameLanguage(const std::wstring& path)
          std::memcmp(hdr, "GRUP", 4) == 0 && std::memcmp(hdr + 8, "GMST", 4) == 0;
     if (ok) std::memcpy(&size, hdr + 4, 4);
     // "Must be within": a damaged header must not make us read the whole disk.
+    bool whole = false;     // every game setting of the group was looked at
     if (ok && size > 24 && size <= 8u * 1024 * 1024) {
         std::vector<unsigned char> g(size - 24);
         if (std::fread(g.data(), 1, g.size(), f) == g.size()) {
-            for (size_t o = 0; o + 24 <= g.size() && found.empty();) {
+            size_t o = 0;
+            for (; o + 24 <= g.size() && found.empty();) {
                 uint32_t rsize = 0, flags = 0;
                 std::memcpy(&rsize, &g[o + 4], 4);
                 std::memcpy(&flags, &g[o + 8], 4);
@@ -211,9 +213,20 @@ std::string ReadGameLanguage(const std::wstring& path)
                 }
                 o = end;
             }
+            whole = o == g.size();
         }
     }
     std::fclose(f);
+    // The English release: its words are the game's own (in Fallout3.exe), so
+    // its Fallout3.esm sets no sYes - only a translated one does. A friend's
+    // English game logged "could not be read" for that (2026-11-01), and with
+    // a Polish Windows the mod would have spoken Polish to an English game. A
+    // translation plugin loaded on top still turns up at "System ready", when
+    // the loaded sYes is read (ConfirmGameLanguage).
+    if (found.empty() && whole) {
+        F3A_INFO("Game language: Fallout3.esm sets no sYes of its own -> en (the English release)");
+        found = "en";
+    }
     return found == "?" ? std::string() : found;
 }
 
@@ -232,6 +245,7 @@ bool Load(const wchar_t* ini_path)
         const LANGID ui = PRIMARYLANGID(GetUserDefaultUILanguage());
         if (ui == LANG_POLISH)  s.language = "pl";
         if (ui == LANG_RUSSIAN) s.language = "ru";
+        if (ui == LANG_SPANISH) s.language = "es";
     }
     g_game_cp.store(CodepageFor(s.game_language.empty() ? s.language : s.game_language));
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
@@ -277,6 +291,7 @@ bool Load(const wchar_t* ini_path)
     if (s.scanner_radius > 40000) s.scanner_radius = 40000;
     s.nearby_scan_max_items = ReadInt (L"Voice", L"NearbyScanMaxItems", 8, ini_path);
     s.hide_empty_containers = ReadBool(L"Voice", L"HideEmptyContainers", true, ini_path);
+    s.note_series           = ReadBool(L"Voice", L"NoteSeries",         true,  ini_path);
     s.explore_mode          = ReadBool(L"Voice", L"ExploreMode",        false, ini_path);
     s.explore_radius        = ReadInt (L"Voice", L"ExploreRadius",      900,  ini_path);
     if (s.explore_radius < 200 || s.explore_radius > 4000) s.explore_radius = 900;
@@ -353,6 +368,13 @@ bool Load(const wchar_t* ini_path)
     h.aim_calibrate    = ReadKey(L"Hotkeys", L"AimCalibrate",    h.aim_calibrate,    ini_path);
     h.aim_up           = ReadKey(L"Hotkeys", L"AimUp",           h.aim_up,           ini_path);
     h.aim_down         = ReadKey(L"Hotkeys", L"AimDown",         h.aim_down,         ini_path);
+    h.track_target     = ReadKey(L"Hotkeys", L"TrackTarget",     h.track_target,     ini_path);
+    h.teleport         = ReadKey(L"Hotkeys", L"Teleport",        h.teleport,         ini_path);
+    h.scan_cat_next    = ReadKey(L"Hotkeys", L"ScanCategoryNext", h.scan_cat_next,   ini_path);
+    h.scan_cat_prev    = ReadKey(L"Hotkeys", L"ScanCategoryPrev", h.scan_cat_prev,   ini_path);
+    h.level_status     = ReadKey(L"Hotkeys", L"LevelStatus",     h.level_status,     ini_path);
+    h.explore_toggle   = ReadKey(L"Hotkeys", L"ExploreToggle",   h.explore_toggle,   ini_path);
+    h.audio_desc_toggle = ReadKey(L"Hotkeys", L"AudioDescToggle", h.audio_desc_toggle, ini_path);
 
     if (s.game_text_codepage > 0) g_game_cp.store((unsigned)s.game_text_codepage);
     strings::SetLanguage(s.language, DataDir());
@@ -372,7 +394,8 @@ Settings& Mutable() { return g_settings; }
 // in LF, and all of that is left as it was. WritePrivateProfileString would
 // have dropped the comment after the value. The value keeps the width of the
 // old one where it can, so the comments stay in their column.
-bool WriteIniInt(const char* section, const char* key, int value)
+namespace {
+bool WriteIniValue(const char* section, const char* key, const std::string& val)
 {
     if (!g_ini_path[0] || !section || !key) return false;
     std::string text;
@@ -384,7 +407,6 @@ bool WriteIniInt(const char* section, const char* key, int value)
         while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
         std::fclose(f);
     }
-    const std::string val = std::to_string(value);
     auto trim = [](std::string s) {
         size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t\r");
         return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
@@ -435,13 +457,26 @@ bool WriteIniInt(const char* section, const char* key, int value)
     }
     FILE* f = _wfopen(g_ini_path, L"wb");
     if (!f) {
-        F3A_INFO("Config: could not write %s=%d to the INI", key, value);
+        F3A_INFO("Config: could not write %s=%s to the INI", key, val.c_str());
         return false;
     }
     std::fwrite(text.data(), 1, text.size(), f);
     std::fclose(f);
-    F3A_INFO("Config: [%s] %s = %d written to the INI", section, key, value);
+    F3A_INFO("Config: [%s] %s = %s written to the INI", section, key, val.c_str());
     return true;
+}
+} // namespace
+
+bool WriteIniInt(const char* section, const char* key, int value)
+{
+    return WriteIniValue(section, key, std::to_string(value));
+}
+
+bool WriteIniKey(const char* section, const char* key, uint32_t dik)
+{
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%02X", (unsigned)dik);
+    return WriteIniValue(section, key, buf);
 }
 
 unsigned GameTextCodepage() { return g_game_cp.load(); }

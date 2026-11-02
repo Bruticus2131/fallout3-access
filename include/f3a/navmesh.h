@@ -19,9 +19,11 @@ namespace f3a::navmesh {
 // `avoid` (optional): points the path must not pass through — a locked door
 // found on the way. Navmesh triangles centred within ~120 units of one are
 // treated as walls, so the search goes round them if there is another way.
+// `withDrops` false: no stepping off ledges at all (a walk on which one drop
+// could not be taken).
 bool BuildPath(const game::Vec3& from, const game::Vec3& to,
                std::vector<game::Vec3>& out_waypoints,
-               const std::vector<game::Vec3>* avoid = nullptr);
+               const std::vector<game::Vec3>* avoid = nullptr, bool withDrops = true);
 
 // The height of the walkable ground at (x, y) in the loaded cells — the
 // navmesh triangle under that point whose height is nearest `nearZ`. For a

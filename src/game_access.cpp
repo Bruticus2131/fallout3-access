@@ -13,7 +13,9 @@
 #include "fose/GameOSDepend.h"
 #include "f3a/polling_loop.h"
 #include "f3a/questobjs.h"
+#include "f3a/noteseries.h"
 #include "f3a/settings_menu.h"
+#include "f3a/engine_hooks.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -190,6 +192,9 @@ bool ObjectiveMarkerPos(UInt8* obj, Vec3& out,
 }
 } // namespace
 
+static bool QuestRunning(const UInt8* q);   // below
+static bool QuestKnown(const UInt8* q);     // below
+
 const void* GetTrackedQuestPtr()
 {
     auto* p = rt::Player();
@@ -198,15 +203,23 @@ const void* GetTrackedQuestPtr()
     // Pip-Boy's quest list sets it at once (0x00770580). The objective (+0x618)
     // follows only later, so going by the objective's quest named the OLD quest
     // right after a new one was picked: "nieśledzone" after Enter.
+    // Only a quest still RUNNING (+0x3C bit 0): a new game started from the
+    // main menu keeps the last game's quest there - and a finished quest stays
+    // there until another is picked - so all of Baby Steps went by with no
+    // quest and no marker in the scanner, until the game set the next quest
+    // itself (a player's log, 2026-10-31). None running = nothing tracked; the
+    // scanner then lists every quest the player has (GetActiveQuests).
+    // And one the player HAS (an objective on the Pip-Boy's list): a quest
+    // running unseen in the background is not one anybody tracks.
     if (auto* tq = reinterpret_cast<UInt8*>(p->quest))
-        if (!IsBadReadPtr(tq, 0x38)) return tq;
+        if (!IsBadReadPtr(tq, 0x54) && QuestRunning(tq) && QuestKnown(tq)) return tq;
     if (!p->questObjective) return nullptr;
     auto* obj = reinterpret_cast<UInt8*>(p->questObjective);
     if (IsBadReadPtr(obj, 0x14)) return nullptr;
     // BGSQuestObjective+0x10 = TESQuest* (after displayText String @0x08, before
     // the targets tList @0x14). Verified from an F11 objective dump.
     UInt8* q = *reinterpret_cast<UInt8**>(obj + 0x10);
-    if (IsBadReadPtr(q, 0x38)) return nullptr;
+    if (IsBadReadPtr(q, 0x54) || !QuestRunning(q) || !QuestKnown(q)) return nullptr;
     return q;
 }
 
@@ -259,9 +272,9 @@ bool AdvanceTrackedQuestStage()
     // defined stage (runs that stage's result script, so the quest progresses
     // properly — not just a flag flip). For forced no-VATS / unreachable scenes
     // like the vault BB-gun range. MUST run on the main thread (runs scripts).
-    auto* p = reinterpret_cast<UInt8*>(rt::Player());
-    if (!p || IsBadReadPtr(p + 0x614, 4)) return false;
-    UInt8* q = *reinterpret_cast<UInt8**>(p + 0x614);   // tracked TESQuest*
+    // The tracked quest only if it still runs (see GetTrackedQuestPtr): the
+    // slot can hold a finished quest, or the last game's.
+    auto* q = reinterpret_cast<UInt8*>(const_cast<void*>(GetTrackedQuestPtr()));
     if (!q || IsBadReadPtr(q, 0x64)) return false;
 
     UInt8 cur = *(q + 0x60);   // current stage (GetCurrentStage = movzx [this+0x60])
@@ -388,6 +401,10 @@ std::vector<WorldEntity> GetActiveQuests(bool trackedOnly)
     // it - the tracked quest goes first, or alone with trackedOnly.
     const void* trackedQuest = GetTrackedQuestPtr();
     UInt8* trackedObj = TrackedObjective();
+    // No quest tracked that is still running (a new game after another one, a
+    // finished quest still in the slot): every quest the player has, rather
+    // than none - the markers went missing until the game picked one itself.
+    if (!trackedQuest) trackedOnly = false;
 
     struct Node { UInt8* item; Node* next; };
     Node* node = reinterpret_cast<Node*>(dh + 0xD4);
@@ -436,6 +453,9 @@ std::vector<WorldEntity> GetActiveQuests(bool trackedOnly)
         if (isTracked) out.insert(out.begin(), std::move(e));   // tracked quest first
         else           out.push_back(std::move(e));
     }
+    // The tracked quest has no objective up just now (between two stages, or
+    // waiting on something with all its lines done): the others, not silence.
+    if (trackedOnly && out.empty()) return GetActiveQuests(false);
     return out;
 }
 
@@ -659,6 +679,7 @@ struct ContainerTally {
     bool levelled = false;  // base list holds a leveled list (rolled at runtime)
     bool changes  = false;  // the ref has ExtraContainerChanges
     int  entries  = 0;      // ...and how many entries it lists
+    int  total    = 0;      // all the items, every form's positive count added up
     std::string seen;       // the first few: "form id x count", for the log
 };
 
@@ -744,7 +765,7 @@ int ContainerItemStateAt(TESForm* base, UInt32 contOff, const TESObjectREFR* r,
         xn = *reinterpret_cast<const UInt8* const*>(xn + 0x08);
     }
 
-    for (const auto& c : counts) if (c.n > 0) ++t.forms;
+    for (const auto& c : counts) if (c.n > 0) { ++t.forms; t.total += (int)c.n; }
     if (out) *out = t;
     if (t.forms > 0) return 1;
     // A leveled list with no changes record yet may simply not have been
@@ -1051,6 +1072,10 @@ bool RefGone(const void* refr, uint32_t expectedRefID)
 namespace {
 std::mutex g_searched_mx;
 std::unordered_set<uint32_t> g_searched;
+// The bodies WatchCrosshairBody has stood at: how many items each held when
+// last looked at, and since when it is watched. Under g_searched_mx.
+struct BodyCount { int items; DWORD since; };
+std::unordered_map<uint32_t, BodyCount> g_body_counts;
 }
 
 void NoteSearched(uint32_t refid)
@@ -1071,6 +1096,7 @@ void ClearSearched()
 {
     std::lock_guard<std::mutex> lk(g_searched_mx);
     g_searched.clear();
+    g_body_counts.clear();
 }
 
 int KilledByPlayer(const void* actor)
@@ -1179,7 +1205,10 @@ std::vector<WorldEntity> ScanNearby(int radius, int max_results,
     return out;
 }
 
-std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
+namespace {
+// The quest objects of the quests' own scripts (questobjs.dat), near the
+// player. See GetQuestObjects.
+std::vector<WorldEntity> ScriptQuestObjects(int radius, int max_results)
 {
     std::vector<WorldEntity> out;
     auto* p = rt::Player();
@@ -1195,8 +1224,9 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
         std::vector<std::pair<UInt32, UInt32>> objectives;   // id, flags
     };
     std::unordered_map<uint32_t, QState> quests;
+    // Nothing tracked that still runs (see GetTrackedQuestPtr): the things of
+    // every quest the player has, as the quest category lists them all then.
     const UInt8* tracked = reinterpret_cast<const UInt8*>(GetTrackedQuestPtr());
-    if (!tracked) return out;                       // nothing tracked: nothing to show
     UInt8* dh = rt::DataHandlerBase();
     if (!Readable(dh, 0xDC)) return out;
     struct Node { UInt8* item; Node* next; };
@@ -1214,7 +1244,7 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
         if (!s.running || !QuestKnown(q)) continue;
         // Only the quest the player tracks: the category is for the quest being
         // worked on, not every quest's buttons and spots at once.
-        if (q != tracked) continue;
+        if (tracked && q != tracked) continue;
         s.stage = q[0x60];
         const char* nm = *reinterpret_cast<char**>(q + 0x34);
         if (Readable(nm, 1) && *nm) s.name = GameStrToUtf8(nm);
@@ -1332,6 +1362,108 @@ std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
     if ((int)kept.size() > max_results) kept.resize(max_results);
     return kept;
 }
+} // namespace
+
+// The quest objects: what the quests' own scripts wait for, near the player,
+// and - [Voice] NoteSeries - the notes still to find of a series the player
+// has started, wherever they lie: the Keller family transcripts are five
+// tapes over the whole Wasteland and no quest points at them (a player's
+// request, 2026-11-01). Those in this place first, nearest first; then those
+// in other places, which the walk reaches through the doors.
+std::vector<WorldEntity> GetQuestObjects(int radius, int max_results)
+{
+    std::vector<WorldEntity> out = ScriptQuestObjects(radius, max_results);
+    if (!config::Get().note_series) return out;
+    const auto missing = noteseries::MissingNotes();
+    auto* p = rt::Player();
+    if (missing.empty() || !p || !p->parentCell) return out;
+
+    // Those loaded get their live reference: End, the crosshair, a teleport.
+    std::unordered_map<uint32_t, TESObjectREFR*> live;
+    {
+        std::unordered_set<uint32_t> want;
+        for (const auto& m : missing) want.insert(m.ref);
+        for (TESObjectCELL* cell : NearbyCells(p->parentCell)) {
+            if (!Readable(cell, 0xB4)) continue;
+            struct RNode { TESObjectREFR* item; RNode* next; };
+            auto* rn = reinterpret_cast<RNode*>(&cell->objectList);
+            for (int safety = 0; rn && safety < 8192; ++safety) {
+                if (!Readable(rn, 8)) break;
+                TESObjectREFR* r = rn->item;
+                rn = rn->next;
+                if (r && Readable(r, 0x40) && want.count(r->refID) && !(r->flags & 0x820))
+                    live[r->refID] = r;
+            }
+        }
+    }
+    const uint32_t here = PlayerSpaceId();
+    const Vec3 pp = GetPlayerPosition();
+    std::vector<WorldEntity> same, other;
+    for (const auto& m : missing) {
+        WorldEntity e;
+        e.kind = WorldEntity::Kind::Note;
+        char tail[96];
+        std::snprintf(tail, sizeof(tail), strings::T(", seria: masz %d z %d", ", series: you have %d of %d"),
+                      m.have, m.total);
+        e.name = m.name + tail;
+        e.position = m.pos;
+        e.form_id = m.ref;
+        e.base_id = m.note;
+        e.form_type = (uint8_t)kFormType_Note;
+        auto it = live.find(m.ref);
+        if (it != live.end()) {
+            e.refr = it->second;
+            e.position = { it->second->posX, it->second->posY, it->second->posZ };
+        } else {
+            e.space = m.space;
+        }
+        (it != live.end() || m.space == here ? same : other).push_back(std::move(e));
+    }
+    auto d2 = [&pp](const Vec3& v) {
+        return (v.x - pp.x) * (v.x - pp.x) + (v.y - pp.y) * (v.y - pp.y);
+    };
+    std::sort(same.begin(), same.end(), [&d2](const WorldEntity& a, const WorldEntity& b) {
+        return d2(a.position) < d2(b.position);
+    });
+    for (auto& e : same) out.push_back(std::move(e));
+    for (auto& e : other) out.push_back(std::move(e));
+    return out;
+}
+
+std::vector<uint32_t> PlayerNoteIds()
+{
+    std::vector<uint32_t> out;
+    auto* p = reinterpret_cast<const UInt8*>(rt::Player());
+    if (!Readable(p, 0x578)) return out;
+    struct Node { const UInt8* item; const Node* next; };
+    const Node* n = reinterpret_cast<const Node*>(p + 0x570);   // inline head
+    for (int i = 0; n && i < 4096; ++i) {
+        if (!Readable(n, sizeof(Node))) break;
+        if (n->item && Readable(n->item, 0x10))
+            out.push_back(reinterpret_cast<const TESForm*>(n->item)->refID);
+        n = n->next;
+    }
+    return out;
+}
+
+std::string NoteName(uint32_t noteId)
+{
+    if (!noteId) return {};
+    UInt8* dh = rt::g_addrs ? rt::DataHandlerBase() : nullptr;
+    if (!Readable(dh, 0x134)) return {};
+    struct Node { UInt8* item; Node* next; };
+    Node* n = reinterpret_cast<Node*>(dh + 0x12C);              // noteList
+    for (int i = 0; n && i < 16384; ++i) {
+        if (!Readable(n, sizeof(Node))) break;
+        auto* f = reinterpret_cast<TESForm*>(n->item);
+        if (f && Readable(f, 0x58) && f->refID == noteId) {
+            const char* nm = BaseFormName(f);
+            return nm ? GameStrToUtf8(nm) : std::string();
+        }
+        n = n->next;
+    }
+    return {};
+}
 
 namespace {
 std::vector<uint32_t> g_dead_ids;      // under g_hostile_mx
@@ -1419,6 +1551,7 @@ std::vector<HostileRef> GetHostileRefs()
 }
 
 int RefDeadState(const void* refr) { return ActorDeadState(refr); }
+int PlayerDeadState() { return ActorDeadState(rt::Player()); }
 
 bool IsKnownHostile(uint32_t refid)
 {
@@ -1434,6 +1567,39 @@ bool IsKnownDead(uint32_t refid)
     std::lock_guard<std::mutex> lk(g_hostile_mx);
     for (uint32_t id : g_dead_ids) if (id == refid) return true;
     return false;
+}
+
+void WatchCrosshairBody()
+{
+    if (!OnMainThread()) return;
+    auto* ifm = rt::IFM();
+    auto* p   = rt::Player();
+    if (!ifm || !p) return;
+    auto* b = reinterpret_cast<const UInt8*>(ifm);
+    if (!Readable(b + 0xFC, 4)) return;
+    auto* r = *reinterpret_cast<TESObjectREFR* const*>(b + 0xFC);   // crosshair ref
+    if (!IsLiveRef(r) || ActorDeadState(r) != 1) return;
+    // At it: within reach of the loot overlay and E, not a body down the hall
+    // the crosshair reference still names (it keeps the last thing looked at).
+    const float dx = r->posX - p->posX, dy = r->posY - p->posY, dz = r->posZ - p->posZ;
+    if (!(dx * dx + dy * dy + dz * dz <= 400.0f * 400.0f)) return;
+    ContainerTally t;
+    if (ContainerItemStateAt(r->baseForm, 0x64, r, &t) < 0) return;
+    const DWORD now = GetTickCount();
+    std::lock_guard<std::mutex> lk(g_searched_mx);
+    auto it = g_body_counts.find(r->refID);
+    if (it == g_body_counts.end()) {
+        if (g_body_counts.size() > 1024) g_body_counts.clear();
+        g_body_counts[r->refID] = { t.total, now };
+        return;
+    }
+    // A body just killed may still lose its weapon to the floor: not the
+    // player's doing, so the first moments are only watched.
+    if (t.total < it->second.items && now - it->second.since >= 1500 &&
+        g_searched.insert(r->refID).second)
+        F3A_INFO("Searched: body %08X - %d item(s) on it, %d before", r->refID,
+                 t.total, it->second.items);
+    it->second.items = t.total;
 }
 
 float GetGameHour()
@@ -2650,10 +2816,21 @@ void InstallMainThreadHook()
 
 uint32_t MainThreadPumps() { return g_pumps.load(); }
 
+namespace {
+std::atomic<DWORD> g_queued_activate_at{ 0 };
+}
+
 void QueueActivate(const void* refr, uint32_t expectedRefID)
 {
     g_pending_id.store(expectedRefID);
     g_pending_refr.store(refr);
+    g_queued_activate_at.store(GetTickCount() | 1u);   // 0 = never
+}
+
+uint32_t MsSinceQueuedActivate()
+{
+    const DWORD at = g_queued_activate_at.load();
+    return at ? (uint32_t)(GetTickCount() - at) : 0xFFFFFFFFu;
 }
 
 int DoorOpenState(const void* refr, uint32_t expectedRefID)
@@ -4074,6 +4251,101 @@ bool BaseFormCenterOffset(TESForm* base, float* ox, float* oy, float* oz)
     return true;
 }
 
+bool RefModelCenter(const void* refr, Vec3* out, float* halfWidth)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x40) || !out || RefIsActor(r)) return false;
+    if (!std::isfinite(r->posX) || !std::isfinite(r->posY) || !std::isfinite(r->posZ) ||
+        !(std::fabs(r->posX) < 4.0e6f && std::fabs(r->posY) < 4.0e6f && std::fabs(r->posZ) < 4.0e6f))
+        return false;
+    TESForm* base = r->baseForm;
+    if (!base || IsBadReadPtr(base, 0x30)) return false;
+    float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+    if (!BaseFormCenterOffset(base, &ox, &oy, &oz)) return false;
+    auto* b = reinterpret_cast<const int16_t*>(reinterpret_cast<const UInt8*>(base) + 0x24);
+    float s = r->scale;
+    if (!(std::isfinite(s) && s > 0.01f && s < 100.0f)) s = 1.0f;
+    ox *= s; oy *= s; oz *= s;
+    // Clockwise, as GetAimPointFor turns it.
+    const float c = std::cos(r->rotZ), sn = std::sin(r->rotZ);
+    if (!std::isfinite(c) || !std::isfinite(sn)) return false;
+    out->x = r->posX + (ox * c + oy * sn);
+    out->y = r->posY + (oy * c - ox * sn);
+    out->z = r->posZ + oz;
+    if (halfWidth) *halfWidth = 0.5f * s * (float)(std::max)(b[3] - b[0], b[4] - b[1]);
+    return true;
+}
+
+// How far up and down a reference reaches in the world: its base form's
+// bounds, scaled, and turned by its tilt. Only the world-z row of the rotation
+// matters, and its z entry is cos(rotX)*cos(rotY) whatever order the engine
+// applies the three angles in; the x and y entries are bounded by the rest of
+// that unit row (Cauchy-Schwarz), so the span below holds for either order -
+// exact for an upright object. The Megaton bomb (tilted 132 degrees, origin
+// 167 units above the pool it lies in) reaches well below its origin, and the
+// walk to it stopped at the end of the navmesh as if it were a floor up
+// (2026-10-31).
+bool RefVerticalSpan(const void* refr, float* zmin, float* zmax)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x40) || !std::isfinite(r->posZ) || !(std::fabs(r->posZ) < 4.0e6f))
+        return false;
+    const TESForm* base = r->baseForm;
+    if (!base || IsBadReadPtr(base, 0x30)) return false;
+    auto* b = reinterpret_cast<const int16_t*>(reinterpret_cast<const UInt8*>(base) + 0x24);
+    const int mnx = b[0], mny = b[1], mnz = b[2], mxx = b[3], mxy = b[4], mxz = b[5];
+    if (mxx < mnx || mxy < mny || mxz < mnz) return false;
+    if (mxx - mnx > 20000 || mxy - mny > 20000 || mxz - mnz > 20000) return false;
+    if (mxx == mnx && mxy == mny && mxz == mnz) return false;
+    float s = r->scale;
+    if (!(std::isfinite(s) && s > 0.01f && s < 100.0f)) s = 1.0f;
+    const float cx = (mnx + mxx) * 0.5f * s, cy = (mny + mxy) * 0.5f * s, cz = (mnz + mxz) * 0.5f * s;
+    const float hx = (mxx - mnx) * 0.5f * s, hy = (mxy - mny) * 0.5f * s, hz = (mxz - mnz) * 0.5f * s;
+    const float r33 = std::cos(r->rotX) * std::cos(r->rotY);
+    if (!std::isfinite(r33)) return false;
+    const float side = std::sqrt(std::max(0.0f, 1.0f - r33 * r33));
+    const float mid  = r->posZ + r33 * cz;
+    const float half = std::fabs(r33) * hz +
+                       side * (std::sqrt(hx * hx + hy * hy) + std::sqrt(cx * cx + cy * cy));
+    if (!(std::isfinite(mid) && std::isfinite(half))) return false;
+    if (zmin) *zmin = mid - half;
+    if (zmax) *zmax = mid + half;
+    return true;
+}
+
+// How far `from` is from the thing itself rather than from its origin: the
+// distance to a sphere round its bounds (scaled; the radius capped, so a huge
+// model does not reach across a room). 0 inside it, -1 when it has no bounds.
+float RefSurfaceDistance(const void* refr, const Vec3& from)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x40) || !std::isfinite(r->posX) || !std::isfinite(r->posY) ||
+        !std::isfinite(r->posZ))
+        return -1.0f;
+    const TESForm* base = r->baseForm;
+    if (!base || IsBadReadPtr(base, 0x30)) return -1.0f;
+    auto* b = reinterpret_cast<const int16_t*>(reinterpret_cast<const UInt8*>(base) + 0x24);
+    const int mnx = b[0], mny = b[1], mnz = b[2], mxx = b[3], mxy = b[4], mxz = b[5];
+    if (mxx < mnx || mxy < mny || mxz < mnz) return -1.0f;
+    if (mxx - mnx > 20000 || mxy - mny > 20000 || mxz - mnz > 20000) return -1.0f;
+    float s = r->scale;
+    if (!(std::isfinite(s) && s > 0.01f && s < 100.0f)) s = 1.0f;
+    const float cx = (mnx + mxx) * 0.5f * s, cy = (mny + mxy) * 0.5f * s, cz = (mnz + mxz) * 0.5f * s;
+    const float hx = (mxx - mnx) * 0.5f * s, hy = (mxy - mny) * 0.5f * s, hz = (mxz - mnz) * 0.5f * s;
+    float radius = std::sqrt(hx * hx + hy * hy + hz * hz);
+    if (radius > 400.0f) radius = 400.0f;
+    // The centre: the bounds' middle turned by the heading (clockwise, as
+    // GetAimPointFor) and, for its height, by the tilt (see RefVerticalSpan).
+    const float c = std::cos(r->rotZ), sn = std::sin(r->rotZ);
+    const float r33 = std::cos(r->rotX) * std::cos(r->rotY);
+    const float mx = r->posX + (cx * c + cy * sn), my = r->posY + (cy * c - cx * sn);
+    const float mz = r->posZ + r33 * cz;
+    const float dx = from.x - mx, dy = from.y - my, dz = from.z - mz;
+    const float d = std::sqrt(dx * dx + dy * dy + dz * dz) - radius;
+    if (!std::isfinite(d)) return -1.0f;
+    return d > 0.0f ? d : 0.0f;
+}
+
 // The aim point from the target's own SKELETON — the upper torso, the neck, the
 // spine, in that order. This is how the New Vegas accessibility mod resolves it,
 // and reading its source is what settled the question here: it does NOT aim at
@@ -4221,8 +4493,8 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
         for (const auto& h : kHitCentres) {
             if (h.baseId != bid) continue;
             float c = std::cos(r->rotZ), sn = std::sin(r->rotZ);
-            out->x = r->posX + (h.x * c - h.y * sn);
-            out->y = r->posY + (h.x * sn + h.y * c);
+            out->x = r->posX + (h.x * c + h.y * sn);
+            out->y = r->posY + (h.y * c - h.x * sn);
             out->z = r->posZ + h.z;
             if (how) *how = "hit-centre";
             return true;
@@ -4231,12 +4503,33 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
 
     // Default: origin plus the base form's own centre offset, rotated into the
     // reference's facing so a long object leans the right way.
+    // The engine turns CLOCKWISE seen from above (heading 0 = north, 90 = east,
+    // the same rotZ the player's yaw uses: atan2(dx, dy)), so the model's +Y
+    // goes to (sin, cos): world = (x*cos + y*sin, y*cos - x*sin). This used the
+    // anticlockwise form and mirrored every offset on a turned object: the
+    // vault playpen gate (rotZ 90, 63 units long from its hinge) was aimed 31
+    // units WEST of its hinge - onto the playpen wall beside it - and Home
+    // never got the crosshair on the gate (2026-10-31).
+    // Scaled as the reference is (the bounds are the model's), and its height
+    // turned by a tilt: the Megaton bomb (scale 0.72, lying at 132 degrees)
+    // was aimed 490 units above itself, into the air, and the crosshair never
+    // reached it (2026-10-31). The tilt's height factor cos(x)*cos(y) holds in
+    // any order of the angles (see RefVerticalSpan); not for a person, whose
+    // x angle is where they look.
     float ox = 0.0f, oy = 0.0f, oz = 0.0f;
     if (BaseFormCenterOffset(r->baseForm, &ox, &oy, &oz)) {
+        float s = r->scale;
+        if (!(std::isfinite(s) && s > 0.01f && s < 100.0f)) s = 1.0f;
+        ox *= s; oy *= s; oz *= s;
+        float tilt = 1.0f;
+        if (!RefIsActor(r)) {
+            tilt = std::cos(r->rotX) * std::cos(r->rotY);
+            if (!std::isfinite(tilt)) tilt = 1.0f;
+        }
         float c = std::cos(r->rotZ), sn = std::sin(r->rotZ);
-        out->x = r->posX + (ox * c - oy * sn);
-        out->y = r->posY + (ox * sn + oy * c);
-        out->z = r->posZ + oz;
+        out->x = r->posX + (ox * c + oy * sn);
+        out->y = r->posY + (oy * c - ox * sn);
+        out->z = r->posZ + oz * tilt;
         if (how) *how = "bounds";
         return true;
     }
@@ -4343,6 +4636,15 @@ bool BoundKeyHeld(OSInputGlobals* globs, UInt32 control)
     UINT vk = kb >= 0x80 ? MapVirtualKeyA(0xE000u | (kb & 0x7Fu), MAPVK_VSC_TO_VK_EX)
                          : MapVirtualKeyA(kb, MAPVK_VSC_TO_VK);
     return vk && (GetAsyncKeyState((int)vk) & 0x8000) != 0;
+}
+
+int GameControlOnKey(uint8_t dik)
+{
+    auto* globs = InputGlobals();
+    if (!dik || !globs || IsBadReadPtr(globs->keyBinds, sizeof(globs->keyBinds))) return -1;
+    for (int i = 0; i < (int)sizeof(globs->keyBinds); ++i)
+        if (globs->keyBinds[i] == dik) return i;
+    return -1;
 }
 
 bool IsAimControlHeld()
@@ -6073,6 +6375,12 @@ bool RowIsEquipped(Tile* row)
     if (mt != kMenuType_Inventory && mt != kMenuType_Container &&
         mt != kMenuType_Barter)
         return false;
+    // Only YOUR column of a container: the game marks what a body still
+    // wears in its own column too, and "założone" there was heard as the item
+    // being on the player (2026-10-31).
+    if (mt == kMenuType_Container)
+        for (Tile* p = row; p; p = p->parent)
+            if (TileNameHas(p, "CM_Container_")) return false;
 
     // The row carries an `IM_Template_ItemMarker` tile whose VISIBILITY is the
     // equipped flag. Confirmed against a live inventory dump: the worn Pip-Boy
@@ -6774,9 +7082,13 @@ UInt8* FindColumnMenu(const ColumnMenu** which, Tile** tile = nullptr)
             if (m->typeID != d.type) continue;
             auto* raw = reinterpret_cast<UInt8*>(m);
             UInt32 vt = *reinterpret_cast<UInt32*>(raw);
-            if (vt != d.vtbl || !Readable(reinterpret_cast<void*>(vt), 15 * 4) ||
-                reinterpret_cast<UInt32*>(vt)[14] != d.special_key)
-                return nullptr;
+            if (vt != d.vtbl || !Readable(reinterpret_cast<void*>(vt), 15 * 4)) return nullptr;
+            // The slot is the disassembled handler - or, in the container
+            // screen, the mod's own filter in front of it (engine_hooks).
+            const UInt32 slot = reinterpret_cast<UInt32*>(vt)[14];
+            const UInt32 hook = d.type == kMenuType_Container
+                                ? static_cast<UInt32>(engine::ContainerKeySlotHook()) : 0;
+            if (slot != d.special_key && (!hook || slot != hook)) return nullptr;
             if (which) *which = &d;
             if (tile) *tile = cn->child;
             return raw;
@@ -6842,6 +7154,10 @@ bool GetBarterState(BarterInfo* out)
 }
 
 namespace {
+// The last row read in each column of the open two-column screen (list
+// index; -1 none), for ArmColumn. Read on the poll thread, used on the main.
+std::atomic<int> g_col_idx[2] = { -1, -1 };
+
 int FocusSideOf(const UInt8* menu, const ColumnMenu& d)
 {
     const UInt8* cur = *reinterpret_cast<const UInt8* const*>(menu + d.focus);
@@ -6883,7 +7199,38 @@ std::optional<MenuSelection> GetContainerSelection(int* out_side)
     if (sel.label.empty() && sel.value.empty()) return std::nullopt;
     sel.container = box;
     if (out_side) *out_side = side;
+    g_col_idx[side].store((int)TileNum(row, kTileValue_listindex));
     return sel;
+}
+
+uint32_t ContainerMenuOwner(bool* is_actor, int* mode, std::string* name)
+{
+    if (is_actor) *is_actor = false;
+    if (mode) *mode = -1;
+    if (name) name->clear();
+    const ColumnMenu* d = nullptr;
+    UInt8* m = FindColumnMenu(&d);
+    if (!m || d->type != kMenuType_Container) return 0;
+    // The open routine (0x0063BAD0) stores the reference at +0x60 and the
+    // mode it was opened in at +0x6C.
+    if (mode) *mode = *reinterpret_cast<const int*>(m + 0x6C);
+    auto* r = *reinterpret_cast<TESObjectREFR* const*>(m + 0x60);
+    if (!Readable(r, 0x40)) return 0;
+    TESForm* bf = r->baseForm;
+    if (Readable(bf, 0x08)) {
+        if (is_actor) *is_actor = KindOf(bf->typeID) == WorldEntity::Kind::Actor;
+        if (name) {
+            const char* nm = BaseFormName(bf);
+            if (nm) *name = GameStrToUtf8(nm);
+        }
+    }
+    return r->refID;
+}
+
+void ForgetColumnRows()
+{
+    g_col_idx[0].store(-1);
+    g_col_idx[1].store(-1);
 }
 
 // The row a column has selected.
@@ -6950,6 +7297,39 @@ int CountVisibleRows(Tile* box, float rowId)
     return n;
 }
 
+namespace {
+// The row a column selects when the focus is handed to it. The game's side
+// switch (slot 14, codes 13/14) saves the column it leaves with 0x00632250 -
+// the list index of [list+0x10], or -1.0 when +0x10 is empty, which it is
+// after every select (0x00633140 clears it) - and selects min([list+0x24],
+// rows-1) in the column it goes to. So a column holding -1 (left with nothing
+// in +0x10, or empty when the screen opened: a companion with nothing on
+// them, an empty locker, until something is put in it) gets the focus and no
+// row; the mouseover stays on a row of the other column and the menu hands
+// the focus straight back. Log 2026-11-02: Right after giving Clover a key -
+// five switches ("click, click, click"), then the player's own items read.
+// So before a switch the column gets a real row: the last one read there,
+// else the first.
+void ArmColumn(UInt8* m, const ColumnMenu& d, bool container_side)
+{
+    UInt8* list = m + (container_side ? d.theirs : d.mine);
+    if (!Readable(list, 0x28)) return;
+    Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
+    if (!Readable(box, sizeof(Tile))) return;
+    const int n = CountVisibleRows(box, d.row_id);
+    if (n <= 0) return;                         // the switch refuses an empty column
+    float* saved = reinterpret_cast<float*>(list + 0x24);
+    if (std::isfinite(*saved) && *saved >= 0.0f && *saved < (float)n) return;
+    int want = g_col_idx[container_side ? 1 : 0].load();
+    if (want < 0) want = 0;
+    if (want > n - 1) want = n - 1;
+    F3A_INFO("%s: the %s column held row %.0f of %d - row %d it is",
+             d.type == kMenuType_Barter ? "Barter" : "Container",
+             container_side ? "other" : "player", *saved, n, want);
+    *saved = (float)want;
+}
+} // namespace
+
 int ContainerSelectedIndex(bool container_side)
 {
     const ColumnMenu* d = nullptr;
@@ -6970,6 +7350,7 @@ int StepContainerSelection(bool container_side, int delta)
         // The game's own Up/Down roam YOUR column, and the moment they put the
         // mouseover on one of your rows the menu switches the focus back to
         // it. Take the focus back first, the game's own way.
+        ArmColumn(m, *d, container_side);
         using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
         reinterpret_cast<SpecialKey>(d->special_key)(m, container_side ? 14u : 13u, 1.0f);
         int now = FocusSideOf(m, *d);
@@ -7013,6 +7394,12 @@ int SwitchContainerSide(bool container_side)
     const ColumnMenu* d = nullptr;
     UInt8* m = FindColumnMenu(&d);
     if (!m) return -1;
+    UInt8* list = m + (container_side ? d->theirs : d->mine);
+    // Already there with a row picked: nothing to do. (The game's switch
+    // would still run - and save the OTHER column as -1, see ArmColumn.)
+    if (FocusSideOf(m, *d) == (container_side ? 1 : 0) && SelectedRowOf(list, d->row_id))
+        return 1;
+    ArmColumn(m, *d, container_side);
     using SpecialKey = bool (__thiscall*)(void*, UInt32, float);
     auto fn = reinterpret_cast<SpecialKey>(d->special_key);
     bool handled = fn(m, container_side ? 14u : 13u, 1.0f);
@@ -7317,6 +7704,43 @@ int TrackSelectedQuest()
     F3A_INFO("TrackSelectedQuest: quest %p, the player tracks %p", quest, now);
     return now == quest ? 1 : -2;
 }
+
+int TrackQuestNamed(const std::string& name)
+{
+    if (name.empty()) return TrackSelectedQuest();
+    if (GetTrackedQuestName() == name) {
+        F3A_INFO("TrackQuestNamed: '%s' is tracked already (the game's own Enter)", name.c_str());
+        return 1;
+    }
+    Menu* menu = FindMenuByType(kMenuType_Map);
+    auto* mb = reinterpret_cast<UInt8*>(menu);
+    if (!mb || IsBadReadPtr(mb, 0x120 + 0x14)) return 0;
+    UInt8* list = mb + 0x120;
+    struct Item { Tile* tile; void* object; };
+    struct Node { Item* item; Node* next; };
+    auto* node = reinterpret_cast<Node*>(list + 4);
+    for (int i = 0; node && i < 1024; ++i, node = node->next) {
+        if (IsBadReadPtr(node, sizeof(Node))) break;
+        Item* it = node->item;
+        if (!it || IsBadReadPtr(it, sizeof(Item)) || !it->tile) continue;
+        std::string label, value;
+        DescribeRowParts(it->tile, label, value);
+        if (label != name) continue;
+        *reinterpret_cast<Tile**>(list + 0x10) = it->tile;
+        F3A_INFO("TrackQuestNamed: '%s' row %p object %p, click 0x13", name.c_str(),
+                 (void*)it->tile, it->object);
+        menu->HandleClick(0x13, it->tile);
+        auto* q = reinterpret_cast<const UInt8*>(it->object);
+        if (q && !IsBadReadPtr(q, 0x40) && (q[0x3C] & 0x02)) return -1;
+        auto* p = reinterpret_cast<UInt8*>(rt::Player());
+        const void* now = (p && !IsBadReadPtr(p + 0x614, 4))
+                        ? *reinterpret_cast<void* const*>(p + 0x614) : nullptr;
+        F3A_INFO("TrackQuestNamed: the player tracks %p", now);
+        return (q && now == q) ? 1 : -2;
+    }
+    F3A_INFO("TrackQuestNamed: no row '%s' in the quest list", name.c_str());
+    return 0;
+}
 bool OpenSelectedNote() { return ClickDataListRow("MM_NotesList", 0x150, 0x14); }
 
 namespace { Tile* FindChildExact(Tile* t, const char* name, int depth); }
@@ -7499,7 +7923,24 @@ bool FindStartDefaults(Menu** outMenu, Tile** outBtn, UInt32* outId)
             Menu* m = tm->menu;
             if (m && m->typeID == kMenuType_Start) {
                 UInt32 id = 0;
-                if (Tile* btn = FindDefaultsButton(cn->child, 0, id)) {
+                // By the tile names in start_menu.xml, so in any language of
+                // the game: the options list is shown on the settings pages
+                // only (gameplay, display, audio, controls, ours), and there
+                // main_defaults_button is "Restore defaults" (on the save /
+                // load page the same button is Delete). The words on the
+                // button were matched before - Polish and English only, so in
+                // a Russian or Spanish game F2 and R did nothing.
+                Tile* btn = nullptr;
+                Tile* opts = FindChildByName(cn->child, "options_container", 3);
+                if (opts && TileVisible(opts)) {
+                    Tile* b = FindChildByName(cn->child, "main_defaults_button", 3);
+                    if (b && TileVisible(b) && TileNum(b, kTileValue_target) != 0.0f) {
+                        btn = b;
+                        id = (UInt32)TileNum(b, kTileValue_id);
+                    }
+                }
+                if (!btn) btn = FindDefaultsButton(cn->child, 0, id);
+                if (btn) {
                     if (outMenu) *outMenu = m;
                     if (outBtn) *outBtn = btn;
                     if (outId) *outId = id;
@@ -7671,6 +8112,136 @@ std::string GetActivePipBoySubTabName()
         }
     }
     return {};
+}
+
+namespace {
+constexpr UInt32 kInvVtbl        = 0x00E05F6C;   // InventoryMenu
+constexpr UInt32 kInvHandleClick = 0x00654750;   // its vtable slot 3
+constexpr UInt32 kInvTabline     = 0x5C;         // TileRect* IM_Tabline
+constexpr UInt32 kInvFilter      = 0x60;         // the tab: clicked id - 15
+constexpr UInt32 kInvItems       = 0x94;         // ListBox of the rows
+constexpr float  kInvFirstTabId  = 15.0f;        // tab buttons: ids 15..19
+
+// A row of the item list: not the list's furniture, in the category shown
+// (rows of the other categories stay in the list, hidden, list index -1).
+bool InvRow(Tile* c)
+{
+    if (!c || !Readable(c, sizeof(Tile)) || TileHiddenExplicitly(c)) return false;
+    const char* nm = fose_rt::TileName(c);
+    if (!nm || !*nm || std::strstr(nm, "highlight") || std::strstr(nm, "scrollbar") ||
+        std::strstr(nm, "ItemMarker"))
+        return false;
+    return TileNum(c, kTileValue_listindex) >= 0.0f;
+}
+
+// The selected row of the item list, and which of the game's marks gave it.
+// The highlight box first: it is drawn on the selected row, and is parked
+// (y < 0) when none is. Then the list's own selected pointer, the active
+// tile (mouseover), and the list's saved index.
+Tile* InvSelectedRow(UInt8* list, const char** how)
+{
+    *how = "none";
+    if (!Readable(list, 0x28)) return nullptr;
+    Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
+    if (!Readable(box, sizeof(Tile))) return nullptr;
+    struct Node { Tile::ChildNode* item; Node* next; };
+    auto each = [&](auto&& fn) {
+        auto* node = reinterpret_cast<Node*>(&box->childList);
+        for (int safety = 0; node && safety < 4096; ++safety) {
+            if (!Readable(node, sizeof(Node))) break;
+            Tile::ChildNode* cn = node->item;
+            node = node->next;
+            if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+            if (fn(cn->child)) return;
+        }
+    };
+    Tile* hl = nullptr;
+    each([&](Tile* c) {
+        const char* nm = fose_rt::TileName(c);
+        if (nm && std::strstr(nm, "highlight")) { hl = c; return true; }
+        return false;
+    });
+    if (hl && TileVisible(hl) && TileNum(hl, kTileValue_y) >= 0.0f) {
+        const float y = TileAbsY(hl);
+        float best = 28.0f;
+        Tile* row = nullptr;
+        each([&](Tile* c) {
+            if (!InvRow(c)) return false;
+            float d = TileAbsY(c) - y;
+            if (d < 0) d = -d;
+            if (d < best) { best = d; row = c; }
+            return false;
+        });
+        if (row) { *how = "highlight"; return row; }
+    }
+    Tile* sel = *reinterpret_cast<Tile**>(list + 0x10);
+    if (sel && Readable(sel, sizeof(Tile)) && sel->parent == box && InvRow(sel)) {
+        *how = "selected";
+        return sel;
+    }
+    Tile* mo = nullptr;
+    each([&](Tile* c) {
+        if (InvRow(c) && TileNum(c, kTileValue_mouseover) != 0.0f) { mo = c; return true; }
+        return false;
+    });
+    if (mo) { *how = "mouseover"; return mo; }
+    return nullptr;
+}
+} // namespace
+
+bool GetInventoryView(InventoryView* out)
+{
+    if (!out) return false;
+    *out = InventoryView{};
+    Tile* page = FindVisibleMenuTile(kMenuType_Inventory);
+    if (!page) return false;
+    auto* tm = reinterpret_cast<TileMenu*>(page);
+    if (!Readable(tm, sizeof(TileMenu))) return false;
+    auto* m = reinterpret_cast<UInt8*>(tm->menu);
+    if (!Readable(m, 0x100)) return false;
+    const UInt32 vt = *reinterpret_cast<UInt32*>(m);
+    if (vt != kInvVtbl || !Readable(reinterpret_cast<void*>(vt), 4 * 4) ||
+        reinterpret_cast<UInt32*>(vt)[3] != kInvHandleClick)
+        return false;
+    const int filter = *reinterpret_cast<int*>(m + kInvFilter);
+    if (filter < 0 || filter > 5) return false;
+    out->filter = filter;
+
+    // The tab's label: the tab button whose id is 15 + the filter.
+    Tile* tabline = *reinterpret_cast<Tile**>(m + kInvTabline);
+    if (Readable(tabline, sizeof(Tile))) {
+        struct Node { Tile::ChildNode* item; Node* next; };
+        auto* node = reinterpret_cast<Node*>(&tabline->childList);
+        for (int safety = 0; node && safety < 64; ++safety) {
+            if (!Readable(node, sizeof(Node))) break;
+            Tile::ChildNode* cn = node->item;
+            node = node->next;
+            if (!cn || !Readable(cn, 0x08) || !cn->child) continue;
+            if (TileNum(cn->child, kTileValue_id) != kInvFirstTabId + (float)filter) continue;
+            if (const char* s = TileStringTrait(cn->child)) out->category = GameStrToUtf8(s);
+            break;
+        }
+    }
+
+    const char* how = "none";
+    Tile* row = InvSelectedRow(m + kInvItems, &how);
+    if (row) {
+        std::string label, value;
+        DescribeRowParts(row, label, value);
+        out->text = value.empty() ? label : label.empty() ? value : label + ", " + value;
+        if (!out->text.empty()) out->row = row;
+    }
+    // What was read and from which mark, each time it changes: the next log
+    // of a silent list says why.
+    static int s_filter = -2;
+    static const void* s_row = nullptr;
+    static const char* s_how = nullptr;
+    if (filter != s_filter || out->row != s_row || how != s_how) {
+        s_filter = filter; s_row = out->row; s_how = how;
+        F3A_INFO("Inventory: tab %d '%s', row '%s' (%s)", filter, out->category.c_str(),
+                 out->text.c_str(), how);
+    }
+    return true;
 }
 
 std::string GetPipBoyVitals()

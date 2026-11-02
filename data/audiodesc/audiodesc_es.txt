@@ -1,0 +1,306 @@
+# Audiodescripción de Fallout 3 Access - descripciones de escenas y personajes (español).
+#
+# [stage <id de misión> <fase>]   - cuando la misión llega a esa fase
+# [stage <id de misión> <fase> +<segundos>] - esos segundos después (la fase
+#                                llega antes de lo que dice el texto: al
+#                                inicio de una animación cuyo resultado se ve
+#                                unos segundos más tarde)
+# [npc <nombre>]                 - la primera vez que miras a ese personaje
+# [npc <nombre> @<id de misión>] - ...pero solo mientras esa misión está en curso
+# [movie <archivo> <segundo>]    - en ese segundo de una película del juego (intro, rótulos)
+# Cada línea se lee por separado, en una pausa entre frases habladas.
+#
+# Prólogo (Refugio 101). Fuentes: datos de Fallout3.esm (fases y scripts de las
+# misiones CG00-CG04, mobiliario de las salas, aspecto de los personajes: raza,
+# peinado, color de pelo, ropa) y el desarrollo conocido del prólogo. BORRADOR:
+# hay que contrastarlo con capturas de pantalla del juego (AudioDescCapture = 1).
+#
+# Misiones: CG00 = 0001F388 (nacimiento), CG01 = 00014E83 (Baby Steps),
+# CG02 = 00014E84 (Growing Up Fast), CG03 = 00014E85 (Future
+# Imperfect), CG04 = 00014E86 (Escape!).
+
+# ---------------------------------------------------------------- películas
+# [movie <archivo> <segundo>] - en ese segundo de la película, en directo. Tiempos
+# tomados de fotogramas de Data\Video\Fallout INTRO Vsk.bik (243,5 s): canción
+# hasta 1:39, rótulos hasta 1:54, luego narración; descripciones en sus pausas
+# (según el volumen de la banda sonora) o justo al inicio de un plano nuevo.
+
+[movie fallout intro vsk.bik 1]
+Audiodescripción de la introducción.
+
+[movie fallout intro vsk.bik 4]
+Oscuridad. Las válvulas de una vieja radio se encienden poco a poco con un brillo amarillo - del altavoz sale una canción de antes de la guerra.
+
+[movie fallout intro vsk.bik 15]
+La cámara retrocede a través de la rejilla metálica del altavoz.
+
+[movie fallout intro vsk.bik 20]
+Es una radio Radiation King: un dial de emisoras y una fila de teclas blancas.
+
+[movie fallout intro vsk.bik 28]
+La cámara sube. Sobre la radio hay una figurita de bailarina de hula con una falda de hierba verde.
+
+[movie fallout intro vsk.bik 38]
+Al lado, un volante y el asiento del conductor - la radio está empotrada en el salpicadero de un viejo autobús.
+
+[movie fallout intro vsk.bik 45]
+En un asiento verde acolchado hay una cajita metálica y una botella; más allá, un osito de peluche y un camioncito rojo de juguete.
+
+[movie fallout intro vsk.bik 54]
+Las ventanas están hechas añicos. Encima cuelgan viejos carteles: uno militar que dice "¡Alístate hoy!" y un anuncio de refugios con Vault Boy.
+
+[movie fallout intro vsk.bik 63]
+La cámara recorre todo el autobús: barras oxidadas, asideros colgantes, basura en el suelo y un anuncio de Vault-Tec que promete un futuro mejor bajo tierra.
+
+[movie fallout intro vsk.bik 72]
+La cámara sale por la luna trasera rota. El autobús es un amasijo encajado entre los escombros.
+
+[movie fallout intro vsk.bik 77]
+Alrededor, una ciudad en ruinas: edificios calcinados y sin techo, montones de escombros, farolas dobladas. A lo lejos, bajo un cielo denso de un gris verdoso, se alza el obelisco del Monumento a Washington.
+
+[movie fallout intro vsk.bik 89]
+Por la izquierda entra en el plano un soldado con una pesada servoarmadura y un arma enorme en las manos, y se detiene justo delante de la cámara.
+
+[movie fallout intro vsk.bik 100]
+La pantalla se oscurece. Texto sobre negro: Bethesda Game Studios presenta.
+
+[movie fallout intro vsk.bik 107]
+Título: Fallout 3.
+
+[movie fallout intro vsk.bik 127.3]
+Un paisaje rocoso; una calavera y huesos esparcidos sobre las piedras.
+
+[movie fallout intro vsk.bik 132]
+Un cementerio: hileras de lápidas blancas bajo los árboles.
+
+[movie fallout intro vsk.bik 151.5]
+Un barrio residencial: una valla blanca de estacas, una bicicleta, una botella de leche. Un estallido atómico resplandece sobre las casas.
+
+[movie fallout intro vsk.bik 161.5]
+Ruinas de la ciudad. La enorme cabeza de piedra de una estatua yace entre los escombros.
+
+[movie fallout intro vsk.bik 168.5]
+Unos restos aplastados entre metal retorcido.
+
+[movie fallout intro vsk.bik 174.6]
+Desde debajo de un paso elevado derrumbado, una calle en ruinas; a lo lejos camina una figura solitaria.
+
+[movie fallout intro vsk.bik 186.3]
+Un parque infantil destrozado, con columpios, delante de un edificio en ruinas.
+
+[movie fallout intro vsk.bik 190.6]
+Una casa quemada y, a su lado, una gran valla publicitaria descolorida con gente sonriente.
+
+[movie fallout intro vsk.bik 207]
+Colinas vacías, árboles muertos, lluvia.
+
+[movie fallout intro vsk.bik 213]
+En la oscuridad, una puerta redonda de acero con forma de engranaje y el número 101.
+
+[movie fallout intro vsk.bik 229.2]
+La cámara se aleja: la puerta está en el fondo de una cueva rocosa.
+
+[movie fallout intro vsk.bik 242]
+La imagen se desvanece. Fin de la introducción.
+
+[movie 1 year later.bik 0.5]
+Texto sobre blanco: Un año después.
+
+[movie 9 years later.bik 0.5]
+Texto sobre blanco: Nueve años después.
+
+[movie 6 years later.bik 0.5]
+Texto sobre blanco: Seis años después.
+
+[movie 3 years later.bik 0.5]
+Texto sobre blanco: Tres años después.
+
+[movie 2 weeks later.bik 0.5]
+Texto sobre negro: Dos semanas después.
+
+# ---------------------------------------------------------------- nacimiento
+[stage 0001F388 8]
+De una neblina blanca surge una imagen. Ves a través de unos ojos de recién nacido: sobre ti brilla una cruda lámpara de quirófano.
+A tu alrededor, una sala de hospital: máquinas de anestesia, un soporte de gotero, un carrito de instrumental, filas de consolas y armarios de ordenadores.
+
+[stage 0001F388 10]
+Un hombre con ropa de médico y mascarilla quirúrgica se inclina sobre ti - es tu padre, James. A su lado está una doctora, la doctora Li.
+Tu mamá, Catherine, yace en la cama, agotada por el parto.
+
+[stage 0001F388 42]
+Junto a la cama hay un proyector genético - una máquina con una pantalla que mostrará cómo serás en la edad adulta.
+
+[stage 0001F388 85]
+En la sala estalla el caos. Las máquinas hacen sonar alarmas y papá corre a salvar a mamá.
+
+[stage 0001F388 90]
+Un blanco cegador lo inunda todo.
+
+# ---------------------------------------------------------------- Baby Steps
+[stage 00014E83 5]
+Tienes un año. Estás de pie en un gran parque de madera para bebés, en el cuarto infantil del Refugio 101 - las paredes son de metal, como en todo el refugio.
+A tu alrededor: juguetes, una alfombrita, una cuna con un móvil, un sofá y una mesita. Papá está agachado en el parque y te tiende los brazos.
+
+[npc Papá @00014E83 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
+Papá: un hombre de mediana edad con el pelo corto, ondulado y oscuro, con bata blanca de laboratorio y un Pip-Boy en el antebrazo. El juego ha hecho que su cara se parezca a la tuya.
+
+[stage 00014E83 18]
+Papá sale de la habitación y cierra la puerta tras él.
+
+[stage 00014E83 72]
+La puerta se abre. Papá vuelve y mira a su alrededor, sonriendo.
+
+[stage 00014E83 73]
+Papá se acerca a la mesita sobre la que hay una cita enmarcada.
+
+[stage 00014E83 90]
+La imagen vuelve a fundirse en blanco. Pasan los años.
+
+# ---------------------------------------------------------------- Growing Up Fast
+[stage 00014E84 5]
+Tienes diez años. Estás en la cafetería del refugio, decorada para tu cumpleaños: globos de colores, una pancarta de cumpleaños, reservados junto a las mesas y una gramola.
+Tus vecinos del refugio te rodean y te sonríen.
+
+[stage 00014E84 7]
+El Supervisor - el líder del refugio - se abre paso hasta delante.
+
+[stage 00014E84 8]
+El Supervisor se te acerca con un Pip-Boy 3000 - un ordenador que se lleva en el antebrazo, con una pequeña pantalla.
+
+[stage 00014E84 15]
+Andy, el robot del refugio, flota hasta la tarta.
+
+[stage 00014E84 16 +4]
+Andy ha cortado la tarta con su sierra circular - hay trozos de tarta esparcidos por toda la barra.
+
+[stage 00014E84 35]
+Un intercomunicador de la pared de la cafetería empieza a pitar. Papá se acerca y contesta.
+
+[stage 00014E84 44]
+Papá te da una escopeta de balines - tu regalo sorpresa.
+
+[stage 00014E84 50]
+Estás en la galería de tiro del nivel del reactor. Delante de ti, tras una barandilla, hay tres dianas redondas sobre postes metálicos.
+
+[stage 00014E84 55]
+De un rincón sale una cucaracha radiactiva - enorme, de color marrón rojizo, casi tan larga como tu antebrazo, con las antenas agitándose.
+
+[stage 00014E84 90]
+Estás junto a papá. Jonas levanta una cámara.
+
+[stage 00014E84 98]
+El destello de un flash. La imagen se vuelve blanca y pasan más años.
+
+[npc Supervisor @00014E84 #000CBCFB,000230DA,000300F0,0002D043]
+Supervisor: un hombre mayor de rasgos hispanos, pelo canoso muy corto y rostro severo, con un mono azul del refugio.
+
+[npc Amata @00014E84 #000A7883,000230DD,000300E9,0002549E,0001CE24]
+Amata, tu mejor amiga e hija del Supervisor: una niña de diez años de rasgos hispanos, pelo oscuro y ojos color avellana, con un mono infantil del refugio y un gorro de fiesta.
+
+[npc Butch @00014E84 #000C111F,000230DC,000300EA,00027F65,0001CE26]
+Butch: un chico de tu edad y el matón del colegio - de piel clara, pelo rizado rubio oscuro, con un mono infantil del refugio.
+
+[npc Paul Hannon @00014E84 #000C1120,000300EB,0001CE28]
+Paul Hannon: un chico negro de pelo corto y negro, con un gorro de fiesta.
+
+[npc Wally Mack @00014E84 #000C111E,0004E894,000300EC,0001CE2A]
+Wally Mack: un chico de pelo corto y oscuro, amigo de Butch.
+
+[npc Old Lady Palmer @00014E84 #000309A7,000309A6]
+La anciana Palmer: una mujer muy mayor y menuda, de pelo canoso y ralo, con un gorro de cumpleaños.
+
+[npc Stanley @00014E84 #0006F543,0006B236,00031648,0001CFD8]
+Stanley: el anciano mecánico del refugio, pelo canoso peinado hacia atrás, mono de trabajo y gorro de fiesta.
+
+[npc Beatrice @00014E84 #0007542A,000309AC,0001CFBF]
+Beatrice: una mujer mayor de rasgos asiáticos, pelo oscuro cuidadosamente peinado, con un mono del refugio.
+
+[npc Andy @00014E84 #00074163,00020456,0009B172,0006B237]
+Andy: un robot ayudante Mister Handy - un cuerpo redondo de metal que flota sobre el suelo gracias a la pequeña llama de un propulsor, tres ojos sobre pedúnculos y tres brazos acabados en herramientas.
+
+[npc Jonas @00014E84 #00099343,000300E7,0001CFBC]
+Jonas, el ayudante de papá: un joven negro con gafas, de pelo corto y negro, con bata blanca de laboratorio.
+
+[npc Papá @00014E84 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
+Papá: en su pelo asoman las primeras canas; lleva bata blanca de laboratorio y un Pip-Boy.
+
+[npc Officer Gomez @00014E84 #00064911,000309AE,00027057]
+Agente Gomez: un guardia del refugio de rasgos hispanos, con mono de seguridad y chaleco, y una porra al cinto.
+
+[npc Officer Kendall @00014E84 #0009B171,0006490F,00027055]
+Agente Kendall: un guardia del refugio con la cabeza rapada, con mono de seguridad y chaleco.
+
+# ---------------------------------------------------------------- Future Imperfect
+[stage 00014E85 5]
+Tienes dieciséis años. Estás en el despacho de papá, en la clínica del refugio: un escritorio con un terminal, un visor de radiografías iluminado, una gradilla de tubos de ensayo y un juego de química.
+
+[npc Papá @00014E85 #000892C7,00088FF7,000290A6,0002FDCF,0002EA46,0001CE38,00019CEF]
+Papá: ahora más canoso, con la cara más cansada; sigue llevando bata blanca.
+
+[stage 00014E85 20]
+En el pasillo, Butch y sus dos colegas rodean a Amata y se burlan de ella.
+
+[npc Butch @00014E85 #000C111F,000230DC,000300EA,00027F65,0001CE26]
+Butch: dieciséis años, líder de la banda de las Serpientes del Túnel - la cazadora de cuero de la banda con una serpiente, el pelo peinado hacia arriba como un rockero de los años cincuenta.
+
+[npc Wally Mack @00014E85 #000C111E,0004E894,000300EC,0001CE2A]
+Wally Mack: un adolescente de pelo oscuro muy corto, con una cazadora de las Serpientes del Túnel.
+
+[npc Paul Hannon @00014E85 #000C1120,000300EB,0001CE28]
+Paul Hannon: un adolescente negro con el pelo peinado en un alto tupé, con una cazadora de las Serpientes del Túnel.
+
+[npc Amata @00014E85 #000A7883,000230DD,000300E9,0002549E,0001CE24]
+Amata: dieciséis años, pelo oscuro recogido hacia atrás, ojos color avellana, mono del refugio.
+
+[npc Mr. Brotch @00014E85 #0003D347,0001CFB7]
+El señor Brotch, el profesor: un hombre negro de mediana edad, de pelo muy corto, con un mono del refugio.
+
+[stage 00014E85 50]
+Te sientas en un pupitre. El señor Brotch se dirige al frente del aula, donde hay una bandera y un proyector.
+
+[stage 00014E85 60]
+El proyector muestra en la pared las diapositivas del examen.
+
+[stage 00014E85 90]
+La imagen vuelve a ponerse blanca.
+
+# ---------------------------------------------------------------- Escape!
+[stage 00014E86 2]
+Tienes diecinueve años. Estás en la cama de tu cuarto en el refugio y alguien te zarandea - es Amata. A lo lejos suena una alarma.
+
+[npc Amata @00014E86 #000A7883,000230DD,000300E9,0002549E,0001CE24]
+Amata: diecinueve años, pelo oscuro recogido hacia atrás, mono del refugio; está asustada y sin aliento.
+
+[stage 00014E86 12]
+En el pasillo, al otro lado de la puerta, un guardia del refugio lucha contra cucarachas radiactivas.
+
+[stage 00014E86 18]
+En las dependencias de los DeLoria, la madre de Butch se encoge contra la pared mientras las cucarachas radiactivas corretean a su alrededor.
+
+[npc Ellen DeLoria @00014E86 #000230DF,000273CB]
+Ellen DeLoria, la madre de Butch: una mujer de mediana edad con el pelo castaño recogido en un moño, con un mono del refugio.
+
+[npc Butch @00014E86 #000C111F,000230DC,000300EA,00027F65,0001CE26]
+Butch: con su cazadora de las Serpientes del Túnel, aterrado y a punto de llorar.
+
+[stage 00014E86 36]
+En la oficina de seguridad, Amata está ante el Supervisor y un guardia está a punto de golpearla.
+
+[npc Supervisor @00014E86 #000CBCFB,000230DA,000300F0,0002D043]
+Supervisor: con el pelo ya casi totalmente canoso, con un mono del refugio y el rostro crispado de ira.
+
+[npc Jonas @00014E86 #00099343,000300E7,0001CFBC]
+Jonas yace sin vida en el suelo.
+
+[stage 00014E86 120]
+El escritorio del Supervisor se desliza a un lado y deja al descubierto la entrada al túnel secreto.
+
+[stage 00014E86 140]
+Estás ante la consola que acciona la puerta del refugio - enorme, redonda y con forma de engranaje, con el número 101 pintado.
+
+[stage 00014E86 144]
+La puerta está abierta: un brazo mecánico la ha sacado de su marco y la ha hecho rodar a un lado. Detrás, un oscuro túnel de roca lleva al exterior.
+
+[stage 00014E86 150]
+Sales de la cueva. La cruda luz del sol te ciega - por primera vez en tu vida ves el cielo.
+Cuando tus ojos se acostumbran, ves el Páramo: colinas pardas y secas, árboles muertos y retorcidos, abajo las ruinas de un pueblecito y, a lo lejos en el horizonte, Washington en ruinas con la aguja del Monumento a Washington.

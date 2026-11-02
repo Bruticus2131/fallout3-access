@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 namespace f3a::hotkeys {
 
@@ -12,7 +13,24 @@ void Init();
 void Shutdown();
 
 // Bind a hotkey by DIK scancode. Replaces any previous binding for that key.
-void Bind(uint32_t dik, Action action);
+// `dik` is normally a field of config::Get().hotkeys: the binding then
+// remembers which INI key it came from, so Remap can change it at run time
+// (an unbound field, 0, is kept for that too, and never fires).
+void Bind(const uint32_t& dik, Action action);
+// Move the binding made from this config field to another key (0 = none).
+// Applied on the next Poll; the new key does not fire until it is let go.
+void Remap(const uint32_t* field, uint32_t dik);
+// A key value is a DirectInput scancode in the low byte, and for a shortcut
+// the modifiers held with it above that: Shift+Home = 0x1C7.
+constexpr uint32_t kModShift = 0x100, kModCtrl = 0x200, kModAlt = 0x400;
+constexpr uint32_t kModMask  = kModShift | kModCtrl | kModAlt;
+// The virtual-key code a key value's scancode is read with (0 = none).
+int VkForDik(uint32_t dik);
+// A key value's name as Windows gives it, modifiers first ("Shift+Home");
+// empty for none.
+std::string KeyText(uint32_t value);
+// While a new key is being chosen, none of the mod's keys fire.
+void SetCapturing(bool on);
 
 // Called every frame (from the FOSE OnFrame tick).
 void Poll();

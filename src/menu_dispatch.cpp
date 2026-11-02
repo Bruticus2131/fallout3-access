@@ -109,7 +109,16 @@ void OnMenuOpen(Id id)
 {
     auto at = std::find(g_stack.begin(), g_stack.end(), id);
     if (at != g_stack.end()) g_stack.erase(at);   // re-open = move to the top
-    g_stack.push_back(id);
+    // The HUD lies under every other menu, whenever it comes back. Menus that
+    // appear on the same poll arrive in no set order (an unordered set), and
+    // back from the pause menu over the SPECIAL book, the book and the HUD
+    // returned together with the HUD last: it was taken for the active menu,
+    // the book got no more ticks and went silent until the game was restarted,
+    // and the gameplay keys answered over the book instead (2026-10-31).
+    if (id == Id::HUDMain)
+        g_stack.insert(g_stack.begin(), id);
+    else
+        g_stack.push_back(id);
     Recompute();
     F3A_DEBUG("Menu open: %u", (unsigned)id);
 

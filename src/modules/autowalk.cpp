@@ -17,6 +17,7 @@
 #include "f3a/roadnet.h"
 #include "f3a/worlddoors.h"
 #include "f3a/questobjs.h"
+#include "f3a/noteseries.h"
 #include "f3a/itemvalue.h"
 #include "f3a/menu_dispatch.h"
 #include "f3a/hotkeys.h"
@@ -37,10 +38,21 @@ namespace {
 enum class State { Idle, Walking };
 
 State        g_state = State::Idle;
+DWORD        g_walk_since = 0;     // GetTickCount when this walk began (StartTo)
 game::Vec3   g_target_pos{};
 std::string  g_target_name;
 const void*  g_target_refr = nullptr;   // destination ref (for Alt+Home teleport)
 uint32_t     g_target_form = 0;
+// Where the target's model is, from its origin (x, y): walked to instead of
+// the origin when they are far apart (game::RefModelCenter). 0, 0 = the origin.
+game::Vec3   g_target_off{};
+bool TargetOffModel() { return g_target_off.x != 0.0f || g_target_off.y != 0.0f; }
+// One drop of this walk could not be taken: no more drops on it. A balcony's
+// rim is many ledges side by side (83 on the Vault 101 atrium's mesh), a
+// railing stands along all of it, and the wall probe saw through it at
+// one of them - banning the ledges one at a time sent a friend's walk to the
+// Overseer's office back to the same rail again and again (2026-11-01).
+bool         g_no_drops = false;
 // Quest mode: re-read the live objective marker each tick instead of walking to
 // the position it had when the key was pressed. Objectives advance mid-route
 // (and DLC quests can hijack the tracked slot), so a cached marker walks you to
@@ -141,6 +153,7 @@ game::Vec3  g_final_pos{};
 std::string g_final_name;
 const void* g_final_refr = nullptr;
 uint32_t    g_final_form = 0;
+uint32_t    g_final_space = 0;   // its place, when given (g_target_space_hint)
 
 // While we have no path, keep retrying BuildPath as we move — once we near the
 // stairs / a connected mesh region the path (which handles height) is found.
@@ -654,6 +667,26 @@ float DistanceToTarget()
     return std::sqrt(dx * dx + dy * dy);
 }
 
+// The height from the player's feet to the target, + = up: to its origin, or
+// for a thing that reaches up or down from it to the nearest part of it, and
+// 0 when the feet are level with some part of it. The Megaton bomb lies
+// tilted in its pool with its origin 167 units above the water the player
+// wades in: measured to the origin it was "a floor up", and the walk stopped
+// at the edge of the navmesh, 280 units away (2026-10-31).
+float TargetDz()
+{
+    const float pz = game::GetPlayerPosition().z;
+    float dz = g_target_pos.z - pz;
+    float lo = 0.0f, hi = 0.0f;
+    if (g_target_refr && g_target_form && game::IsLiveRef(g_target_refr, g_target_form) &&
+        game::RefVerticalSpan(g_target_refr, &lo, &hi)) {
+        if (pz >= lo && pz <= hi) return 0.0f;
+        const float d = pz < lo ? lo - pz : hi - pz;
+        if (std::fabs(d) < std::fabs(dz)) dz = d;
+    }
+    return dz;
+}
+
 game::Vec3 LegGoal() { return OnLegs() ? g_legs[g_leg] : g_target_pos; }
 
 // What progress is measured against: the leg being walked on a long walk
@@ -738,15 +771,22 @@ bool RequestEngineRoute()
         if (navmesh::GroundZ(g.x, g.y, g.z, &z)) g.z = z;
         return RequestEngineRouteTo(nullptr, 0, g, kLegArrive * 0.5f);
     }
+    // A model off its origin: the engine is asked for the way to the model,
+    // not to the reference (it would route to the origin).
+    if (g_target_refr && TargetOffModel())
+        return RequestEngineRouteTo(nullptr, 0, g_target_pos, kArriveDist);
     return RequestEngineRouteTo(g_target_refr, g_target_form, g_target_pos, kArriveDist);
 }
 
 // The place the target is in: from its cell when that is loaded, else from
 // the world-door table (a quest target in a place nobody has loaded).
+uint32_t g_target_space_hint = 0;   // the place given with the target (StartTo)
+
 uint32_t TargetSpace()
 {
     uint32_t s = g_target_refr ? game::RefSpaceId(g_target_refr) : 0;
     if (!s && g_target_form) s = worlddoors::RefSpace(g_target_form);
+    if (!s) s = g_target_space_hint;
     return s;
 }
 
@@ -919,7 +959,8 @@ bool BuildOwnPath(const game::Vec3& to, std::vector<game::Vec3>& wp)
     const size_t avoidBefore = g_avoid.size();
     for (int round = 0; round < 4; ++round) {
         wp.clear();
-        if (!navmesh::BuildPath(game::GetPlayerPosition(), to, wp, &g_avoid) || wp.empty())
+        if (!navmesh::BuildPath(game::GetPlayerPosition(), to, wp, &g_avoid, !g_no_drops) ||
+            wp.empty())
             break;
         // The avoid list steers the search, but a route that still runs
         // through a locked door is no route round it.
@@ -985,7 +1026,13 @@ void StopWalking(const char* reason_utf8);   // defined below
 float g_drops_checked = 0.0f;   // the drop legs of the route last asked about (a sum of their points)
 float g_drops_asked   = 0.0f;   // ...of the route asked about now, 0 = no question out
 std::vector<std::pair<game::Vec3, game::Vec3>> g_drops_asked_legs;
-size_t g_drop_said = (size_t)-1;   // the landing waypoint "jumping down" was said for
+size_t g_drop_said = (size_t)-1;   // the landing waypoint the ledge was noted for
+// A drop being watched: said once the player is really on the way down,
+// banned if they are not (DropNotTaken).
+game::Vec3 g_drop_watch_ledge{};
+float  g_drop_watch_top = 0.0f, g_drop_watch_h = 0.0f;
+DWORD  g_drop_watch_until = 0;     // 0 = none
+bool   DropNotTaken(const char* why);   // below TickDrops
 
 bool OwnRoute() { return g_have_path && !g_route_engine; }
 
@@ -1034,9 +1081,14 @@ void AdoptEngineRoute()
         return;
     }
     // The engine never steps off a ledge. Where our own route does, and is
-    // much the shorter for it, ours is walked.
+    // MUCH the shorter for it, ours is walked. "Much": a ledge is only probed
+    // for a wall, and in Megaton's walkways a 268-unit drop that passed the
+    // probe could not be taken - the walk left the game's whole route (5712
+    // units) for one 18% shorter and wedged the player at the edge
+    // (2026-11-01). Half as long again, and 800 units, at least.
     if (OwnRoute() && !DropLegs(g_waypoints).empty() &&
-        RouteLength2D(g_waypoints) + 300.0f < RouteLength2D(wp)) {
+        RouteLength2D(g_waypoints) * 1.5f < RouteLength2D(wp) &&
+        RouteLength2D(g_waypoints) + 800.0f < RouteLength2D(wp)) {
         F3A_INFO("autowalk: engine route ignored - ours drops off a ledge and is %.0f units "
                  "shorter (%.0f against %.0f)", RouteLength2D(wp) - RouteLength2D(g_waypoints),
                  RouteLength2D(g_waypoints), RouteLength2D(wp));
@@ -1216,14 +1268,52 @@ void TickDrops()
                      "asking the game for a wall there", l.first.z - l.second.z,
                      l.first.x, l.first.y, l.first.z);
     }
-    // At the ledge: the next point is the landing below.
+    // At the ledge: the next point is the landing below. Said when the player
+    // really goes down, not when the ledge is reached: "Zeskakuję" came at
+    // the edge and nothing followed - the walk turned another way, or the
+    // "ledge" was a 50-unit step walked down without a jump (a player's report,
+    // 2026-10-31). A step under kDropSay is not said at all.
+    constexpr float kDropSay = 72.0f;              // about a metre
     if (g_wp_index > 0 && g_wp_index < g_waypoints.size() && g_wp_index != g_drop_said &&
         navmesh::IsDropLeg(g_waypoints[g_wp_index - 1], g_waypoints[g_wp_index])) {
         g_drop_said = g_wp_index;
         const float h = g_waypoints[g_wp_index - 1].z - g_waypoints[g_wp_index].z;
-        F3A_INFO("autowalk: over the ledge, %.0f units down", h);
-        tolk::Speak(strings::T("Zeskakuję.", "Jumping down."), tolk::Priority::Ui, false);
+        F3A_INFO("autowalk: at the ledge, %.0f units down", h);
+        g_drop_watch_ledge = g_waypoints[g_wp_index - 1];
+        g_drop_watch_top   = g_drop_watch_ledge.z;
+        g_drop_watch_h     = h;
+        g_drop_watch_until = GetTickCount() + 6000;
     }
+    if (g_drop_watch_until) {
+        const float z = game::GetPlayerPosition().z;
+        if (z <= g_drop_watch_top - 0.6f * g_drop_watch_h) {
+            F3A_INFO("autowalk: down the ledge (%.0f of %.0f units)", g_drop_watch_top - z,
+                     g_drop_watch_h);
+            g_drop_watch_until = 0;
+            if (g_drop_watch_h >= kDropSay)
+                tolk::Speak(strings::T("Zeskok w dół.", "Dropping down."), tolk::Priority::Ui, false);
+        } else if ((int)(GetTickCount() - g_drop_watch_until) > 0) {
+            DropNotTaken("not taken in 6 s");
+        }
+    }
+}
+
+// The drop being watched was not taken - a rail, a rim or a wall the probe
+// missed holds the player at the edge. Banned, and the way worked out again
+// without it: walking on, the route had already "passed" the landing (it is
+// a few dozen units out, inside the arrival radius) while the player still
+// stood on top, and every new route from there went the same way.
+bool DropNotTaken(const char* why)
+{
+    if (!g_drop_watch_until) return false;
+    g_drop_watch_until = 0;
+    navmesh::BanDrop(g_drop_watch_ledge);
+    g_no_drops = true;
+    F3A_INFO("autowalk: the ledge (%.0f,%.0f,%.0f) was %s - banned, and no more drops on "
+             "this walk; a new route",
+             g_drop_watch_ledge.x, g_drop_watch_ledge.y, g_drop_watch_ledge.z, why);
+    if (OwnRoute()) RebuildPath(strings::T("Przeliczam trasę.", "Recalculating the route."));
+    return true;
 }
 
 // On to the next leg of a long walk: the engine is asked for the way to its
@@ -1542,6 +1632,8 @@ void BeginFarDoorWalk(const worlddoors::Hop& hop)
     g_final_name = g_target_name;
     g_final_refr = g_target_refr;
     g_final_form = g_target_form;
+    g_final_space = g_target_space_hint;
+    g_target_space_hint = 0;            // the door is found by its own id
     g_far_door      = true;
     g_far_door_form = hop.door;
     g_far_door_name = hop.to_name;
@@ -1619,6 +1711,7 @@ void ReachedFarDoor()
     g_target_name = g_final_name;
     g_target_refr = g_final_refr;
     g_target_form = g_final_form;
+    g_target_space_hint = g_final_space;
     g_far_door = false;
     g_walkgraph_tried = false;
     g_legs.clear();
@@ -1752,10 +1845,21 @@ bool g_move_key_released[4] = {};
 bool PlayerMoveKeyPressed()
 {
     if (!config::Get().native_walk) return false;
+    // The keys are read from Windows (GetAsyncKeyState), which sees them
+    // whatever window has the keyboard: a W typed into a chat beside the game
+    // stopped the walk. Only while the game's window is in front.
+    DWORD pid = 0;
+    if (HWND fg = GetForegroundWindow()) GetWindowThreadProcessId(fg, &pid);
+    const bool ours = pid == GetCurrentProcessId();
     bool pressed = false;
     for (uint32_t c = 0; c < 4; ++c) {           // forward, back, left, right
-        if (!game::IsControlKeyHeld(c)) g_move_key_released[c] = true;
-        else if (g_move_key_released[c]) pressed = true;
+        if (!ours || !game::IsControlKeyHeld(c)) g_move_key_released[c] = true;
+        else if (g_move_key_released[c]) {
+            pressed = true;
+            // Which one, for the log: a walk that "stops by itself" is either
+            // a key or a fault, and only this line tells them apart.
+            F3A_INFO("autowalk: movement control %u pressed - the walk stops", c);
+        }
     }
     return pressed;
 }
@@ -1814,6 +1918,7 @@ void StopWalking(const char* reason_utf8)
         g_target_name = g_final_name;
         g_target_refr = g_final_refr;
         g_target_form = g_final_form;
+        g_target_space_hint = g_final_space;
     }
     g_state = State::Idle;
     if (reason_utf8 && *reason_utf8)
@@ -3134,7 +3239,7 @@ std::string DiagString()
 namespace { bool TryTravelLeg(); }   // defined below, used by StartTo
 
 void StartTo(const game::Vec3& pos_in, const std::string& name,
-             const void* refr_in, uint32_t form_in)
+             const void* refr_in, uint32_t form_in, uint32_t space_in)
 {
     // Native walking with no hook = nothing may drive the player. Refuse out
     // loud instead of falling back to held keys: that fallback is what produced
@@ -3158,6 +3263,9 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     }
     g_stall_spots.clear();
     g_switch_route_sig = 0.0f;
+    g_drop_said = (size_t)-1;            // a new route: its ledges are new
+    g_drop_watch_until = 0;
+    g_no_drops = false;
     game::Vec3  pos     = pos_in;
     const void* refr    = refr_in;
     uint32_t    form_id = form_in;
@@ -3183,12 +3291,34 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
             g_precise_say = strings::T(q->say, q->say_en);
         }
     }
+    // A thing whose model sits well off its origin is walked to the model:
+    // the Overseer's terminal is 290 units from its origin, across the desk,
+    // and a friend's walk "arrived" at the origin with the desk between them
+    // and the terminal - no crosshair on it, no E (2026-11-01). Not a big
+    // thing (a house's centre is inside it), not a spot to stand on.
+    g_target_off = {};
+    if (refr && !g_precise) {
+        game::Vec3 mc{};
+        float half = 0.0f;
+        if (game::RefModelCenter(refr, &mc, &half) && half <= 150.0f) {
+            const float dx = mc.x - pos.x, dy = mc.y - pos.y;
+            if (dx * dx + dy * dy >= 64.0f * 64.0f) {
+                F3A_INFO("autowalk: the model of '%s' is %.0f units off its origin - walking "
+                         "to the model (%.0f,%.0f)", name.c_str(), std::sqrt(dx * dx + dy * dy),
+                         mc.x, mc.y);
+                g_target_off = { dx, dy, 0.0f };
+                pos.x = mc.x;
+                pos.y = mc.y;
+            }
+        }
+    }
     g_lockdoor_said.clear();
     g_lockdoor_name.clear();
     g_target_pos  = pos;
     g_target_name = name;
     g_target_refr = refr;
     g_target_form = form_id;
+    g_target_space_hint = refr ? 0 : space_in;
 
     g_probe_timer    = 0.0f;
     g_recover_timer  = 0.0f;
@@ -3237,10 +3367,13 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     g_floor_warned     = false;
     g_follow_quest     = false;   // a plain target; StartToQuest re-sets this
     g_state            = State::Walking;
+    g_walk_since       = GetTickCount() | 1u;
 
     // Same place: the cells say so, or — for a target whose place is not
     // loaded, so it has no cell — the world-door table does.
-    bool shares = refr ? TargetHere() : false;
+    // A place given with the target (no reference: a note of a series far
+    // off) answers it the same way.
+    bool shares = (refr || g_target_space_hint) ? TargetHere() : false;
     F3A_INFO("autowalk StartTo '%s' refr=%p shares_space=%d cross=%d | player_at:%s (%08X) "
              "| target_at:%s (%08X)",
              name.c_str(), refr, (int)shares, (int)(refr && !shares),
@@ -3280,8 +3413,9 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     // coordinates anyway — which is precisely how the Moriarty walk happened. So
     // when there's no reference, treat "no navmesh path AND far away" as the same
     // situation: the navmesh here cannot reach it, so it is not here.
-    bool other_space = refr ? !shares
-                            : (!g_have_path && DistanceToTarget() > kNoPathFarDist);
+    bool other_space = (refr || g_target_space_hint)
+                           ? !shares
+                           : (!g_have_path && DistanceToTarget() > kNoPathFarDist);
 
     // A REAL PATH OUTRANKS THE CELL COMPARISON.
     //
@@ -3453,6 +3587,8 @@ void FollowMovingTarget(float dt)
     g_follow_timer = 0.5f;
     game::Vec3 now{};
     if (!game::GetRefPosition(g_target_refr, g_target_form, &now)) return;
+    now.x += g_target_off.x;              // where its model is, as when the walk began
+    now.y += g_target_off.y;
     // Gone through a door (into a house): the position is now in that
     // place's coordinates, and a route here to it would go nowhere. The walk
     // follows them through the door.
@@ -3537,7 +3673,22 @@ void Tick(float dt)
     // there is nothing else to walk at.
     // A movement key: the game dropped its auto-move, the player took over.
     if (mover::UserTookOver()) {
-        PlayerEndedWalk(strings::T("Zatrzymano.", "Stopped."));
+        // Said with the reason: a walk that ends on its own sounded like a
+        // fault (log 2026-11-02, "movement randomly dropped").
+        PlayerEndedWalk(strings::T("Zatrzymano: klawisz ruchu.", "Stopped: a movement key."));
+        return;
+    }
+    // Dead: the death is said (poll::PollPlayerLife); the walk only ends.
+    if (poll::PlayerDead()) {
+        StopWalking(nullptr);
+        return;
+    }
+    // Hurt on the way - shot, bitten, a mine, fire: the walk does not lead on
+    // into it. A friend's walk kept going while something killed him, twice
+    // (log 2026-11-02); the player decides what next.
+    if (const DWORD hurt = poll::PlayerHurtAt(); hurt && (LONG)(hurt - g_walk_since) > 0) {
+        StopWalking(strings::T("Tracisz zdrowie. Chodzenie zatrzymane.",
+                               "You are losing health. Walk stopped."));
         return;
     }
     if (mover::SpeedUnreadable()) {
@@ -3580,7 +3731,7 @@ void Tick(float dt)
     }
 
     if (PlayerMoveKeyPressed()) {
-        PlayerEndedWalk(strings::T("Zatrzymano.", "Stopped."));
+        PlayerEndedWalk(strings::T("Zatrzymano: klawisz ruchu.", "Stopped: a movement key."));
         return;
     }
 
@@ -3634,7 +3785,7 @@ void Tick(float dt)
     if (g_cross) { TickCross(dt); return; }
 
     float dist = DistanceToTarget();                       // horizontal only
-    float dz   = g_target_pos.z - game::GetPlayerPosition().z;
+    float dz   = TargetDz();
     bool  sameFloor = std::fabs(dz) <= kFloorDelta;
 
     // A spot to stand on: only the spot counts — none of the arm's-length or
@@ -3848,11 +3999,11 @@ void Tick(float dt)
     // so stop at the route's end and face it.
     if (g_have_path && !g_waypoints.empty() && g_wp_index >= g_waypoints.size() &&
         !OnLegs() && !g_far_door && !g_precise && !g_cross && g_engine_wait <= 0.0f &&
-        std::fabs(g_target_pos.z - game::GetPlayerPosition().z) > kFloorDelta) {
+        std::fabs(TargetDz()) > kFloorDelta) {
         char buf[192];
         std::snprintf(buf, sizeof(buf), strings::T("Bliżej nie dojdę: %s.", "This is as close as I can get: %s."), g_target_name.c_str());
         F3A_INFO("autowalk: route walked to its end, target %.0f units up/down - stopping",
-                 g_target_pos.z - game::GetPlayerPosition().z);
+                 TargetDz());
         Arrive(buf);
         return;
     }
@@ -4052,6 +4203,12 @@ void Tick(float dt)
                     game::SwitchedRef sw;
                     if (SwitchedBlockerHere(&sw) && StartUnblock(sw)) return;
                 }
+                // Held at the edge of a ledge the route drops from: that drop
+                // is not there to take - banned, and a route without it.
+                if (g_drop_watch_until &&
+                    game::GetPlayerPosition().z > g_drop_watch_top - 0.6f * g_drop_watch_h &&
+                    DropNotTaken("stalled at"))
+                    return;
                 // Blocked further out — a closed door is the usual culprit. Open
                 // the nearest one and keep going before treating this as a real
                 // obstacle. (No-op if it's the same door we already opened.)
@@ -4146,6 +4303,7 @@ void Init()
         roadnet::LoadDir(dir);
         worlddoors::Load(dir + L"\\doors.dat");
         questobjs::Load(dir + L"\\questobjs.dat");     // for the scanner's quest objects
+        noteseries::Load(dir + L"\\notes.dat");        // ...and the notes of a series still to find
         itemvalue::Load(dir + L"\\items.dat");         // which finds exploration names
     }
     F3A_INFO("AutoWalk module ready.");

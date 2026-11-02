@@ -1017,9 +1017,6 @@ ru: "Не за чем следить. Выберите цель сканером
 en: "Tracking: "
 ru: "Слежу за: "
 
-en: ". Shift Home stops."
-ru: ". Shift Home — остановить."
-
 en: "Leveling the view. No target nearby."
 ru: "Выравниваю взгляд. Поблизости нет цели."
 
@@ -1431,12 +1428,6 @@ ru: "%s, взлом %d"
 en: ", lockpick %d"
 ru: ", взлом %d"
 
-en: "Careful: the target is behind a locked door, and that door is the only way out. Alt Home again teleports anyway."
-ru: "Осторожно: цель за запертой дверью, и выйти оттуда можно только через неё. Alt Home ещё раз - телепорт всё равно."
-
-en: "Jumping down."
-ru: "Спрыгиваю."
-
 en: "You have the key. Opening the door."
 ru: "У вас есть ключ. Открываю дверь."
 
@@ -1745,3 +1736,186 @@ ru: "Дальность клавиши End"
 
 en: "Skipping quest stages (=)"
 ru: "Пропуск этапов заданий (=)"
+
+en: "none"
+ru: "нет"
+
+en: "another key of the mod"
+ru: "другая клавиша мода"
+
+en: "Note: the game uses this key too."
+ru: "Внимание: эту клавишу использует и игра."
+
+en: "Press the new key for: "
+ru: "Нажмите новую клавишу для: "
+
+en: ". Escape cancels."
+ru: ". Escape — отмена."
+
+en: "Cancelled."
+ru: "Отменено."
+
+en: "That key can't be assigned."
+ru: "Эту клавишу нельзя назначить."
+
+en: "Scanner, next"
+ru: "Сканер, следующий"
+
+en: "Scanner, previous"
+ru: "Сканер, предыдущий"
+
+en: "Use the selected object"
+ru: "Использовать выбранный объект"
+
+en: "Crosshair on the selected object"
+ru: "Прицел на выбранный объект"
+
+en: "Turn to the selected object"
+ru: "Повернуться к выбранному объекту"
+
+en: "Auto-walk to the target"
+ru: "Автоходьба к цели"
+
+en: "Guide beacon to the target"
+ru: "Звуковой маяк к цели"
+
+en: "Guide beacon to the quest"
+ru: "Звуковой маяк к заданию"
+
+en: "Direction to the quest target"
+ru: "Направление к цели задания"
+
+en: "What is nearby"
+ru: "Что рядом"
+
+en: "Enemies nearby"
+ru: "Враги рядом"
+
+en: "Turn to the nearest enemy"
+ru: "Повернуться к ближайшему врагу"
+
+en: "What is under the crosshair"
+ru: "Что под прицелом"
+
+en: "Where am I"
+ru: "Где я"
+
+en: "Compass"
+ru: "Компас"
+
+en: "Your status"
+ru: "Состояние персонажа"
+
+en: "Sonar"
+ru: "Сонар"
+
+en: "What is left to search"
+ru: "Что осталось обыскать"
+
+en: "Lead to the next thing"
+ru: "Вести к следующему"
+
+en: "Go to the find"
+ru: "Идти к находке"
+
+en: "Item details"
+ru: "Описание предмета"
+
+en: "Drop the item"
+ru: "Выбросить предмет"
+
+en: "Repeat the last message"
+ru: "Повторить последнее сообщение"
+
+en: "Silence speech"
+ru: "Прервать речь"
+
+en: "Repeat the audio description"
+ru: "Повторить тифлокомментарий"
+
+en: "Film audio description"
+ru: "Тифлокомментарий роликов"
+
+en: "Skip a quest stage"
+ru: "Пропустить этап задания"
+
+en: "Bug report dump"
+ru: "Дамп для отчёта об ошибке"
+
+en: "Mod on or off"
+ru: "Включить или выключить мод"
+
+en: "Controls remapping"
+ru: "Переназначение клавиш"
+
+en: "Controls remapping. F2 on a row changes its key or shortcut, for example Shift plus Home. Backspace goes back."
+ru: "Переназначение клавиш. F2 на строке меняет её клавишу или сочетание, например Shift плюс Home. Backspace — назад."
+
+en: "Note: the key "
+ru: "Внимание: клавиша "
+
+en: " also has: "
+ru: " также назначена на: "
+
+en: ". This shortcut comes first."
+ru: ". Это сочетание имеет приоритет."
+
+en: "Careful: the target is behind a locked door, and that door is the only way out. "
+ru: "Внимание: цель за запертой дверью, и выйти оттуда можно только через неё. "
+
+en: " again teleports anyway."
+ru: " ещё раз — телепорт всё равно."
+
+en: " stops."
+ru: " — остановить."
+
+en: "Note: "
+ru: "Внимание: "
+
+en: ". Both work until you give that one another key."
+ru: ". Работают обе, пока вы не назначите той другую клавишу."
+
+en: "Scanner, next category"
+ru: "Сканер, следующая категория"
+
+en: "Scanner, previous category"
+ru: "Сканер, предыдущая категория"
+
+en: "Track the target"
+ru: "Следить за целью"
+
+en: "Teleport to the selected object"
+ru: "Телепорт к выбранному объекту"
+
+en: "Level and experience"
+ru: "Уровень и опыт"
+
+en: "Exploration mode on or off"
+ru: "Режим исследования: включить или выключить"
+
+en: "Audio description on or off"
+ru: "Тифлокомментарий: включить или выключить"
+
+en: "Dropping down."
+ru: "Прыжок вниз."
+
+en: ", series: you have %d of %d"
+ru: ", серия: у вас %d из %d"
+
+en: ", the way goes through the door to: "
+ru: ", путь через дверь в: "
+
+en: ". That is far from here - walk there first."
+ru: ". Это далеко отсюда - сначала дойдите туда."
+
+en: "Series notes in quest objects"
+ru: "Записи из серий в объектах заданий"
+
+en: "You are dead."
+ru: "Вы погибли."
+
+en: "Stopped: a movement key."
+ru: "Остановлено: клавиша движения."
+
+en: "You are losing health. Walk stopped."
+ru: "Вы теряете здоровье. Ходьба остановлена."

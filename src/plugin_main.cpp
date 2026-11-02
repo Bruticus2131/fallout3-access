@@ -33,6 +33,7 @@
 #include "f3a/roadnet.h"
 #include "f3a/worlddoors.h"
 #include "f3a/questobjs.h"
+#include "f3a/noteseries.h"
 #include "f3a/itemvalue.h"
 
 namespace tolk = f3a::tolk;
@@ -250,6 +251,7 @@ void OnGameLoaded()
     f3a::roadnet::Resolve();
     f3a::worlddoors::Resolve();
     f3a::questobjs::Resolve();
+    f3a::noteseries::Resolve();
     f3a::itemvalue::Resolve();
 }
 

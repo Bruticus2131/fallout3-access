@@ -96,6 +96,10 @@ struct WorldEntity {
     // door, -1 = couldn't tell. Open state: 1 = open, 0 = closed, -1 = unknown.
     int         load_door  = -1;
     int         open_state = -1;
+    // A thing known from the game data only, not loaded (a note of a series
+    // lying far off): the place it is in (interior cell or worldspace form
+    // id) - refr is null then. 0 = a loaded thing, ask its refr.
+    uint32_t    space      = 0;
 };
 
 // A fixture rather than something to pick up: activators (buttons, switches),
@@ -120,9 +124,17 @@ int KilledByPlayer(const void* actor);
 
 // Bodies the player has searched this session: their inventory opened (E or
 // End) or something taken from them through the loot overlay. Any thread.
+// Kept through doors; cleared when a game is loaded or started.
 void NoteSearched(uint32_t refid);
 bool WasSearched(uint32_t refid);
 void ClearSearched();
+// Main thread, every few hundred ms in play: the body under the crosshair,
+// when the player stands at it - fewer items on it than last time it was
+// looked at is something taken, however (the loot overlay, the container
+// screen, take all), so it is searched. A take the key watch missed is
+// caught here (2026-11-02: Jonas, a stimpak and a holotape taken, never
+// called searched).
+void WatchCrosshairBody();
 
 // Map markers (places) within `radius` of the player in this worldspace —
 // they live in the worldspace's persistent cell, not the loaded ones, so the
@@ -139,6 +151,8 @@ struct HostileRef { const void* refr = nullptr; uint32_t id = 0; std::string nam
 std::vector<HostileRef> GetHostileRefs();
 // Is this actor dead: 1, alive: 0, can't tell: -1. MAIN THREAD (virtual calls).
 int RefDeadState(const void* refr);
+// The same for the player. MAIN THREAD.
+int PlayerDeadState();
 bool IsKnownHostile(uint32_t refid);
 // Dead actors near the player, from the same main-thread pass (the game's
 // own GetDead test). False when not known to be dead.
@@ -253,6 +267,13 @@ std::vector<std::string> CompletedQuestNames();
 // target of on the list and not done. Named after the thing and the quest.
 // Seats an actor is sitting at are left out. Nearest first. Plain data reads.
 std::vector<WorldEntity> GetQuestObjects(int radius, int max_results);
+
+// The notes and holotapes the player has (PlayerCharacter+0x570, the list the
+// game's GetHasNote walks, 0x00774630): their form ids. Plain reads.
+std::vector<uint32_t> PlayerNoteIds();
+// A note's own name (DataHandler's note list, +0x12C), UTF-8; empty when the
+// note is not loaded. Plain reads.
+std::string NoteName(uint32_t noteId);
 
 // ---- Bearings ----
 
@@ -669,6 +690,24 @@ bool CurrentMovie(std::string* name, double* seconds, uint32_t* seq);
 // Queue an activation from any thread; it runs on the main thread next message
 // dispatch. expectedRefID guards against a stale pointer.
 void QueueActivate(const void* refr, uint32_t expectedRefID);
+// Milliseconds since the mod last queued an activation (End, a walk's use on
+// arrival); very large when it never has. A menu that opens straight after
+// was opened by the mod, not by the player's E on what the crosshair holds.
+uint32_t MsSinceQueuedActivate();
+// How far up and down a reference reaches in the world (its bounds, scaled
+// and turned by its tilt). False when its base form has no bounds. Plain
+// data reads: safe from any thread.
+bool RefVerticalSpan(const void* refr, float* zmin, float* zmax);
+// Where a thing's model is: its origin plus its base form's bounds centre,
+// turned and scaled as the reference is (height untilted), and half its
+// larger width. A model can sit well off its origin: the Overseer's
+// terminal in Vault 101 is 290 units from it, so a walk to the origin
+// "arrived" in front of the desk with the terminal across it (2026-11-01).
+// False for a person (their bounds are not their body) or no bounds.
+bool RefModelCenter(const void* refr, Vec3* out, float* halfWidth);
+// Distance from `from` to the thing itself (a sphere round its bounds, the
+// radius capped at 400) rather than to its origin; 0 inside it, -1 unknown.
+float RefSurfaceDistance(const void* refr, const Vec3& from);
 
 // A door's open state as the game's own GetOpenState reads it: 1 = open,
 // 0 = closed, -1 = unknown (bad/stale pointer). Memory reads only — safe from
@@ -1001,6 +1040,21 @@ struct MenuSelection {
 };
 std::optional<MenuSelection> GetKeyboardSelection();
 
+// The Pip-Boy's Items page, read from the InventoryMenu object itself (FO3
+// 1.7.0.3; HandleClick 0x00654750 stores the clicked tab's id - 15 at +0x60,
+// the item list is the ListBox at +0x94, its rows carry id 20). Instead of
+// guessing the category from which tab button looks dimmed - a fading tab
+// passed for the active one and "Chemia, Ubiór" was said for one press - and
+// the row from where a highlight box sits. False when the page is not up or
+// the build differs.
+struct InventoryView {
+    int         filter = -1;     // 0 weapons, 1 apparel, 2 aid, 3 misc, 4 ammo
+    std::string category;        // that tab's own label, in the game's language
+    const void* row = nullptr;   // the selected row's tile; null = none selected
+    std::string text;            // the row as said ("Pistolet 10 mm, założone")
+};
+bool GetInventoryView(InventoryView* out);
+
 // The two halves of a container menu, read straight from their tiles.
 //
 // A container screen is two lists side by side — CM_Container_InventoryList
@@ -1026,6 +1080,16 @@ int ContainerFocusSide();
 // out_side: 1 = the container's column, 0 = yours. nullopt when it can't be
 // read (the caller falls back to the highlight scan). Memory reads only.
 std::optional<MenuSelection> GetContainerSelection(int* out_side = nullptr);
+// GetContainerSelection remembers the last row read in each column - the row
+// a column the game left with none gets when the focus comes back to it (see
+// ArmColumn in game_access.cpp). Forgotten when a container or barter opens.
+void ForgetColumnRows();
+// Whose things the container screen shows: the reference it was opened on
+// (ContainerMenu+0x60) - a box, a body, a companion - and whether that is an
+// actor; `mode` the game's open mode (+0x6C); `name` its name. 0 when no
+// container screen or it cannot be read. Memory reads only.
+uint32_t ContainerMenuOwner(bool* is_actor = nullptr, int* mode = nullptr,
+                            std::string* name = nullptr);
 
 // Move the selection in one container column by `delta` rows through the
 // menu's own select routine (taking the focus back to that column first if
@@ -1058,6 +1122,9 @@ bool ClickRestoreDefaults();
 // Is a settings page (gameplay, display, audio, controls) of the main/pause
 // menu showing? Told by its "Restore Defaults" button. MAIN THREAD.
 bool SettingsPageOpen();
+// The game's own control (its index in the bind table) on this keyboard
+// scancode, or -1: a mod key there would do both things at once.
+int GameControlOnKey(uint8_t dik);
 
 // ---- Pip-Boy ----
 
@@ -1193,6 +1260,14 @@ int MapMenuTab();
 // quest (the game tracks only running ones), -2 when the click changed
 // nothing. MAIN THREAD.
 int TrackSelectedQuest();
+// The same for the quest of this name (the quest row's label, as read when
+// Enter was pressed), whatever row is highlighted now - unless the game
+// already tracks it: Enter on the row is the game's too, and the game tracks
+// it itself, then rebuilds the list with the highlight on the FIRST row. A
+// click on the highlighted row after that tracked the first quest again
+// ("Więzy krwi" could not be tracked, 2026-11-01). Empty name = the
+// highlighted row. Returns as TrackSelectedQuest. MAIN THREAD.
+int TrackQuestNamed(const std::string& name);
 // The Data page's notes: open (a note) or play (a holotape) the highlighted
 // one, as a click does (id 0x14). MAIN THREAD.
 bool OpenSelectedNote();

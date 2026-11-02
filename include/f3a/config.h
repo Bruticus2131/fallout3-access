@@ -64,6 +64,15 @@ struct Hotkeys {
     uint32_t lock_enemy       = 0x14;
     uint32_t aim_up           = 0xC8; // Up arrow   — raise the aim point
     uint32_t aim_down         = 0xD0; // Down arrow — lower the aim point
+    // What used to be Shift or Alt with another key's action, now keys of
+    // their own (a shortcut: the scancode, 0x100 Shift, 0x200 Ctrl, 0x400 Alt).
+    uint32_t track_target     = 0x1C7; // Shift+Home — keep the view on the target as it moves
+    uint32_t teleport         = 0x4C7; // Alt+Home — teleport beside the selected object
+    uint32_t scan_cat_next    = 0x1D1; // Shift+Page Down — next scanner category
+    uint32_t scan_cat_prev    = 0x1C9; // Shift+Page Up — previous scanner category
+    uint32_t level_status     = 0x123; // Shift+H — level and experience
+    uint32_t explore_toggle   = 0x118; // Shift+O — exploration announcements on/off
+    uint32_t audio_desc_toggle = 0x141; // Shift+F7 — audio description on/off
 };
 
 struct Settings {
@@ -150,6 +159,9 @@ struct Settings {
     int    nearby_scan_max_items = 8;
     // Leave containers with nothing in them out of the object scanner.
     bool   hide_empty_containers = true;
+    // The notes still to find of a series the player has started (the Keller
+    // transcripts...) listed with the quest objects, wherever they lie.
+    bool   note_series = true;
     bool   explore_mode   = true;   // finds announced on the way during auto-walk
     int    explore_radius = 900;    // ...this near the player
     bool   audio_desc     = true;   // describe scenes and people
@@ -253,6 +265,8 @@ const Settings& Get();
 // comment after it kept - so it holds after a restart.
 Settings& Mutable();
 bool WriteIniInt(const char* section, const char* key, int value);
+// A key (a DirectInput scancode) written the way the INI holds keys: "0x1E".
+bool WriteIniKey(const char* section, const char* key, uint32_t dik);
 
 // For runtime tweaks (toggle_mod hotkey).
 void SetEnabled(bool enabled);

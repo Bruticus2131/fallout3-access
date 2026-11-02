@@ -1,4 +1,5 @@
 #include "f3a/polling_loop.h"
+#include "f3a/settings_menu.h"
 #include "f3a/player_mover.h"
 #include "f3a/fose_runtime.h"
 #include "f3a/engine_hooks.h"
@@ -990,6 +991,13 @@ int   g_pov_pending = -1;                  // poll-side candidate awaiting stabi
 DWORD g_pov_since    = 0;                   // tick (ms) the candidate first appeared
 constexpr DWORD kPovSettleMs = 350;         // > the ~100-150 ms zoom blip
 
+// The player is dead (PollPlayerLife, main thread): the walk stops, and the
+// death camera's switch to third person is not announced.
+std::atomic<bool> g_player_dead{ false };
+// When the player last lost health (PollPlayerLife), 0 never: a walk on
+// which it happens stops (autowalk).
+std::atomic<DWORD> g_player_hurt_at{ 0 };
+
 void AnnouncePov(int cur)
 {
     g_pov_announced.store(cur);
@@ -1005,7 +1013,7 @@ void PollViewChange()
     // announced value so a real change across a menu still corrects on return.
     menu::Id m = menu::ActiveMenu();
     bool hud = (m == menu::Id::None || m == menu::Id::HUDMain);
-    if (!IsGameplayActive() || g_postload_cooldown > 0 || !hud) {
+    if (!IsGameplayActive() || g_postload_cooldown > 0 || !hud || g_player_dead.load()) {
         g_pov_pending = -1;
         return;
     }
@@ -1562,6 +1570,7 @@ std::atomic<bool>  g_hack_skip_pending{ false };
 std::atomic<int>   g_lockpick_nudge{ 0 };
 // Track the quest highlighted in the Pip-Boy (clicks its row; main thread only).
 std::atomic<bool> g_track_quest_pending{ false };
+std::string       g_track_quest_name;     // under g_hack_mx
 std::atomic<bool> g_open_note_pending{ false };
 // Press whatever row the keyboard highlight is on, in any menu. The game's
 // controls page only enters its "press a new key" mode on a MOUSE CLICK, so
@@ -1702,6 +1711,60 @@ void PollXpChange()
     if (g_xp_gain.fetch_add(gain) == 0) g_xp_gain_at.store(now);
 }
 
+// The player's own life - nothing in the game says it aloud. A friend
+// walking to Minefield died on the way (log 2026-11-02): the camera went to
+// third person ("Third person" was all that was said), the walk kept "going
+// round" what it could not move past, and the game loaded the last save -
+// to all appearances a teleport back to Megaton. Death is said once and the
+// walk stops (autowalk reads PlayerDead); low health is said once as it
+// falls under a third, and again only after it has come back above a half.
+// Main thread (actor values and the dead state are virtual calls).
+void PollPlayerLife()
+{
+    static DWORD s_at  = 0;
+    static bool  s_low = false;
+    static float s_hp  = -1.0f;      // health at the last look, -1 none
+    if (g_postload_cooldown > 0) {
+        g_player_dead.store(false); s_low = false; s_hp = -1.0f;
+        g_player_hurt_at.store(0);
+        return;
+    }
+    if (!IsGameplayActive() && !menu::IsOpen(menu::Id::VATS)) return;   // kept through menus
+    const DWORD now = GetTickCount();
+    if (now - s_at < 250) return;
+    s_at = now;
+    const int   dead = game::PlayerDeadState();
+    const float hp   = game::GetPlayerAV(16);       // health
+    const float max  = game::GetPlayerAVMax(16);
+    if (dead == 1) {
+        s_hp = -1.0f;
+        if (!g_player_dead.exchange(true)) {
+            F3A_INFO("Player: dead (health %.0f of %.0f)", hp, max);
+            tolk::Speak(strings::T("Nie żyjesz.", "You are dead."), tolk::Priority::System, true);
+        }
+        return;
+    }
+    if (dead == 0 && g_player_dead.exchange(false)) {
+        s_low = false;
+        F3A_INFO("Player: alive again");
+    }
+    if (!(hp >= 0.0f) || !(max > 0.0f)) return;
+    // A real loss, not the rounding of a regenerating value.
+    if (s_hp >= 0.0f && hp < s_hp - 1.0f) {
+        g_player_hurt_at.store(now | 1u);
+        F3A_INFO("Player: hurt, health %.0f -> %.0f of %.0f", s_hp, hp, max);
+    }
+    s_hp = hp;
+    const float f = hp / max;
+    if (!s_low && f < 0.34f) {
+        s_low = true;
+        F3A_INFO("Player: low health, %.0f of %.0f", hp, max);
+        tolk::Speak(strings::Render(strings::Key::LowHealth), tolk::Priority::System, false);
+    } else if (s_low && f > 0.5f) {
+        s_low = false;
+    }
+}
+
 // Hits and kills, for every enemy around - not only the one the aim is on,
 // and in VATS too. Fallout 3 has no hit event to hook, so the evidence is the
 // enemies' own health, read on this thread (a virtual call per actor) every
@@ -1824,6 +1887,7 @@ void MainThreadWork()
         if ((IsGameplayActive() || menu::IsOpen(menu::Id::VATS)) && now - s_hostile_at >= 300) {
             s_hostile_at = now;
             game::RefreshHostiles();
+            game::WatchCrosshairBody();     // uses the dead list just made
         }
     }
     if (config::IsEnabled()) TrackHostileHealth();
@@ -1852,6 +1916,7 @@ void MainThreadWork()
     if (config::IsEnabled()) {       // F12 off = no unasked-for speech
         PollSpecialChange();
         PollXpChange();
+        PollPlayerLife();
         PollViewChange();
     }
     TickNativeAim();
@@ -1901,7 +1966,7 @@ void MainThreadWork()
     }
     AnnounceStatus();
     AnnounceLevel();
-    if (g_menuback_pending.exchange(false)) game::ClickMenuBack();
+    if (g_menuback_pending.exchange(false) && !settings_menu::BackFromKeys()) game::ClickMenuBack();
     if (g_restore_pending.exchange(false)) {
         // Silent unless it actually did something. R is the reload key during
         // play, so a spoken "open the controls page first" fired on every
@@ -2016,8 +2081,11 @@ void MainThreadWork()
         // Settings pages only. The key is F2 — a Pip-Boy page key of the
         // game's own — so anywhere else it is the game's: in the Pip-Boy a
         // "click the selected row" would use or equip whatever is selected.
-        if (!game::SettingsPageOpen()) {
-            F3A_DEBUG("PressRow: not on a settings page - left to the game.");
+        // On one of the mod's own key rows (Accessibility) the next key
+        // pressed becomes its key.
+        if (settings_menu::StartKeyCapture()) {
+        } else if (!game::SettingsPageOpen()) {
+            F3A_INFO("PressRow: not on a settings page - left to the game.");
         } else if (game::ClickSelectedRowIn(nullptr)) {
             tolk::Speak(strings::T("Naciśnij nowy klawisz.", "Press the new key."), tolk::Priority::System, true);
         } else {
@@ -2025,9 +2093,18 @@ void MainThreadWork()
         }
     }
     if (g_track_quest_pending.exchange(false)) {
-        switch (game::TrackSelectedQuest()) {
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lk(g_hack_mx);
+            name = g_track_quest_name;
+        }
+        switch (game::TrackQuestNamed(name)) {
         case 1:
-            tolk::Speak(strings::T("Śledzę to zadanie.", "Tracking this quest."), tolk::Priority::Ui, true);
+            // By name: the highlight has gone back to the first row by now.
+            if (name.empty())
+                tolk::Speak(strings::T("Śledzę to zadanie.", "Tracking this quest."), tolk::Priority::Ui, true);
+            else
+                tolk::Speak(strings::T("Śledzę: ", "Tracking: ") + name + ".", tolk::Priority::Ui, true);
             break;
         case -1:
             tolk::Speak(strings::T("To zadanie jest ukończone, nie można go śledzić.",
@@ -2123,11 +2200,11 @@ void MainThreadWork()
         int r = game::StepContainerSelection(side, (v & 1) ? +1 : -1);
         // At either end the selection does not move, so nothing new would be
         // read: say the row again, which is the answer a list gives there.
-        if (r == 2) {
+        if (r == 2 && !(v & 4)) {
             if (auto s = game::GetContainerSelection())
                 tolk::Speak(s->value.empty() ? s->label : s->label + ", " + s->value,
                             tolk::Priority::Ui, true);
-        } else if (r == 0) {
+        } else if (r == 0 && !(v & 4)) {
             tolk::Speak(side ? strings::T("Pojemnik jest pusty.", "The container is empty.")
                             : strings::T("Nie masz nic przy sobie.", "You are carrying nothing."),
                         tolk::Priority::Ui, true);
@@ -2386,6 +2463,10 @@ void Tick(float dt)
                 mover::OnGameLoaded();
                 modules::audiodesc::OnLoadingClosed(gameLoad);
                 if (gameLoad) modules::explore::ResetSession();
+                // Searched bodies stay so through doors (they were forgotten
+                // at every loading screen, a door's too); a loaded save may
+                // have them full again.
+                if (gameLoad) game::ClearSearched();
                 g_pov_announced.store(-1);
                 // A held or calibration aim must not carry into the loaded
                 // save (F9 is the game's quickload), nor the old save's map
@@ -2460,6 +2541,7 @@ void Tick(float dt)
         modules::sonar::Tick(dt);      // speaks the sweep's summary when it ends
         modules::explore::Tick(dt);    // finds on the way during auto-walk
         modules::audiodesc::Tick(dt);  // descriptions of scenes and people
+        settings_menu::Tick();          // a mod key being chosen in Settings
         PollQuestChange();
         // NOTE: SPECIAL/status read game functions (GetActorValue) and so MUST
         // run on the main thread — see MainThreadWork(), invoked by the
@@ -2574,9 +2656,9 @@ void RequestContainerFilter(bool container_side, bool next)
     g_container_filter.store(1 + (container_side ? 2 : 0) + (next ? 1 : 0));
 }
 
-void RequestContainerStep(bool container_side, int delta)
+void RequestContainerStep(bool container_side, int delta, bool repeat)
 {
-    g_container_step.store(1 + (container_side ? 2 : 0) + (delta > 0 ? 1 : 0));
+    g_container_step.store(1 + (container_side ? 2 : 0) + (delta > 0 ? 1 : 0) + (repeat ? 4 : 0));
 }
 
 void RequestContainerSide(bool container_side, bool quiet)
@@ -2689,7 +2771,14 @@ bool QuantityState(int* amount, int* maximum)
     return true;
 }
 
-void RequestTrackQuest() { g_track_quest_pending.store(true); }
+void RequestTrackQuest(const std::string& name)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_hack_mx);
+        g_track_quest_name = name;
+    }
+    g_track_quest_pending.store(true);
+}
 void RequestOpenNote()   { g_open_note_pending.store(true); }
 
 void RequestPressRow() { g_press_row_pending.store(true); }
@@ -3915,6 +4004,8 @@ void DumpTileRec(Tile* t, int depth)
 } // namespace
 
 bool IsGameplayActive() { return g_in_gameplay && !g_in_main_menu; }
+bool PlayerDead() { return g_player_dead.load(); }
+DWORD PlayerHurtAt() { return g_player_hurt_at.load(); }
 bool MenuModeActive()   { return g_menu_mode.load(); }
 bool IsInMainMenu()     { return g_in_main_menu; }
 

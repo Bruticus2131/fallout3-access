@@ -137,7 +137,9 @@ void SpeakEntry(const game::LootMenuInfo& v, bool interrupt = true)
     std::string pos = strings::RenderArgs(strings::Key::LootPositionFmt, at, of);
     std::string say = strings::RenderArgs(strings::Key::LootItemFmt, v.item,
                                           pos.c_str());
-    if (v.equipped) say += ", " + strings::Render(strings::Key::LootEquipped);
+    // No "equipped": this list is always someone else's - what a body still
+    // wears - and the word was heard as the item being on the player, as in
+    // the container's column (2026-10-31).
     tolk::Speak(say, tolk::Priority::Ui, interrupt);
 }
 

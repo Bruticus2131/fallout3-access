@@ -8,6 +8,7 @@
 #include "f3a/hotkeys.h"
 #include "f3a/config.h"
 #include "f3a/polling_loop.h"
+#include "f3a/engine_hooks.h"
 
 #include <mutex>
 #include <windows.h>
@@ -60,7 +61,7 @@ bool InColumnMenu()
 bool InBarter() { return menu::ActiveMenu() == menu::Id::Barter; }
 
 int         SideOf(const void* box);     // defined below
-const char* SideLabel(bool container);   // defined below
+std::string SideLabel(bool container);   // defined below
 std::string CountSuffix(int rows);       // defined below
 void        PollFilterKeys();            // defined below
 void        AnnounceFilter();            // defined below
@@ -192,9 +193,15 @@ int SideOf(const void* box)
 
 // The spoken name of a side. Only ever spoken, never compared: the logic
 // works on the side itself (SideOf / bool), not on this text.
-const char* SideLabel(bool container)
+// A living person's things - a companion's (the game opens the same screen
+// for "let's trade equipment") or a pocket: their column is called by their
+// name, not "Container". Set when the screen opens.
+std::string g_person;
+
+std::string SideLabel(bool container)
 {
     if (container && InBarter()) return strings::T("Handlarz", "Vendor");
+    if (container && !g_person.empty()) return g_person;
     return container ? strings::T("Pojemnik", "Container")
                      : strings::T("Twoje przedmioty", "Your items");
 }
@@ -234,6 +241,28 @@ std::string CountSuffix(int rows)
 // container's — the order they sit on screen. The menu itself has that
 // switch (its Shift+Left/Right handler, see game::SwitchContainerSide); we run
 // it on the game's thread, so it works whether or not the keyboard reaches it.
+// A held Up or Down: +1 / -1 each time it should step again (after ~0.45 s,
+// then every ~0.11 s, as the game's own repeat), 0 otherwise. `edge` = the
+// press itself, which the caller steps.
+int   g_hold_dir  = 0;
+DWORD g_hold_next = 0;
+int HeldRepeat(bool up, bool down, bool edge)
+{
+    const int dir = (down && !up) ? +1 : (up && !down) ? -1 : 0;
+    const DWORD now = GetTickCount();
+    if (dir == 0) { g_hold_dir = 0; return 0; }
+    if (edge || dir != g_hold_dir) { g_hold_dir = dir; g_hold_next = now + 450; return 0; }
+    if ((LONG)(now - g_hold_next) >= 0) { g_hold_next = now + 110; return dir; }
+    return 0;
+}
+
+// The game's own Up/Down in the container screen are taken from it while the
+// mod is on - the mod moves the row (PollFilterKeys). Game thread.
+bool TakeUpDown(unsigned int code)
+{
+    return (code == 1 || code == 2) && config::IsEnabled();
+}
+
 void PollFilterKeys()
 {
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -259,8 +288,22 @@ void PollFilterKeys()
     bool stepD = down && !g_kDown;
     g_kUp   = up;
     g_kDown = down;
+    const int held = HeldRepeat(up, down, stepU || stepD);
     if (!InColumnMenu()) return;
 
+    // The container screen: Up/Down in BOTH columns are the mod's, and the
+    // game's own are taken from it (engine_hooks): they moved whichever list
+    // last had a row selected - after a trip to the other column and back,
+    // the other column or none, so Up and Down went dead in yours (log
+    // 2026-11-02, Clover). A held key repeats.
+    if (!InBarter() && engine::ContainerKeySlotHook()) {
+        if (stepU || stepD || held) {
+            const int dir = (stepD || held > 0) ? +1 : -1;
+            poll::RequestContainerStep(g_want_container, dir, held != 0 && !stepU && !stepD);
+            g_restore_wait = 3;   // the step takes the focus back itself
+            return;
+        }
+    }
     // Up/Down in the CONTAINER's column are done by us — the game's own only
     // ever move your column. In your column the game's own keys work.
     if ((stepU || stepD) && g_want_container) {
@@ -349,9 +392,42 @@ void AnnounceContents()
     if (InBarter()) return;        // the barter module says who and what
     std::string say = theirs.title.empty() ? std::string(SideLabel(true)) : theirs.title;
     say += CountSuffix(theirs.rows);
-    F3A_INFO("Container: '%s' rows=%d | yours '%s' rows=%d",
-             theirs.title.c_str(), theirs.rows, mine.title.c_str(), mine.rows);
+    bool actor = false;
+    int mode = -1;
+    const uint32_t owner = game::ContainerMenuOwner(&actor, &mode);
+    F3A_INFO("Container: '%s' rows=%d | yours '%s' rows=%d | ref %08X%s mode %d",
+             theirs.title.c_str(), theirs.rows, mine.title.c_str(), mine.rows,
+             owner, actor ? " (actor)" : "", mode);
     tolk::Speak(say, tolk::Priority::Ui, true);
+}
+
+// A body opened with E: searched (the scanner says so). Whose screen it is
+// comes from the screen itself (ContainerMenuOwner). Only when that cannot be
+// read, the crosshair's body - and then only when this screen really is that
+// body's: the crosshair reference stays set to the last thing looked at, so a
+// locker opened with End while the view rested on a corpse marked the corpse,
+// and the scanner then called a body nobody had touched "przeszukane"
+// (2026-10-31). So: not when the mod itself just activated something (End
+// marks what it opens), and only when the screen's title is that body's name.
+void NoteBodyOpened()
+{
+    if (InBarter()) return;
+    bool actor = false;
+    if (const uint32_t owner = game::ContainerMenuOwner(&actor)) {
+        if (actor && game::IsKnownDead(owner)) game::NoteSearched(owner);
+        return;
+    }
+    if (game::MsSinceQueuedActivate() < 3000) return;
+    uint32_t id = 0;
+    const std::string who = game::GetCrosshairRefName(&id, nullptr, nullptr);
+    if (!id || id != game::GetCrosshairActorID() || !game::IsKnownDead(id)) return;
+    game::ContainerSide mine{}, theirs{};
+    if (!game::GetContainerSides(&mine, &theirs) || theirs.title != who) {
+        F3A_INFO("Container: '%s' opened, the crosshair's body is '%s' - not marked searched",
+                 theirs.title.c_str(), who.c_str());
+        return;
+    }
+    game::NoteSearched(id);
 }
 
 // The toggle key ([ by default): jump to the other list. Same switch as
@@ -368,7 +444,22 @@ void SwitchSide()
     g_side_wait   = 6;
 }
 
-void OnOpen()  { g_last.clear(); g_last_box = nullptr; g_on_container = false;
+// Whose screen this is, when it is a living person's: the reference the
+// screen was opened on is an actor, alive. (The crosshair was tried first and
+// did not name the companion after the talk: "Container: Klucz", 2026-11-02.)
+void NotePerson()
+{
+    g_person.clear();
+    if (InBarter()) return;
+    bool actor = false;
+    std::string who;
+    const uint32_t id = game::ContainerMenuOwner(&actor, nullptr, &who);
+    if (id && actor && !game::IsKnownDead(id)) g_person = who;
+}
+
+void OnOpen()  { game::ForgetColumnRows();
+                 NotePerson();
+                 g_last.clear(); g_last_box = nullptr; g_on_container = false;
                  g_filter_say = 0; g_filter_queue = false; g_side_wait = 0;
                  g_want_container = false; g_restore_wait = 0; g_restore_tries = 0;
                  g_kUp   = (GetAsyncKeyState(VK_UP)   & 0x8000) != 0;
@@ -385,10 +476,7 @@ void OnOpen()  { g_last.clear(); g_last_box = nullptr; g_on_container = false;
                      g_want_container = game::ContainerFocusSide() == 1;
                      g_on_container = g_want_container;
                  }
-                 // A body opened with E: searched (the scanner says so).
-                 if (!InBarter())
-                     if (uint32_t id = game::GetCrosshairActorID(); id && game::IsKnownDead(id))
-                         game::NoteSearched(id);
+                 NoteBodyOpened();
                  AnnounceContents(); OnTick(0); }
 void OnClose() { if (InBarter()) barter::Close();
                  g_last.clear(); g_last_box = nullptr;
@@ -399,6 +487,7 @@ void OnClose() { if (InBarter()) barter::Close();
 void Init()
 {
     hotkeys::Bind(config::Get().hotkeys.container_side, &SwitchSide);
+    engine::SetContainerKeyFilter(&TakeUpDown);
     menu::RegisterMenu(menu::Id::Container, &OnOpen, &OnClose, &OnTick);
     // Barter's columns, keys and rows; barter.cpp adds the deal and the caps.
     menu::RegisterMenu(menu::Id::Barter, &OnOpen, &OnClose, &OnTick);

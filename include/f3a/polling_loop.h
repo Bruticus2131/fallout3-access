@@ -22,6 +22,10 @@ void DumpActiveMenuTree();
 // and Start menu is not currently up). Used by game-state hotkeys to stay
 // silent in the main menu / loading screens.
 bool IsGameplayActive();
+// The player has died (until the game loads a save or comes back to life).
+bool PlayerDead();
+// When the player last lost health (GetTickCount, never 0 once set), 0 never.
+DWORD PlayerHurtAt();
 
 // True while ANY menu is open — including menus this mod does not handle, which
 // is the point: world hotkeys must stay quiet inside them.
@@ -63,7 +67,8 @@ void RequestContainerFilter(bool container_side, bool next);
 void RequestContainerSide(bool container_side, bool quiet = false);
 
 // Request one Up/Down step in a container column on the main thread.
-void RequestContainerStep(bool container_side, int delta);
+// `repeat`: a held key's repeat - silent at the end of the list.
+void RequestContainerStep(bool container_side, int delta, bool repeat = false);
 
 // Click a VATS limb tile on the main thread (selects it and queues a shot).
 void RequestVatsLimbClick(const void* tile);
@@ -181,8 +186,9 @@ bool VatsState(game::VatsInfo* out);
 // must not read them directly.
 bool LootMenuState(game::LootMenuInfo* out);
 
-// Make the quest highlighted in the Pip-Boy's quest list the tracked one.
-void RequestTrackQuest();
+// Make the quest of this name (or, with none, the one highlighted) in the
+// Pip-Boy's quest list the tracked one.
+void RequestTrackQuest(const std::string& name = {});
 // Open (or play) the note highlighted in the Data page's notes list.
 void RequestOpenNote();
 

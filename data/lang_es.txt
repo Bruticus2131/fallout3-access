@@ -1,0 +1,1937 @@
+# Fallout 3 Access - Spanish texts of the mod (Language = es).
+# Fallout 3 Access - textos del mod en español (Language = es).
+# Pairs of lines: "en:" the English text the mod speaks, "es:" what to say instead.
+# Pares de líneas: "en:" el texto inglés que dice el mod, "es:" lo que se dice en su lugar.
+# Keep %s, %d and the other % codes in the same order; the quotes keep spaces at the ends.
+# Mantén %s, %d y los demás códigos % en el mismo orden; las comillas conservan los espacios de los extremos.
+# A text missing here is spoken in English, and logged as "no translation for".
+# Un texto que no esté aquí se dice en inglés y queda en el registro como "no translation for".
+
+en: "Door"
+es: "Puerta"
+
+en: "Container"
+es: "Contenedor"
+
+en: ", to "
+es: ", hacia "
+
+en: "Door to "
+es: "Puerta hacia "
+
+en: ", empty"
+es: ", vacío"
+
+en: "Quest spot"
+es: "Lugar de misión"
+
+en: "Seat"
+es: "Asiento"
+
+en: "Quest object"
+es: "Objeto de misión"
+
+en: ", free seat"
+es: ", asiento libre"
+
+en: "Target"
+es: "Diana"
+
+en: ", undiscovered"
+es: ", sin descubrir"
+
+en: "Undiscovered place"
+es: "Lugar sin descubrir"
+
+en: " (done)"
+es: " (completado)"
+
+en: "object"
+es: "objeto"
+
+en: "door"
+es: "puerta"
+
+en: "container"
+es: "contenedor"
+
+en: "character"
+es: "personaje"
+
+en: ", price "
+es: ", precio "
+
+en: ", equipped"
+es: ", equipado"
+
+en: ", in the deal"
+es: ", en el trato"
+
+en: ", level %u"
+es: ", nivel %u"
+
+en: ", played %u h %u min"
+es: ", tiempo de juego %u h %u min"
+
+en: ", played %u min"
+es: ", tiempo de juego %u min"
+
+en: ", saved %u.%02u.%u at %u:%02u"
+es: ", guardada el %u.%02u.%u a las %u:%02u"
+
+en: ", already said"
+es: ", ya dicho"
+
+en: ", %d of %d"
+es: ", %d de %d"
+
+en: "Audio"
+es: "Audio"
+
+en: "Image"
+es: "Imagen"
+
+en: "Stats"
+es: "Estadísticas"
+
+en: "Items"
+es: "Objetos"
+
+en: "Data"
+es: "Datos"
+
+en: "%d percent"
+es: "%d por ciento"
+
+en: " crippled"
+es: " lisiado"
+
+en: "rads "
+es: "radiación "
+
+en: "rad resistance "
+es: "resistencia a la radiación "
+
+en: "No effects."
+es: "Sin efectos."
+
+en: "now: "
+es: "ahora: "
+
+en: "after repair: "
+es: "tras reparar: "
+
+en: "gain "
+es: "mejora "
+
+en: "left mouse button"
+es: "botón izquierdo del ratón"
+
+en: "right mouse button"
+es: "botón derecho del ratón"
+
+en: "middle mouse button"
+es: "botón central del ratón"
+
+en: "damage"
+es: "daño"
+
+en: "damage resistance"
+es: "resistencia al daño"
+
+en: "weight"
+es: "peso"
+
+en: "value"
+es: "valor"
+
+en: "condition"
+es: "estado"
+
+en: "ammo"
+es: "munición"
+
+en: "effects"
+es: "efectos"
+
+en: "head"
+es: "cabeza"
+
+en: "torso"
+es: "torso"
+
+en: "left arm"
+es: "brazo izquierdo"
+
+en: "right arm"
+es: "brazo derecho"
+
+en: "left leg"
+es: "pierna izquierda"
+
+en: "right leg"
+es: "pierna derecha"
+
+en: "Skipping quest stages is off. Switch it on in Settings, Accessibility."
+es: "Saltar fases de misión está desactivado. Actívalo en Opciones, Accesibilidad."
+
+en: "Console unavailable."
+es: "Consola no disponible."
+
+en: "Starting the game through the console."
+es: "Iniciando el juego desde la consola."
+
+en: "Message"
+es: "Mensaje"
+
+en: "Inventory"
+es: "Inventario"
+
+en: "Loading"
+es: "Cargando"
+
+en: "Dialogue"
+es: "Diálogo"
+
+en: "Sleep and wait"
+es: "Dormir y esperar"
+
+en: "Main menu"
+es: "Menú principal"
+
+en: "Lockpick"
+es: "Forzar cerradura"
+
+en: "Quantity"
+es: "Cantidad"
+
+en: "Map"
+es: "Mapa"
+
+en: "Note"
+es: "Nota"
+
+en: "Level up"
+es: "Subida de nivel"
+
+en: "Repair"
+es: "Reparar"
+
+en: "Character creation"
+es: "Creación de personaje"
+
+en: "Text edit"
+es: "Edición de texto"
+
+en: "Barter"
+es: "Trueque"
+
+en: "Surgery"
+es: "Cirugía"
+
+en: "Hacking"
+es: "Pirateo"
+
+en: "Repair services"
+es: "Servicio de reparación"
+
+en: "Tutorial"
+es: "Tutorial"
+
+en: "S.P.E.C.I.A.L. book"
+es: "Libro S.P.E.C.I.A.L."
+
+en: "Audio description on."
+es: "Audiodescripción activada."
+
+en: "Audio description off."
+es: "Audiodescripción desactivada."
+
+en: "No description yet."
+es: "Aún no hay descripción."
+
+en: "Film audio description on."
+es: "Audiodescripción de vídeos activada."
+
+en: "Film audio description off."
+es: "Audiodescripción de vídeos desactivada."
+
+en: "%s dies."
+es: "%s muere."
+
+en: "%s passes out."
+es: "%s pierde el conocimiento."
+
+en: "%s comes round."
+es: "%s vuelve en sí."
+
+en: "%s is restrained."
+es: "%s está inmovilizado."
+
+en: "%s lies down to sleep."
+es: "%s se acuesta a dormir."
+
+en: "%s gets out of bed."
+es: "%s se levanta de la cama."
+
+en: "%s sits down."
+es: "%s se sienta."
+
+en: "%s stands up."
+es: "%s se levanta."
+
+en: "%s draws a weapon."
+es: "%s desenfunda un arma."
+
+en: "%s puts the weapon away."
+es: "%s guarda el arma."
+
+en: "%s starts running."
+es: "%s echa a correr."
+
+en: "requires a key"
+es: "requiere llave"
+
+en: "%s, lockpick %d"
+es: "%s, forzar cerraduras %d"
+
+en: " The key: "
+es: " La llave: "
+
+en: " Your Lockpick: %d, bobby pins: %d."
+es: " Tu habilidad de forzar cerraduras: %d, horquillas: %d."
+
+en: " Bobby pins: %d."
+es: " Horquillas: %d."
+
+en: "Auto-walk is not available on this game version. Set NativeWalk to 0 in the INI file to walk with keys."
+es: "La marcha automática no está disponible en esta versión del juego. Pon NativeWalk a 0 en el archivo INI para caminar con teclas."
+
+en: "Going round the locked door: "
+es: "Rodeando la puerta cerrada con llave: "
+
+en: "Recalculating the route."
+es: "Recalculando la ruta."
+
+en: "No direct way. Going round, "
+es: "No hay camino directo. Doy un rodeo, "
+
+en: "the handcart"
+es: "la vagoneta"
+
+en: "the bunk on the boat"
+es: "la litera del barco"
+
+en: "the metro console"
+es: "la consola del metro"
+
+en: "the transport"
+es: "el transporte"
+
+en: "You're at the handcart. Activate it to ride towards: "
+es: "Estás junto a la vagoneta. Actívala para viajar rumbo a: "
+
+en: ". The first ride is with Wernher."
+es: ". El primer viaje es con Wernher."
+
+en: "You're at the bunk on the Duchess Gambit. Activate it to sail towards: "
+es: "Estás junto a la litera del Duchess Gambit. Actívala para navegar rumbo a: "
+
+en: ". The first trip needs a ticket from Tobar."
+es: ". Para el primer viaje necesitas un billete de Tobar."
+
+en: "You're at the metro console. Activate it to ride towards: "
+es: "Estás junto a la consola del metro. Actívala para viajar rumbo a: "
+
+en: "You're at the transport towards: "
+es: "Estás junto al transporte rumbo a: "
+
+en: ". Activate it."
+es: ". Actívalo."
+
+en: "Leading you to "
+es: "Te llevo hasta "
+
+en: " towards: "
+es: " rumbo a: "
+
+en: "Leading you to the entrance: "
+es: "Te llevo a la entrada: "
+
+en: "a doorway"
+es: "un acceso"
+
+en: ", by road."
+es: ", por carretera."
+
+en: "That entrance isn't here. Looking for another."
+es: "Esa entrada no está aquí. Busco otra."
+
+en: "Can't find the entrance: "
+es: "No encuentro la entrada: "
+
+en: "a closed passage"
+es: "un paso cerrado"
+
+en: "The passage is closed. It opens with: "
+es: "El paso está cerrado. Se abre con: "
+
+en: "The way is shut by: "
+es: "Cierra el camino: "
+
+en: ". It opens with: "
+es: ". Se abre con: "
+
+en: " Leading you there."
+es: " Te llevo allí."
+
+en: "A door in the way: "
+es: "Una puerta en el camino: "
+
+en: ". Open it with E and I'll go on."
+es: ". Ábrela con E y seguiré."
+
+en: "Open."
+es: "Abierto."
+
+en: "Open. Walking on to: "
+es: "Abierto. Sigo hacia: "
+
+en: "Crosshair on the door."
+es: "Punto de mira en la puerta."
+
+en: "The door is in front of you."
+es: "La puerta está delante de ti."
+
+en: "Crosshair on: "
+es: "Punto de mira en: "
+
+en: ". Press E."
+es: ". Pulsa E."
+
+en: " is in front of you. Press E."
+es: " está delante de ti. Pulsa E."
+
+en: "It didn't open: "
+es: "No se abrió: "
+
+en: "The door is locked. Looking for another way."
+es: "La puerta está cerrada con llave. Busco otro camino."
+
+en: "Locked door on the way: "
+es: "Puerta cerrada con llave en el camino: "
+
+en: "You have the key. Opening the door."
+es: "Tienes la llave. Abro la puerta."
+
+en: "Opening the door."
+es: "Abro la puerta."
+
+en: "The door didn't open: "
+es: "La puerta no se abrió: "
+
+en: "Terrain in the way — a wall or rock. Going round."
+es: "Terreno en el camino — una pared o una roca. Doy un rodeo."
+
+en: "Enemy in the way: "
+es: "Enemigo en el camino: "
+
+en: "Someone in the way: "
+es: "Alguien en el camino: "
+
+en: ". Going round."
+es: ". Doy un rodeo."
+
+en: "Something in the way by the open door: "
+es: "Algo estorba junto a la puerta abierta: "
+
+en: "Door blocked or locked: "
+es: "Puerta bloqueada o cerrada con llave: "
+
+en: "A container is in the way: "
+es: "Un contenedor en el camino: "
+
+en: "Obstacle: "
+es: "Obstáculo: "
+
+en: "I can't get there on foot. The target is in another part of this location — find a door with the X key and go through it."
+es: "No puedo llegar a pie. El destino está en otra parte de esta ubicación — busca una puerta con la tecla X y crúzala."
+
+en: "I can't get there on foot. Open the world map and use fast travel."
+es: "No puedo llegar a pie. Abre el mapa del mundo y usa el viaje rápido."
+
+en: "Leading you to the door: "
+es: "Te llevo a la puerta: "
+
+en: "Couldn't reach the target. Try on your own."
+es: "No pude llegar al destino. Inténtalo por tu cuenta."
+
+en: "You're in the same location as the target. Walking on."
+es: "Estás en la misma ubicación que el destino. Sigo."
+
+en: "Next door: "
+es: "Siguiente puerta: "
+
+en: "Going through: "
+es: "Cruzando: "
+
+en: "This is as close as I can get: %s."
+es: "Más cerca no puedo llegar: %s."
+
+en: "Entrance: "
+es: "Entrada: "
+
+en: "Target in another location: "
+es: "Destino en otra ubicación: "
+
+en: ". Leading you through the doors."
+es: ". Te llevo a través de las puertas."
+
+en: "Walking to: "
+es: "Caminando hacia: "
+
+en: "Fast travel to: "
+es: "Viaje rápido a: "
+
+en: ", then on foot."
+es: ", luego a pie."
+
+en: "Stopped."
+es: "Detenido."
+
+en: "Quest objective changed."
+es: "Objetivo de misión cambiado."
+
+en: "I can't read the game's walking speed. Walk stopped."
+es: "No puedo leer la velocidad de marcha del juego. Marcha detenida."
+
+en: "Arrived: %s"
+es: "Has llegado: %s"
+
+en: "You're in the target area: %s"
+es: "Estás en la zona del destino: %s"
+
+en: "You're at the target: %s"
+es: "Estás en el destino: %s"
+
+en: "Route found."
+es: "Ruta encontrada."
+
+en: "Target is above — looking for stairs."
+es: "El destino está más arriba — busco escaleras."
+
+en: "Target is below — looking for stairs."
+es: "El destino está más abajo — busco escaleras."
+
+en: "I can't go any further towards: "
+es: "No puedo avanzar más hacia: "
+
+en: "Lost the route, recalculating."
+es: "Ruta perdida, recalculando."
+
+en: "Stuck in the same place several times. I can't see a way to: "
+es: "Me he atascado varias veces en el mismo sitio. No veo camino hacia: "
+
+en: "I'm stuck. Try walking with the guide beacon."
+es: "Estoy atascado. Prueba a caminar con la baliza guía."
+
+en: "You're standing on the photo spot, facing Jonas."
+es: "Estás en el sitio de la foto, mirando a Jonas."
+
+en: "very easy lock"
+es: "cerradura muy fácil"
+
+en: "easy lock"
+es: "cerradura fácil"
+
+en: "average lock"
+es: "cerradura media"
+
+en: "hard lock"
+es: "cerradura difícil"
+
+en: "very hard lock"
+es: "cerradura muy difícil"
+
+en: "You get "
+es: "Recibes "
+
+en: "You pay "
+es: "Pagas "
+
+en: " caps"
+es: " chapas"
+
+en: "Barter: "
+es: "Trueque: "
+
+en: ". Your caps: "
+es: ". Tus chapas: "
+
+en: ", the vendor's: "
+es: ", las del vendedor: "
+
+en: ". Left and right change the category, Shift with an arrow or [ switches sides, Enter adds to the deal."
+es: ". Izquierda y derecha cambian la categoría, Shift con una flecha o [ cambia de lado, Enter añade al trato."
+
+en: "No deal."
+es: "Sin trato."
+
+en: "Your caps: "
+es: "Tus chapas: "
+
+en: "No deal"
+es: "Sin trato"
+
+en: "Vendor"
+es: "Vendedor"
+
+en: "Your items"
+es: "Tus objetos"
+
+en: ", no items"
+es: ", sin objetos"
+
+en: "space"
+es: "espacio"
+
+en: "dot"
+es: "punto"
+
+en: "comma"
+es: "coma"
+
+en: "semicolon"
+es: "punto y coma"
+
+en: "colon"
+es: "dos puntos"
+
+en: "quote"
+es: "comillas"
+
+en: "apostrophe"
+es: "apóstrofo"
+
+en: "left paren"
+es: "abre paréntesis"
+
+en: "right paren"
+es: "cierra paréntesis"
+
+en: "left bracket"
+es: "abre corchete"
+
+en: "right bracket"
+es: "cierra corchete"
+
+en: "left brace"
+es: "abre llave"
+
+en: "right brace"
+es: "cierra llave"
+
+en: "underscore"
+es: "guion bajo"
+
+en: "dash"
+es: "guion"
+
+en: "equals"
+es: "igual"
+
+en: "star"
+es: "asterisco"
+
+en: "slash"
+es: "barra"
+
+en: "backslash"
+es: "barra invertida"
+
+en: "exclamation"
+es: "exclamación"
+
+en: "question"
+es: "interrogación"
+
+en: "hash"
+es: "almohadilla"
+
+en: "percent"
+es: "por ciento"
+
+en: "less"
+es: "menor que"
+
+en: "greater"
+es: "mayor que"
+
+en: "tilde"
+es: "tilde"
+
+en: "grave"
+es: "acento grave"
+
+en: "at"
+es: "arroba"
+
+en: "dollar"
+es: "dólar"
+
+en: "caret"
+es: "circunflejo"
+
+en: "bar"
+es: "barra vertical"
+
+en: "end"
+es: "fin"
+
+en: "blank"
+es: "en blanco"
+
+en: "Console."
+es: "Consola."
+
+en: " Type a command and press Enter. Up and Down: earlier commands, PageUp and PageDown: scroll the output."
+es: " Escribe un comando y pulsa Enter. Arriba y abajo: comandos anteriores, PageUp y PageDown: desplazar la salida."
+
+en: "Console closed."
+es: "Consola cerrada."
+
+en: "Done."
+es: "Hecho."
+
+en: "Lines %d to %d of %d. "
+es: "Líneas %d a %d de %d. "
+
+en: "Top."
+es: "Inicio."
+
+en: "Bottom."
+es: "Final."
+
+en: "Talking to "
+es: "Hablando con "
+
+en: ". D repeats the last line."
+es: ". D repite la última frase."
+
+en: ", body"
+es: ", cadáver"
+
+en: "Exploration mode on."
+es: "Modo exploración activado."
+
+en: "Exploration mode off."
+es: "Modo exploración desactivado."
+
+en: "Nothing new on the way."
+es: "Nada nuevo en el camino."
+
+en: "Then O goes back to the route."
+es: "Luego O vuelve a la ruta."
+
+en: "Area searched."
+es: "Zona registrada."
+
+en: "Around here:"
+es: "Por aquí:"
+
+en: "containers"
+es: "contenedores"
+
+en: "bodies"
+es: "cadáveres"
+
+en: "items"
+es: "objetos"
+
+en: "notes"
+es: "notas"
+
+en: "undiscovered places"
+es: "lugares sin descubrir"
+
+en: " Nearest: "
+es: " Lo más cercano: "
+
+en: "O goes back to the route."
+es: "O vuelve a la ruta."
+
+en: "Remaining: %d."
+es: "Quedan: %d."
+
+en: "On the way: "
+es: "En el camino: "
+
+en: ", and %d more"
+es: ", y %d más"
+
+en: " O leads you to the find."
+es: " O te lleva al hallazgo."
+
+en: "Guiding to: "
+es: "Guiando hacia: "
+
+en: ", route found"
+es: ", ruta encontrada"
+
+en: "Guidance off."
+es: "Guía desactivada."
+
+en: "Quest target changed."
+es: "Objetivo de misión cambiado."
+
+en: "Arrived: "
+es: "Has llegado: "
+
+en: "straight"
+es: "recto"
+
+en: "right"
+es: "a la derecha"
+
+en: "left"
+es: "a la izquierda"
+
+en: "turn around"
+es: "date la vuelta"
+
+en: ", target above"
+es: ", destino más arriba"
+
+en: ", target below"
+es: ", destino más abajo"
+
+en: ", target above — look for stairs"
+es: ", destino más arriba — busca escaleras"
+
+en: ", target below — look for stairs"
+es: ", destino más abajo — busca escaleras"
+
+en: "No progress — something is in the way. Use the scanner to find a way around, for example a door."
+es: "Sin avance — algo bloquea el paso. Usa el escáner para encontrar un rodeo, por ejemplo una puerta."
+
+en: ". The password is "
+es: ". La contraseña es "
+
+en: ". Still possible: "
+es: ". Aún posibles: "
+
+en: "Terminal locked."
+es: "Terminal bloqueado."
+
+en: "Removed: "
+es: "Eliminado: "
+
+en: "Hacking. %s. %d words, %d letters each, bracket pairs: %d. Up and down choose a word, Enter guesses, left and right read the screen."
+es: "Pirateo. %s. %d palabras de %d letras cada una, pares de corchetes: %d. Arriba y abajo eligen palabra, Enter prueba, izquierda y derecha leen la pantalla."
+
+en: " left"
+es: " por usar"
+
+en: "Bracket pair: "
+es: "Par de corchetes: "
+
+en: ", ruled out"
+es: ", descartada"
+
+en: "Brackets: "
+es: "Corchetes: "
+
+en: "Guessing: "
+es: "Pruebo: "
+
+en: "First choose a word with up and down."
+es: "Primero elige una palabra con arriba y abajo."
+
+en: ", chosen"
+es: ", elegido"
+
+en: ", unavailable"
+es: ", no disponible"
+
+en: "Lockpick: left and right arrows move the pin, slowly with Shift. The tone tells how close the right spot is."
+es: "Forzar cerradura: las flechas izquierda y derecha mueven la horquilla, despacio con Shift. El tono indica lo cerca que está el punto correcto."
+
+en: "discovered only"
+es: "solo descubiertas"
+
+en: "undiscovered only"
+es: "solo sin descubrir"
+
+en: "all"
+es: "todas"
+
+en: "No locations on the map."
+es: "No hay ubicaciones en el mapa."
+
+en: "No locations in filter: "
+es: "No hay ubicaciones en el filtro: "
+
+en: "Select a location first."
+es: "Primero elige una ubicación."
+
+en: "I can't see this marker on the world map. Switch to the world map."
+es: "No veo este marcador en el mapa del mundo. Cambia al mapa del mundo."
+
+en: "Undiscovered location — the game won't let you fast travel there. Press Enter again to try."
+es: "Ubicación sin descubrir — el juego no te dejará viajar rápido allí. Pulsa Enter otra vez para intentarlo."
+
+en: "Close the Pip-Boy and pick the destination again."
+es: "Cierra el Pip-Boy y vuelve a elegir el destino."
+
+en: "Map: %d locations. Page Up and Page Down browse, Enter fast travels, Home walks there, End filters."
+es: "Mapa: %d ubicaciones. Page Up y Page Down recorren, Enter viaja rápido, Home camina hasta allí, End filtra."
+
+en: "Fast travel works from the world map."
+es: "El viaje rápido funciona desde el mapa del mundo."
+
+en: "Filter: "
+es: "Filtro: "
+
+en: "Capital Wasteland"
+es: "Yermo Capital"
+
+en: "Quest: "
+es: "Misión: "
+
+en: ", in another place"
+es: ", en otro lugar"
+
+en: "Quest objective with no map marker: "
+es: "Objetivo de misión sin marcador en el mapa: "
+
+en: "The quest objective is in another location — the beacon can't lead you there. Use auto-walk: it goes through the doors on the way."
+es: "El objetivo de misión está en otra ubicación — la baliza no puede llevarte allí. Usa la marcha automática: cruza las puertas del camino."
+
+en: ", tracked"
+es: ", seguida"
+
+en: ", not tracked"
+es: ", no seguida"
+
+en: ", completed"
+es: ", completada"
+
+en: "Sunday"
+es: "domingo"
+
+en: "Monday"
+es: "lunes"
+
+en: "Tuesday"
+es: "martes"
+
+en: "Wednesday"
+es: "miércoles"
+
+en: "Thursday"
+es: "jueves"
+
+en: "Friday"
+es: "viernes"
+
+en: "Saturday"
+es: "sábado"
+
+en: "January"
+es: "de enero de"
+
+en: "February"
+es: "de febrero de"
+
+en: "March"
+es: "de marzo de"
+
+en: "April"
+es: "de abril de"
+
+en: "May"
+es: "de mayo de"
+
+en: "June"
+es: "de junio de"
+
+en: "July"
+es: "de julio de"
+
+en: "August"
+es: "de agosto de"
+
+en: "September"
+es: "de septiembre de"
+
+en: "October"
+es: "de octubre de"
+
+en: "November"
+es: "de noviembre de"
+
+en: "December"
+es: "de diciembre de"
+
+en: "Hotkeys. "
+es: "Teclas rápidas. "
+
+en: "Key "
+es: "Tecla "
+
+en: "%d of %d"
+es: "%d de %d"
+
+en: "How many? "
+es: "¿Cuántos? "
+
+en: ". Arrows set the amount, A confirms, E cancels."
+es: ". Las flechas fijan la cantidad, A confirma, E cancela."
+
+en: ". The arrows change the hours, W waits, E cancels."
+es: ". Las flechas cambian las horas, W espera, E cancela."
+
+en: "Enemies"
+es: "Enemigos"
+
+en: "Containers"
+es: "Contenedores"
+
+en: "Doors"
+es: "Puertas"
+
+en: "People"
+es: "Personas"
+
+en: "Sonar: nothing nearby."
+es: "Sonar: nada cerca."
+
+en: ", points left: "
+es: ", puntos restantes: "
+
+en: "Cover: You're Special!"
+es: "Portada: ¡Eres especial!"
+
+en: "Let's Review! In the corner: All Done! "
+es: "¡Repasemos! En la esquina: ¡Todo listo! "
+
+en: "S is for strength, and that means I am strong! I can carry more toys and swing stuff all day long!"
+es: "¡La S es de superfuerza, y eso quiere decir que soy fuerte! ¡Puedo cargar más juguetes y blandir cosas todo el día!"
+
+en: "P is for Perception, a long funny word! It means what I tasted, smelled, saw and heard!"
+es: "¡La P es de percepción, una palabra larga y graciosa! ¡Es lo que saboreo, huelo, veo y oigo!"
+
+en: "E is for Endurance, and that's how long I can play! I'm always really healthy, and have energy all day!"
+es: "¡La E es de energía, y es cuánto tiempo puedo jugar! ¡Siempre estoy muy sano y tengo energía todo el día!"
+
+en: "C is for Charisma, it's why people think I'm great! I make my friends all laugh and smile, and never want to hate!"
+es: "¡La C es de carisma, por eso la gente cree que soy genial! ¡Hago reír y sonreír a mis amigos, y nunca quiero odiar!"
+
+en: "I is for Intelligence, it means I'm really smart! I use my brain for lots of stuff, like science, math and art!"
+es: "¡La I es de inteligencia, y significa que soy muy listo! ¡Uso el cerebro para muchas cosas, como ciencia, mates y arte!"
+
+en: "A is for Agility, that's how I get around! I move real fast and easy, and I never make a sound!"
+es: "¡La A es de agilidad, así es como me muevo! ¡Me muevo muy rápido y con soltura, y nunca hago ruido!"
+
+en: "L is for luck, and it's simple, you see! It means that good things always happen to me!"
+es: "¡La L es de lotería, de suerte, y es sencillo, ya ves! ¡Significa que siempre me pasan cosas buenas!"
+
+en: "%d of %d Action Points"
+es: "%d de %d puntos de acción"
+
+en: "No V.A.T.S. data."
+es: "Sin datos de V.A.T.S."
+
+en: "Nothing to select."
+es: "Nada que seleccionar."
+
+en: "V.A.T.S. mode. A and D change the target, W and S change the body part. I read the selection: body part and hit chance. Space queues a shot, E fires the queued shots and leaves V.A.T.S."
+es: "Modo V.A.T.S. A y D cambian el objetivo, W y S cambian la parte del cuerpo. Leo la selección: parte del cuerpo y probabilidad de impacto. Space pone un disparo en cola, E hace los disparos en cola y sale de V.A.T.S."
+
+en: "%d queued"
+es: "%d en cola"
+
+en: "Melee and unarmed attacks can't pick a body part."
+es: "Los ataques cuerpo a cuerpo y sin armas no pueden elegir parte del cuerpo."
+
+en: "This target has no body parts to pick."
+es: "Este objetivo no tiene partes del cuerpo que elegir."
+
+en: "The game doesn't let you pick a body part now."
+es: "El juego no te deja elegir parte del cuerpo ahora."
+
+en: ". Only this part is in view."
+es: ". Solo se ve esta parte."
+
+en: ", locked, requires a key"
+es: ", bajo llave, requiere llave"
+
+en: ", lockpick %d"
+es: ", forzar cerraduras %d"
+
+en: ", locked, "
+es: ", bajo llave, "
+
+en: ", companion"
+es: ", compañero"
+
+en: ", dead, empty"
+es: ", sin vida, sin objetos"
+
+en: ", dead, searched"
+es: ", sin vida, ya registrado"
+
+en: ", dead, can be searched"
+es: ", sin vida, se puede registrar"
+
+en: ", dead"
+es: ", sin vida"
+
+en: ", above"
+es: ", más arriba"
+
+en: ", below"
+es: ", más abajo"
+
+en: ", open"
+es: ", abierta"
+
+en: ", in another place: "
+es: ", en otro lugar: "
+
+en: ", marker on the door to: "
+es: ", marcador en la puerta hacia: "
+
+en: "Scanner not available here."
+es: "El escáner no está disponible aquí."
+
+en: "people"
+es: "personas"
+
+en: "companions"
+es: "compañeros"
+
+en: "doors"
+es: "puertas"
+
+en: "places"
+es: "lugares"
+
+en: "quest objects"
+es: "objetos de misión"
+
+en: "quests"
+es: "misiones"
+
+en: "Nothing in category: "
+es: "Nada en la categoría: "
+
+en: ", no marker, "
+es: ", sin marcador, "
+
+en: "Nothing nearby."
+es: "Nada cerca."
+
+en: "Select a target with the scanner first."
+es: "Primero elige un objetivo con el escáner."
+
+en: "This quest has no map marker."
+es: "Esta misión no tiene marcador en el mapa."
+
+en: "The target is in another location — the beacon can't lead there. Use auto-walk: it goes through doors."
+es: "El objetivo está en otra ubicación — la baliza no puede llevar allí. Usa la marcha automática: cruza puertas."
+
+en: "Open your inventory first."
+es: "Primero abre el inventario."
+
+en: "Select a target with the aim key first."
+es: "Primero elige un objetivo con la tecla de apuntar."
+
+en: "%s, correction %+.0f"
+es: "%s, corrección %+.0f"
+
+en: "Higher"
+es: "Más alto"
+
+en: "Lower"
+es: "Más bajo"
+
+en: "This objective is only a marker — it can't be activated."
+es: "Este objetivo es solo un marcador — no se puede activar."
+
+en: " is too far: "
+es: " está demasiado lejos: "
+
+en: ". Get closer."
+es: ". Acércate."
+
+en: "Using: "
+es: "Usando: "
+
+en: "No line to repeat."
+es: "No hay frase que repetir."
+
+en: "No description."
+es: "Sin descripción."
+
+en: "Nothing under the crosshair."
+es: "Nada bajo el punto de mira."
+
+en: "Under the crosshair: "
+es: "Bajo el punto de mira: "
+
+en: ", the selected target"
+es: ", el objetivo elegido"
+
+en: ", a different object"
+es: ", otro objeto"
+
+en: ", type %u"
+es: ", tipo %u"
+
+en: "No one nearby."
+es: "Nadie cerca."
+
+en: "Turned to: "
+es: "Giro hacia: "
+
+en: ", not fighting"
+es: ", sin combatir"
+
+en: "No enemy nearby."
+es: "Ningún enemigo cerca."
+
+en: " is dead. No living enemy nearby."
+es: " ha muerto. No hay enemigos vivos cerca."
+
+en: "Target %d of %d"
+es: "Objetivo %d de %d"
+
+en: "Target lost. Tracking stopped."
+es: "Objetivo perdido. Seguimiento detenido."
+
+en: "Looking for the way to: "
+es: "Buscando el camino hacia: "
+
+en: "No target nearby."
+es: "Ningún objetivo cerca."
+
+en: "Turning to: "
+es: "Girando hacia: "
+
+en: "Teleporting to: "
+es: "Teletransportando a: "
+
+en: "Select an object with the scanner first to teleport."
+es: "Primero elige un objeto con el escáner para teletransportarte."
+
+en: "Tracking stopped."
+es: "Seguimiento detenido."
+
+en: "Nothing to track. Select a target with the scanner."
+es: "Nada que seguir. Elige un objetivo con el escáner."
+
+en: "Tracking: "
+es: "Siguiendo: "
+
+en: "Leveling the view. No target nearby."
+es: "Nivelando la vista. Ningún objetivo cerca."
+
+en: "The crosshair won't take it. Step closer, or use End, which works without aiming."
+es: "El punto de mira no lo coge. Acércate o usa End, que funciona sin apuntar."
+
+en: "Warning, in the line of fire: "
+es: "Atención, en la línea de tiro: "
+
+en: ", now "
+es: ", ahora "
+
+en: "View leveled."
+es: "Vista nivelada."
+
+en: "No line of fire. Obstacle %s ahead of you, %.0f above the floor."
+es: "Sin línea de tiro. Obstáculo %s por delante, %.0f sobre el suelo."
+
+en: ", can't lock on. Face the targets, in first person."
+es: ", no puedo fijarlo. Ponte frente a las dianas, en primera persona."
+
+en: ", firing."
+es: ", disparo."
+
+en: ", burst fired. Check the quest."
+es: ", ráfaga disparada. Revisa la misión."
+
+en: ", selected"
+es: ", seleccionado"
+
+en: "New objective: "
+es: "Nuevo objetivo: "
+
+en: "Third person"
+es: "Tercera persona"
+
+en: "First person"
+es: "Primera persona"
+
+en: "Cannot read the level."
+es: "No puedo leer el nivel."
+
+en: "Level %d, the highest. Experience %d."
+es: "Nivel %d, el máximo. Experiencia %d."
+
+en: "Level %d. Experience %d, a new level is waiting."
+es: "Nivel %d. Experiencia %d, te espera un nuevo nivel."
+
+en: "Level %d. Experience %d of %d, %d to the next level."
+es: "Nivel %d. Experiencia %d de %d, %d para el siguiente nivel."
+
+en: "Health %d of %d, action points %d of %d"
+es: "Salud %d de %d, puntos de acción %d de %d"
+
+en: ", rads %d"
+es: ", radiación %d"
+
+en: ", crippled: "
+es: ", lisiado: "
+
+en: ", weapon: "
+es: ", arma: "
+
+en: ", condition %d percent"
+es: ", estado %d por ciento"
+
+en: ", ammo: "
+es: ", munición: "
+
+en: ", no weapon"
+es: ", sin arma"
+
+en: ", caps %d"
+es: ", chapas %d"
+
+en: ", carry weight %d of %d"
+es: ", peso %d de %d"
+
+en: ", time %d:%02d"
+es: ", hora %d:%02d"
+
+en: "On target, fire."
+es: "En el blanco, dispara."
+
+en: "Aiming roughly, fire."
+es: "Apuntando a ojo, dispara."
+
+en: "+%d XP"
+es: "+%d de experiencia"
+
+en: "Target down."
+es: "Objetivo abatido."
+
+en: " is down."
+es: " ha caído."
+
+en: "Restoring default controls. Confirm your choice."
+es: "Restaurando los controles por defecto. Confirma tu elección."
+
+en: "Quest stage skipped. Check the new objective."
+es: "Fase de misión saltada. Revisa el nuevo objetivo."
+
+en: "Could not skip the stage: no active quest."
+es: "No se pudo saltar la fase: no hay misión activa."
+
+en: "Press the new key."
+es: "Pulsa la nueva tecla."
+
+en: "Nothing is selected."
+es: "No hay nada seleccionado."
+
+en: "Tracking this quest."
+es: "Siguiendo esta misión."
+
+en: "That quest is completed; it can't be tracked."
+es: "Esa misión está completada; no se puede seguir."
+
+en: "The game did not change the tracked quest."
+es: "El juego no cambió la misión seguida."
+
+en: "First select a quest in the list."
+es: "Primero elige una misión de la lista."
+
+en: "First select a note in the list."
+es: "Primero elige una nota de la lista."
+
+en: "Can't reach the word."
+es: "No llego a la palabra."
+
+en: "Could not enter the word."
+es: "No se pudo introducir la palabra."
+
+en: "End of the range."
+es: "Fin del recorrido."
+
+en: "Open the inventory and select an item, then press Delete."
+es: "Abre el inventario y elige un objeto, luego pulsa Delete."
+
+en: "Could not find this location on the world map."
+es: "No se encontró esta ubicación en el mapa del mundo."
+
+en: "Could not find the travel button on the map."
+es: "No se encontró el botón de viaje en el mapa."
+
+en: "Could not find the category switch."
+es: "No se encontró el selector de categoría."
+
+en: "The container is empty."
+es: "El contenedor está vacío."
+
+en: "You are carrying nothing."
+es: "No llevas nada."
+
+en: "Cannot switch columns in this version of the game."
+es: "No se pueden cambiar las columnas en esta versión del juego."
+
+en: "On target."
+es: "En el blanco."
+
+en: "Aiming roughly."
+es: "Apuntando a ojo."
+
+en: "No clear shot nearby, move closer or go around."
+es: "No hay tiro limpio cerca, acércate o rodea."
+
+en: "Clear shot %s to the left."
+es: "Tiro limpio %s a la izquierda."
+
+en: "Clear shot %s to the right."
+es: "Tiro limpio %s a la derecha."
+
+en: "someone"
+es: "alguien"
+
+en: "Target blocked, cover %s ahead."
+es: "Objetivo tapado, cobertura %s por delante."
+
+en: "%s, %.0f units, %.0f degrees %s. "
+es: "%s, %.0f unidades, %.0f grados %s. "
+
+en: "ahead"
+es: "al frente"
+
+en: "Aiming at the nearest object: %.0f units, %.0f degrees %s."
+es: "Apuntando al objeto más cercano: %.0f unidades, %.0f grados %s."
+
+en: "Nothing that could be hit."
+es: "Nada a lo que se pueda dar."
+
+en: "Dump saved to the dump file."
+es: "Volcado guardado en el archivo de volcado."
+
+en: "Strength"
+es: "Fuerza"
+
+en: "Perception"
+es: "Percepción"
+
+en: "Endurance"
+es: "Resistencia"
+
+en: "Charisma"
+es: "Carisma"
+
+en: "Intelligence"
+es: "Inteligencia"
+
+en: "Agility"
+es: "Agilidad"
+
+en: "Luck"
+es: "Suerte"
+
+en: "off"
+es: "desactivada"
+
+en: "%d degrees"
+es: "%d grados"
+
+en: "no limit"
+es: "sin límite"
+
+en: "Accessibility"
+es: "Accesibilidad"
+
+en: "Off"
+es: "Desactivado"
+
+en: "On"
+es: "Activado"
+
+en: "Menu name when it opens"
+es: "Nombre del menú al abrirse"
+
+en: "Item details after the name"
+es: "Detalles del objeto tras el nombre"
+
+en: "Messages and tutorials"
+es: "Mensajes y tutoriales"
+
+en: "Control hints"
+es: "Ayudas de controles"
+
+en: "Never"
+es: "Nunca"
+
+en: "Once"
+es: "Una vez"
+
+en: "Always"
+es: "Siempre"
+
+en: "Name under the crosshair"
+es: "Nombre bajo el punto de mira"
+
+en: "Distance with the crosshair"
+es: "Distancia con el punto de mira"
+
+en: "Directions"
+es: "Direcciones"
+
+en: "Clock"
+es: "Reloj"
+
+en: "Degrees"
+es: "Grados"
+
+en: "Aim cue"
+es: "Señal de puntería"
+
+en: "Pitch of the aim cue"
+es: "Tono de la señal de puntería"
+
+en: "Aim help"
+es: "Ayuda de puntería"
+
+en: "Shot correction"
+es: "Corrección del disparo"
+
+en: "The mouse breaks the aim"
+es: "El ratón interrumpe la puntería"
+
+en: "Exploration mode"
+es: "Modo exploración"
+
+en: "Hide empty containers"
+es: "Ocultar contenedores vacíos"
+
+en: "Scanner range"
+es: "Alcance del escáner"
+
+en: "Reach of the End key"
+es: "Alcance de la tecla End"
+
+en: "Skipping quest stages (=)"
+es: "Saltar fases de misión (=)"
+
+en: "Audio description"
+es: "Audiodescripción"
+
+en: "What people do"
+es: "Lo que hace la gente"
+
+en: "In scenes"
+es: "En escenas"
+
+en: "How people look"
+es: "Aspecto de la gente"
+
+en: "Cutscene cue"
+es: "Señal de cinemática"
+
+en: "VATS tutorial"
+es: "Tutorial de VATS"
+
+en: "%d o'clock"
+es: "a las %d"
+
+en: "right next to you"
+es: "justo a tu lado"
+
+en: "%d units"
+es: "%d unidades"
+
+en: "Accessibility mod enabled."
+es: "Mod de accesibilidad activado."
+
+en: "Accessibility mod disabled."
+es: "Mod de accesibilidad desactivado."
+
+en: "Fallout 3 Access loaded."
+es: "Fallout 3 Access cargado."
+
+en: "No screen reader detected. Using SAPI."
+es: "No se detectó lector de pantalla. Usando SAPI."
+
+en: "Active reader: %s."
+es: "Lector activo: %s."
+
+en: "%s opened."
+es: "%s: abierto."
+
+en: "Menu closed."
+es: "Menú cerrado."
+
+en: "List empty."
+es: "Lista vacía."
+
+en: "Loading."
+es: "Cargando."
+
+en: "Warning, low health."
+es: "Atención, salud baja."
+
+en: "Crippled limb: %s."
+es: "Extremidad lisiada: %s."
+
+en: "In combat."
+es: "En combate."
+
+en: "Combat ended."
+es: "Combate terminado."
+
+en: "Quest target: %s. %s, %s."
+es: "Objetivo de misión: %s. %s, %s."
+
+en: "No active quest target."
+es: "Sin objetivo de misión activo."
+
+en: "Facing %s."
+es: "Mirando al %s."
+
+en: "Health %s, Action Points %s, radiation %s, caps %s."
+es: "Salud %s, puntos de acción %s, radiación %s, chapas %s."
+
+en: "Hostile: %s, %s, %s."
+es: "Hostil: %s, %s, %s."
+
+en: "Container: %s, %s, %s."
+es: "Contenedor: %s, %s, %s."
+
+en: "Door: %s, %s, %s."
+es: "Puerta: %s, %s, %s."
+
+en: "Item: %s, %s, %s."
+es: "Objeto: %s, %s, %s."
+
+en: "You give %s, vendor gives %s. Net: %s."
+es: "Das %s, el vendedor da %s. Balance: %s."
+
+en: "Warning, losing %s caps."
+es: "Atención, pierdes %s chapas."
+
+en: "The You're Special! book. %s. Enter reads everything."
+es: "El libro «¡Eres especial!». %s. Enter lo lee todo."
+
+en: "A measure of raw physical strength. Affects melee damage and how much you can carry."
+es: "Medida de la fuerza física bruta. Afecta al daño cuerpo a cuerpo y a cuánto puedes cargar."
+
+en: "How keen your senses are. Affects energy weapons, explosives and lockpicking."
+es: "Lo agudos que son tus sentidos. Afecta a armas de energía, explosivos y forzar cerraduras."
+
+en: "Health and physical fitness. Affects hit points, radiation resistance and unarmed combat."
+es: "Salud y forma física. Afecta a los puntos de vida, la resistencia a la radiación y el combate sin armas."
+
+en: "Likeability and persuasiveness. Affects barter and speech."
+es: "Simpatía y poder de persuasión. Afecta al trueque y la oratoria."
+
+en: "Intellect and reasoning. Affects medicine, repair and science."
+es: "Intelecto y razonamiento. Afecta a medicina, reparación y ciencia."
+
+en: "Speed and nimbleness. Affects small guns, sneaking and action points."
+es: "Velocidad y destreza. Afecta a armas pequeñas, sigilo y puntos de acción."
+
+en: "How often chance favours you. Affects everything a little, critical hits most of all."
+es: "Lo a menudo que el azar te favorece. Afecta un poco a todo, sobre todo a los golpes críticos."
+
+en: "Page %d"
+es: "Página %d"
+
+en: "Sweet spot found."
+es: "Punto exacto encontrado."
+
+en: "Bobby pin is about to break."
+es: "La horquilla está a punto de romperse."
+
+en: "Bobby pin broke."
+es: "La horquilla se ha roto."
+
+en: "Unlocked."
+es: "Cerradura abierta."
+
+en: "%s, %s percent, cost %s."
+es: "%s, %s por ciento, coste %s."
+
+en: "Target switched."
+es: "Objetivo cambiado."
+
+en: "Queue full."
+es: "Cola llena."
+
+en: "No targets."
+es: "Sin objetivos."
+
+en: "Option %s: %s. %s"
+es: "Opción %s: %s. %s"
+
+en: "No response options."
+es: "No hay opciones de respuesta."
+
+en: "weight %s"
+es: "peso %s"
+
+en: "value %s"
+es: "valor %s"
+
+en: "Level up."
+es: "Subida de nivel."
+
+en: "equipped"
+es: "equipado"
+
+en: "stealing"
+es: "robo"
+
+en: "Carry weight %s."
+es: "Peso %s."
+
+en: "%s of %s"
+es: "%s de %s"
+
+en: "List closed."
+es: "Lista cerrada."
+
+en: "Taken: %s."
+es: "Recogido: %s."
+
+en: "north"
+es: "norte"
+
+en: "northeast"
+es: "noreste"
+
+en: "east"
+es: "este"
+
+en: "southeast"
+es: "sureste"
+
+en: "south"
+es: "sur"
+
+en: "southwest"
+es: "suroeste"
+
+en: "west"
+es: "oeste"
+
+en: "northwest"
+es: "noroeste"
+
+en: "plus"
+es: "más"
+
+en: "ampersand"
+es: "y comercial"
+
+en: "item"
+es: "objeto"
+
+en: "items"
+es: "objetos"
+
+en: "attempt"
+es: "intento"
+
+en: "attempts"
+es: "intentos"
+
+en: "none"
+es: "ninguna"
+
+en: "another key of the mod"
+es: "otra tecla del mod"
+
+en: "Note: the game uses this key too."
+es: "Atención: el juego también usa esta tecla."
+
+en: "Press the new key for: "
+es: "Pulsa la nueva tecla para: "
+
+en: ". Escape cancels."
+es: ". Escape cancela."
+
+en: "Cancelled."
+es: "Cancelado."
+
+en: "That key can't be assigned."
+es: "Esa tecla no se puede asignar."
+
+en: "Scanner, next"
+es: "Escáner, siguiente"
+
+en: "Scanner, previous"
+es: "Escáner, anterior"
+
+en: "Use the selected object"
+es: "Usar el objeto elegido"
+
+en: "Crosshair on the selected object"
+es: "Punto de mira al objeto elegido"
+
+en: "Turn to the selected object"
+es: "Girarse hacia el objeto elegido"
+
+en: "Auto-walk to the target"
+es: "Caminar solo hasta el destino"
+
+en: "Guide beacon to the target"
+es: "Baliza sonora hasta el destino"
+
+en: "Guide beacon to the quest"
+es: "Baliza sonora hasta la misión"
+
+en: "Direction to the quest target"
+es: "Dirección al objetivo de la misión"
+
+en: "What is nearby"
+es: "Qué hay cerca"
+
+en: "Enemies nearby"
+es: "Enemigos cerca"
+
+en: "Turn to the nearest enemy"
+es: "Girarse hacia el enemigo más cercano"
+
+en: "What is under the crosshair"
+es: "Qué hay en el punto de mira"
+
+en: "Where am I"
+es: "Dónde estoy"
+
+en: "Compass"
+es: "Brújula"
+
+en: "Your status"
+es: "Tu estado"
+
+en: "Sonar"
+es: "Sónar"
+
+en: "What is left to search"
+es: "Qué queda por registrar"
+
+en: "Lead to the next thing"
+es: "Llevarme a lo siguiente"
+
+en: "Go to the find"
+es: "Ir al hallazgo"
+
+en: "Item details"
+es: "Detalles del objeto"
+
+en: "Drop the item"
+es: "Soltar el objeto"
+
+en: "Repeat the last message"
+es: "Repetir el último mensaje"
+
+en: "Silence speech"
+es: "Callar la voz"
+
+en: "Repeat the audio description"
+es: "Repetir la audiodescripción"
+
+en: "Film audio description"
+es: "Audiodescripción de vídeos"
+
+en: "Skip a quest stage"
+es: "Saltar una etapa de la misión"
+
+en: "Bug report dump"
+es: "Volcado para informar de un error"
+
+en: "Mod on or off"
+es: "Activar o desactivar el mod"
+
+en: "Controls remapping"
+es: "Reasignación de teclas"
+
+en: "Controls remapping. F2 on a row changes its key or shortcut, for example Shift plus Home. Backspace goes back."
+es: "Reasignación de teclas. F2 en una fila cambia su tecla o atajo, por ejemplo Shift más Home. Backspace vuelve atrás."
+
+en: "Note: the key "
+es: "Atención: la tecla "
+
+en: " also has: "
+es: " también tiene: "
+
+en: ". This shortcut comes first."
+es: ". Este atajo tiene prioridad."
+
+en: "Careful: the target is behind a locked door, and that door is the only way out. "
+es: "Cuidado: el destino está tras una puerta cerrada con llave, y solo se sale por ella. "
+
+en: " again teleports anyway."
+es: " otra vez te teletransporta igualmente."
+
+en: " stops."
+es: " lo detiene."
+
+en: "Note: "
+es: "Atención: "
+
+en: ". Both work until you give that one another key."
+es: ". Funcionan las dos hasta que le des otra tecla a esa."
+
+en: "Scanner, next category"
+es: "Escáner, categoría siguiente"
+
+en: "Scanner, previous category"
+es: "Escáner, categoría anterior"
+
+en: "Track the target"
+es: "Seguir el objetivo"
+
+en: "Teleport to the selected object"
+es: "Teletransporte al objeto elegido"
+
+en: "Level and experience"
+es: "Nivel y experiencia"
+
+en: "Exploration mode on or off"
+es: "Modo exploración: activar o desactivar"
+
+en: "Audio description on or off"
+es: "Audiodescripción: activar o desactivar"
+
+en: "Dropping down."
+es: "Salto hacia abajo."
+
+en: ", series: you have %d of %d"
+es: ", serie: tienes %d de %d"
+
+en: ", the way goes through the door to: "
+es: ", el camino pasa por la puerta a: "
+
+en: ". That is far from here - walk there first."
+es: ". Está lejos de aquí - primero ve hasta allí."
+
+en: "Series notes in quest objects"
+es: "Notas de series en los objetos de misión"
+
+en: "You are dead."
+es: "Has muerto."
+
+en: "Stopped: a movement key."
+es: "Detenido: una tecla de movimiento."
+
+en: "You are losing health. Walk stopped."
+es: "Estás perdiendo salud. Caminata detenida."

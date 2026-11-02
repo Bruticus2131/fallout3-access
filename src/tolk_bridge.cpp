@@ -67,6 +67,16 @@ std::atomic<bool>       g_screen_reader{ false };  // a screen reader, not a bar
 std::atomic<bool>       g_recheck{ false };        // availability changed: choose again
 std::atomic<long long>  g_said_at_ms{ 0 };         // last Say handed to the backend
 char                    g_name[64] = "none";       // the backend's name, for the log
+// The game can end without FOSE's ExitGame message - a second copy of the
+// game closing itself at once, a quit FOSE does not see: Shutdown() never
+// runs, Windows has already ended the thread, and a std::thread still
+// joinable when the statics are destroyed calls std::terminate. That was
+// abort() in this DLL, c0000409, on quitting (2026-10-31: twice, the speech
+// thread; the poll thread has had the same guard since the drop-crash fix).
+// Declared after g_worker, so it is destroyed first.
+struct DetachAtExit {
+    ~DetachAtExit() { if (g_worker.joinable()) g_worker.detach(); }
+} g_detach_at_exit;
 
 // Owned by the speech thread alone.
 PrismContext*           g_ctx = nullptr;
@@ -241,15 +251,15 @@ bool Init()
     if (g_worker.joinable()) return g_ready.load();
     g_quit.store(false);
     std::promise<bool> started;
-    std::future<bool> result = started.get_future();
     g_worker = std::thread(&Worker, std::move(started));
-    // Wait for the first choice, so the log line after this names the reader.
-    // A slow screen reader keeps starting in the background.
-    if (result.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
-        F3A_WARN("Speech: still looking for a screen reader after 5 s");
-        return true;
-    }
-    return result.get();
+    // No waiting for the first choice. The plugin is loaded while FOSE loads
+    // every plugin, and until that is over the new thread does not even run:
+    // waiting here held the game's start up 5 s and logged "still looking
+    // for a screen reader" every time, and the reader was found 0.1 s after
+    // FOSE's PostPostLoad (both logs, 2026-11-01). The speech thread logs the
+    // reader it chose; what is said before then waits in the queue.
+    F3A_INFO("Speech: the screen reader is chosen on the speech thread");
+    return true;
 }
 
 void Shutdown()

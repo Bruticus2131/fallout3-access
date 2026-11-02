@@ -331,9 +331,16 @@ std::string Counted(long long n, const char* const pl[3], const char* const ru[3
     const LangState* l = Lang();
     // Russian words only when Russian is really spoken (its file is there);
     // otherwise English, with the English rule.
+    const char* en = (n == 1 || n == -1) ? enOne : enMany;
     const char* word = l->polish ? pl[PluralForm(n)]
                      : (l->code == "ru" && !l->table.empty()) ? ru[PluralForm(n)]
-                     : ((n == 1 || n == -1) ? enOne : enMany);
+                     : en;
+    // Another language (Spanish) counts as English does, one and many: the
+    // word from its file.
+    if (!l->polish && l->code != "ru") {
+        auto it = l->table.find(en);
+        if (it != l->table.end()) word = it->second.c_str();
+    }
     return std::to_string(n) + " " + word;
 }
 

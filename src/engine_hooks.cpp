@@ -327,6 +327,99 @@ void PatchTextEditArrows()
              g_edit_arrows_patched ? "installed" : "NOT installed (code differs)");
 }
 
+// --- Left and Right in the container screen ------------------------------------
+//
+// The container screen's key handler (ContainerMenu slot 14, 0x0063ADE0)
+// answers the bare Left and Right arrows (codes 3 / 4) by clicking the focused
+// column's category arrow - in every mode but 4. The mod gives those keys to
+// the column switch (Shift+arrows step the category, through the arrows' own
+// buttons), so both happened at once: Right in your column stepped YOUR
+// category (38 items -> 8 weapons) and then moved to the other column; Left
+// came back and the game stepped the category again under the row the mod had
+// just picked - the list rebuilt, nothing selected, Up and Down dead (log
+// 2026-11-02, trading with Clover). Its dispatch is a byte table (0x0063AF64,
+// codes 3..14) into five cases (0x0063AF50); case 0 is codes 3 and 4 alone.
+// It is pointed at the handler's own "handled" exit (0x0063AF45: mov bl,1 /
+// pop edi / pop esi / mov al,bl / pop ebx / ret 8), so the keys are taken and
+// nothing is done with them. Barter has its own handler and keeps its arrows.
+constexpr uintptr_t kContKeyCases = 0x0063AF50;
+constexpr uintptr_t kContKeyBytes = 0x0063AF64;
+constexpr uintptr_t kContKeyFilter = 0x0063AED3;
+constexpr uintptr_t kContKeyHandled = 0x0063AF45;
+bool g_cont_arrows_patched = false;
+
+void PatchContainerArrows()
+{
+    auto* cases = reinterpret_cast<uint32_t*>(kContKeyCases);
+    const uint32_t expectCases[5] = { kContKeyFilter, 0x0063AEC4, 0x0063AE1A, 0x0063AE6F, 0x0063AF47 };
+    const uint8_t expectBytes[12] = { 0, 0, 4, 4, 4, 4, 4, 1, 4, 4, 2, 3 };
+    const uint8_t exitCode[10] = { 0xB3, 0x01, 0x5F, 0x5E, 0x8A, 0xC3, 0x5B, 0xC2, 0x08, 0x00 };
+    // lea eax,[edi-3] / cmp eax,0Bh / ja ... / movzx eax,byte [eax+0063AF64h] /
+    // jmp [eax*4+0063AF50h]
+    const uint8_t dispatch[] = { 0x8D, 0x47, 0xFD, 0x83, 0xF8, 0x0B, 0x0F, 0x87, 0x3B, 0x01, 0x00, 0x00,
+                                 0x0F, 0xB6, 0x80, 0x64, 0xAF, 0x63, 0x00,
+                                 0xFF, 0x24, 0x85, 0x50, 0xAF, 0x63, 0x00 };
+    auto same = [](uintptr_t at, const void* want, size_t n) {
+        const void* p = reinterpret_cast<const void*>(at);
+        return !IsBadReadPtr(p, n) && std::memcmp(p, want, n) == 0;
+    };
+    DWORD old = 0;
+    if (same(kContKeyCases, expectCases, sizeof(expectCases)) &&
+        same(kContKeyBytes, expectBytes, sizeof(expectBytes)) &&
+        same(kContKeyHandled, exitCode, sizeof(exitCode)) &&
+        same(0x0063AE00, dispatch, sizeof(dispatch)) &&
+        VirtualProtect(cases, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        cases[0] = kContKeyHandled;
+        VirtualProtect(cases, 4, old, &old);
+        g_cont_arrows_patched = true;
+    }
+    F3A_INFO("engine_hooks: container Left/Right (no category step) %s.",
+             g_cont_arrows_patched ? "installed" : "NOT installed (code differs)");
+}
+
+// --- Up and Down in the container screen ---------------------------------------
+//
+// The interface hands a key to the top menu's slot 14 first (0x006240C0) and,
+// when the menu does not take it, to the first list of that menu - in its own
+// registry, 0x01075BD4 - that has a row in its "selected" pointer (ListBox
+// +0x10, vtable[1] 0x00661970) and answers the key (vtable[2] 0x00632EB0:
+// code 1 = up, 2 = down, from that row's list index). Which list that is
+// depends on what was selected last and how: after the mod's column switches
+// it was the other column, or none - Up and Down did nothing in the player's
+// column after a trip to the companion's and back (log 2026-11-02, twice).
+// The container screen's slot 14 (0x0063ADE0) does not take codes 1 and 2, so
+// its vtable entry is pointed at a filter first: while the mod drives Up and
+// Down in this screen itself (both columns, through the list's own select
+// routine - as it already did in the other column), it takes them from the
+// game. Barter keeps its own handler.
+constexpr uintptr_t kContVtable     = 0x00E04E54;
+constexpr uintptr_t kContSpecialKey = 0x0063ADE0;
+
+ContainerKeyFilter g_cont_key_filter = nullptr;
+bool g_cont_updown_patched = false;
+
+bool __fastcall ContainerSpecialKey_Hook(void* menu, void* /*edx*/, uint32_t code, float state)
+{
+    ContainerKeyFilter f = g_cont_key_filter;
+    if (f && f(code)) return true;
+    using Fn = bool(__thiscall*)(void*, uint32_t, float);
+    return reinterpret_cast<Fn>(kContSpecialKey)(menu, code, state);
+}
+
+void PatchContainerUpDown()
+{
+    auto* slot = reinterpret_cast<uint32_t*>(kContVtable + 14 * 4);
+    DWORD old = 0;
+    if (!IsBadReadPtr(slot, 4) && *slot == kContSpecialKey &&
+        VirtualProtect(slot, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        *slot = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&ContainerSpecialKey_Hook));
+        VirtualProtect(slot, 4, old, &old);
+        g_cont_updown_patched = true;
+    }
+    F3A_INFO("engine_hooks: container Up/Down by the mod %s.",
+             g_cont_updown_patched ? "installed" : "NOT installed (code differs)");
+}
+
 void PatchDropQuantity()
 {
     // The push of the game's callback right before the call confirms the site.
@@ -346,7 +439,17 @@ bool InstallHooks()
     PatchTextEditArrows();
     PatchShotDirection();
     PatchMenuEnter();
-    return g_drop_patched && g_edit_arrows_patched && g_shot_patched == 3 && g_menu_key_patched;
+    PatchContainerArrows();
+    PatchContainerUpDown();
+    return g_drop_patched && g_edit_arrows_patched && g_shot_patched == 3 && g_menu_key_patched &&
+           g_cont_arrows_patched && g_cont_updown_patched;
+}
+
+void SetContainerKeyFilter(ContainerKeyFilter filter) { g_cont_key_filter = filter; }
+
+uintptr_t ContainerKeySlotHook()
+{
+    return g_cont_updown_patched ? reinterpret_cast<uintptr_t>(&ContainerSpecialKey_Hook) : 0;
 }
 
 void SetShotAimProvider(ShotAimProvider provider) { g_shot_provider = provider; }

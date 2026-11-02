@@ -10,7 +10,9 @@
 #include "f3a/modules.h"
 
 #include <windows.h>
+#include <atomic>
 #include <map>
+#include <mutex>
 #include <array>
 #include <unordered_map>
 #include <vector>
@@ -21,9 +23,15 @@
 namespace f3a::hotkeys {
 namespace {
 
-struct Binding { uint32_t dik; Action action; bool was_down = false; };
-
+// `field`: the config::Get().hotkeys member the binding came from (its INI
+// key), or null - what Remap finds it by.
+struct Binding { uint32_t dik; Action action; bool was_down = false; const uint32_t* field = nullptr; };
 std::vector<Binding> g_bindings;
+// Remaps asked for from other threads (the Settings menu runs on the game's),
+// applied by Poll, which owns the table.
+std::mutex g_remap_mx;
+std::vector<std::pair<const uint32_t*, uint32_t>> g_remaps;
+std::atomic<bool> g_capturing{ false };
 
 int DikToVk(uint32_t dik)
 {
@@ -186,20 +194,33 @@ void Shutdown()
     g_bindings.clear();
 }
 
-void Bind(uint32_t dik, Action action)
+void Bind(const uint32_t& dik, Action action)
 {
+    // A field of the live settings: remembered, so the key can be remapped.
+    const auto& hk = config::Get().hotkeys;
+    const char* lo = reinterpret_cast<const char*>(&hk);
+    const char* at = reinterpret_cast<const char*>(&dik);
+    const uint32_t* field = (at >= lo && at < lo + sizeof(hk)) ? &dik : nullptr;
     if (dik == 0) {
-        F3A_WARN("Bind: skipping zero dik (would never fire).");
+        if (!field) {
+            F3A_WARN("Bind: skipping zero dik (would never fire).");
+            return;
+        }
+        // Unbound now; kept so a key can be given to it later.
+        g_bindings.push_back({0, std::move(action), false, field});
         return;
     }
+    // The same key bound again for the same INI key (or both unnamed):
+    // replaced. Another INI key on the same key is a binding of its own - the
+    // player may put one key on two actions, and both then fire.
     for (auto& b : g_bindings) {
-        if (b.dik == dik) {
+        if (b.dik == dik && b.field == field) {
             F3A_INFO("Bind: replaced binding for DIK 0x%02X.", dik);
             b.action = std::move(action);
             return;
         }
     }
-    g_bindings.push_back({dik, std::move(action), false});
+    g_bindings.push_back({dik, std::move(action), false, field});
     F3A_INFO("Bind: added DIK 0x%02X (count=%u).",
              dik, (unsigned)g_bindings.size());
 }
@@ -263,6 +284,18 @@ bool g_had_focus   = false;
 
 void Poll()
 {
+    {
+        std::lock_guard<std::mutex> lk(g_remap_mx);
+        for (const auto& r : g_remaps) {
+            for (auto& b : g_bindings) {
+                if (b.field != r.first) continue;
+                F3A_INFO("Hotkeys: DIK 0x%02X -> 0x%02X", b.dik, r.second);
+                b.dik = r.second;
+                b.was_down = true;          // not fired by the press that chose it
+            }
+        }
+        g_remaps.clear();
+    }
     if (!IsForegroundFallout()) { g_had_focus = false; return; }
 
     {
@@ -302,15 +335,32 @@ void Poll()
     const bool typing = menu::IsOpen(menu::Id::TextEdit) || game::ConsoleOpen();
     const uint32_t dump_key = config::Get().hotkeys.dump_menu_tree;
 
+    // The modifiers held now. A shortcut fires only with exactly its own; a
+    // plain key fires with any, as before (its action reads Shift itself for
+    // its own variants) - unless a shortcut on the same key claims them.
+    const bool ctrlNow = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const uint32_t mods = (shiftNow ? kModShift : 0u) | (ctrlNow ? kModCtrl : 0u) |
+                          (g_alt_genuine ? kModAlt : 0u);
+    auto claimed = [&](uint32_t base) {
+        if (!mods) return false;
+        for (const auto& o : g_bindings)
+            if ((o.dik & 0xFF) == base && (o.dik & kModMask) == mods) return true;
+        return false;
+    };
+
     for (auto& b : g_bindings) {
-        int vk = DikToVk(b.dik);
+        const uint32_t base = b.dik & 0xFF;
+        int vk = DikToVk(base);
         if (!vk) continue;
-        if (g_suppressed.find(b.dik) != g_suppressed.end()) {
+        if (g_suppressed.find(base) != g_suppressed.end()) {
             // Keep the edge state current so releasing it doesn't fire later.
             b.was_down = (GetAsyncKeyState(vk) & 0x8000) != 0;
             continue;
         }
         bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        // A new key is being chosen in the Settings menu: that press is the
+        // answer, not a command.
+        if (g_capturing.load()) { b.was_down = down; continue; }
         // Mod switched off: only the toggle key works, so it can be switched
         // back on.
         const bool still = b.dik == config::Get().hotkeys.toggle_mod ||
@@ -320,14 +370,46 @@ void Poll()
             continue;
         }
         if (down && !b.was_down) {
-            F3A_DEBUG("hotkey fired: dik=0x%02X vk=0x%02X", b.dik, vk);
-            if (b.action) b.action();
+            const uint32_t want = b.dik & kModMask;
+            const bool fire = want ? want == mods : !claimed(base);
+            if (fire) {
+                F3A_DEBUG("hotkey fired: dik=0x%02X vk=0x%02X", b.dik, vk);
+                if (b.action) b.action();
+            }
         }
         b.was_down = down;
     }
 }
 
 void SuppressKey(uint32_t dik) { g_suppressed[dik] = kSuppressTicks; }
+
+void Remap(const uint32_t* field, uint32_t dik)
+{
+    if (!field) return;
+    std::lock_guard<std::mutex> lk(g_remap_mx);
+    g_remaps.push_back({ field, dik });
+}
+
+int VkForDik(uint32_t dik) { return (dik & 0xFF) ? DikToVk(dik & 0xFF) : 0; }
+
+void SetCapturing(bool on) { g_capturing.store(on); }
+
+std::string KeyText(uint32_t value)
+{
+    const uint32_t dik = value & 0xFF;
+    if (!dik) return {};
+    wchar_t w[64] = {};
+    const LONG lp = ((LONG)(dik & 0x7F) << 16) | ((dik & 0x80) ? (1L << 24) : 0);
+    if (GetKeyNameTextW(lp, w, 64) <= 0 || !w[0]) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n > 1 ? n - 1 : 0, '\0');
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    std::string mods;
+    if (value & kModCtrl)  mods += "Ctrl+";
+    if (value & kModAlt)   mods += "Alt+";
+    if (value & kModShift) mods += "Shift+";
+    return mods + s;
+}
 
 bool ShiftActive() { return g_shift_grace > 0; }
 

@@ -200,7 +200,10 @@ def inside(box_ref, p, pad=48.0):
     _, x, y, z, rz, box, _ = box_ref
     hx, hy, hz = box
     dx, dy = p[0] - x, p[1] - y
-    c, s = math.cos(-rz), math.sin(-rz)
+    # Bethesda Z rotation is clockwise seen from above (see
+    # generate_road_network.py): world = (lx*cos + ly*sin, ly*cos - lx*sin),
+    # so back into the box: local = (dx*cos - dy*sin, dx*sin + dy*cos).
+    c, s = math.cos(rz), math.sin(rz)
     lx, ly = dx * c - dy * s, dx * s + dy * c
     return abs(lx) <= hx + pad and abs(ly) <= hy + pad and abs(p[2] - z) <= hz + 120.0
 
