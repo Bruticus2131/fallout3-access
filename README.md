@@ -31,7 +31,9 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   and auto-walk that routes around walls using the game's navmesh, including
   through load doors into other cells. Long walks follow an offline map of the
   whole navigation mesh (roads preferred), and a target in another place is
-  reached through the right chain of doors, however far away.
+  reached through the right chain of doors, however far away. Armed mines are
+  listed and End disarms them; auto-walk stops in front of one, and walks
+  back out the way it came when it gets stuck off the walkable ground.
 - **DLCs** — Broken Steel, Point Lookout, The Pitt, Operation: Anchorage and
   Mothership Zeta: walk graphs and doors for their places, and auto-walk leads
   you to the Pitt handcart, the Duchess Gambit and the presidential metro.

@@ -16,7 +16,10 @@ moves a running quest on:
     (player.GetSitting) - the free desks in the G.O.A.T. classroom; seats an
     NPC is sent to by a package are left out;
   * OBJECTIVE TARGETS that are not people: the reference a quest objective's
-    compass marker points at (an item to fetch, a place to reach).
+    compass marker points at (an item to fetch, a place to reach);
+  * MINES for an objective that asks for one (MINES_NEAR): the armed mines
+    round the place another objective of the quest sends you to - placed
+    grenades (PGRE) of a projectile that can be disarmed and picked up.
 
 Each entry carries the stage its script sets (shown only while the quest is
 running and has not reached it) or the objective it belongs to (shown only
@@ -65,6 +68,10 @@ SETSTAGE = re.compile(r'(?i)\bsetstage\s+(\w+)\s+(\d+)')
 # "find food" / "find medicine" with SetObjectiveCompleted MS03 10 / 12.
 SETOBJECTIVE = re.compile(r'(?i)\bsetobjectivecompleted\s+(\w+)\s+(\d+)')
 BLOCK = re.compile(r'(?ims)^\s*begin\s+(\w+)(.*?)^\s*end\b')
+# (quest, objective that wants a mine, objective whose target is the place,
+# radius): the Wasteland Survival Guide's "(Optional) Bring Moira a mine" -
+# the Minefield's mines, round the playground objective 30 sends you to.
+MINES_NEAR = [('ms03', 34, 30, 9000.0)]
 
 
 def subrecords(buf):
@@ -104,6 +111,7 @@ class Data:
         self.term_sets = {}      # terminal base id -> [(quest edid, stage)]
         self.refs = {}           # ref id -> (base id, x, y, z, rotz, xprm or None, module)
         self.pack_targets = set()
+        self.proj = {}           # projectile base id -> (flags, type)
 
     def read(self, path, module):
         data = open(path, 'rb').read()
@@ -167,7 +175,11 @@ class Data:
             src = get(b'SCTX')
             if src:
                 self.scripts[fid] = strip_comments(src.decode('cp1250', 'replace'))
-        elif typ in (b'REFR',):
+        elif typ == b'PROJ':
+            dd = get(b'DATA')
+            if dd and len(dd) >= 4:
+                self.proj[fid] = struct.unpack('<HH', dd[:4])
+        elif typ in (b'REFR', b'PGRE'):
             n, d = get(b'NAME'), get(b'DATA')
             if n and d and len(d) >= 24:
                 b = canon(struct.unpack('<I', n[:4])[0])
@@ -304,6 +316,24 @@ def main():
         typ = b[0] if b else b'STAT'
         kind = K_ITEM if typ in ITEM_TYPES else KIND_OF_BASE.get(typ, K_MARKER)
         entries[(t, q, 0, obj, kind)] = True
+
+    # Mines an objective asks for, round the place another objective sends
+    # you to. A mine: a projectile that can be disarmed (0x20) and picked up
+    # (0x40), lobbed (type 2).
+    mines = {pid for pid, (fl, ty) in d.proj.items() if ty == 2 and fl & 0x60 == 0x60}
+    for qedid, want, place, radius in MINES_NEAR:
+        q = d.quest_edid.get(qedid)
+        if q is None:
+            continue
+        anchors = [d.refs[t] for qq, o, t in d.objectives if qq == q and o == place and t in d.refs]
+        n = 0
+        for rid, r in d.refs.items():
+            if r[0] not in mines:
+                continue
+            if any(a[6] == r[6] and math.hypot(r[1] - a[1], r[2] - a[2]) <= radius for a in anchors):
+                entries[(rid, q, 0, want, K_ITEM)] = True
+                n += 1
+        print('%s objective %d: %d mine(s) within %.0f of objective %d' % (qedid, want, n, radius, place))
 
     rows = sorted(entries)
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)

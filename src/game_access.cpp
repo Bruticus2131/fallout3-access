@@ -481,6 +481,13 @@ const char* BaseFormName(TESForm* base)
     if (!base) return nullptr;
     UInt32 off;
     switch (base->typeID) {
+    // A projectile has its name right after TESBoundObject (FOSE
+    // BGSProjectile); only a mine's is used - bullets and thrown grenades in
+    // flight are not things to list.
+    case kFormType_Projectile:
+        if (!IsMineBase(base)) return nullptr;
+        off = 0x30;
+        break;
     // A container carries its TESContainer (0x0C) between TESBoundAnimObject
     // and the name, so its TESFullName sits at 0x3C, not 0x30. Reading 0x30
     // landed on the item list and every container came out as "Pojemnik".
@@ -872,9 +879,11 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         if (!(dx * dx + dy * dy <= r2)) continue;   // NaN fails too
 
         const char* nm = BaseFormName(base);
+        const bool mine = base->typeID == kFormType_Projectile && nm;   // only mines get a name
         std::string label;
         if (nm) {
             label = GameStrToUtf8(nm);
+            if (mine) label += strings::T(", uzbrojona", ", armed");
         } else if (kind == WorldEntity::Kind::Door) {
             label = strings::T("Drzwi", "Door");       // unnamed load doors = metro entrances
         } else if (kind == WorldEntity::Kind::Container) {
@@ -933,6 +942,7 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
         e.refr     = r;            // for crosshair-forced activation
         e.form_type = (uint8_t)base->typeID;
         e.base_id  = base->refID;
+        e.mine     = mine;
         if (kind == WorldEntity::Kind::Container) e.items = cont_state;
         if (kind == WorldEntity::Kind::Door) {
             e.load_door  = ReadIsLoadDoor(r);
@@ -964,6 +974,35 @@ void ScanCellRefs(TESObjectCELL* cell, const Vec3& pp, float r2,
 }
 
 } // namespace
+
+bool IsMineBase(const void* baseForm)
+{
+    auto* base = reinterpret_cast<const TESForm*>(baseForm);
+    if (!Readable(base, 0x64) || base->typeID != kFormType_Projectile) return false;
+    const auto* b = reinterpret_cast<const UInt8*>(base);
+    const UInt16 flags = *reinterpret_cast<const UInt16*>(b + 0x60);
+    const UInt16 type  = *reinterpret_cast<const UInt16*>(b + 0x62);
+    const bool mine = type == 2 && (flags & 0x60) == 0x60;
+    {
+        // Once per projectile base, to check the layout in play.
+        static std::mutex s_mx;
+        static std::vector<UInt32> s_seen;
+        std::lock_guard<std::mutex> lk(s_mx);
+        if (s_seen.size() < 64 &&
+            std::find(s_seen.begin(), s_seen.end(), base->refID) == s_seen.end()) {
+            s_seen.push_back(base->refID);
+            F3A_INFO("Projectile base %08X: flags %04X type %u -> %s", base->refID,
+                     (unsigned)flags, (unsigned)type, mine ? "a mine" : "not a mine");
+        }
+    }
+    return mine;
+}
+
+bool IsMineRef(const void* refr)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    return Readable(r, 0x40) && IsMineBase(r->baseForm);
+}
 
 // Is this reference an actor that is fighting the PLAYER?
 //
@@ -1149,6 +1188,48 @@ std::vector<TESObjectCELL*> NearbyCells(TESObjectCELL* pcell)
 }
 } // namespace
 
+void FindArmedMines(float radius, std::vector<WorldEntity>* out)
+{
+    if (!out) return;
+    out->clear();
+    auto* p = rt::Player();
+    if (!p || !p->parentCell) return;
+    const Vec3 pp = GetPlayerPosition();
+    const float r2 = radius * radius;
+    for (TESObjectCELL* cell : NearbyCells(p->parentCell)) {
+        if (!Readable(cell, 0xB4)) continue;
+        struct Node { TESObjectREFR* item; Node* next; };
+        auto* node = reinterpret_cast<Node*>(&cell->objectList);
+        for (int safety = 0; node && safety < 8192; ++safety) {
+            if (!Readable(node, 8)) break;
+            TESObjectREFR* r = node->item;
+            node = node->next;
+            if (!r || !Readable(r, 0x40) || (r->flags & 0x820)) continue;   // gone off / taken
+            TESForm* base = r->baseForm;
+            if (!Readable(base, 0x08) || base->typeID != kFormType_Projectile || !IsMineBase(base))
+                continue;
+            const float dx = r->posX - pp.x, dy = r->posY - pp.y, dz = r->posZ - pp.z;
+            if (!(dx * dx + dy * dy + dz * dz <= r2)) continue;     // NaN fails too
+            WorldEntity e;
+            e.kind     = WorldEntity::Kind::Item;
+            const char* nm = BaseFormName(base);
+            e.name     = nm ? GameStrToUtf8(nm) : std::string();
+            e.position = { r->posX, r->posY, r->posZ };
+            e.form_id  = r->refID;
+            e.refr     = r;
+            e.form_type = (uint8_t)base->typeID;
+            e.base_id  = base->refID;
+            e.mine     = true;
+            out->push_back(std::move(e));
+        }
+    }
+    std::sort(out->begin(), out->end(), [&pp](const WorldEntity& a, const WorldEntity& b) {
+        const float da = (a.position.x - pp.x) * (a.position.x - pp.x) + (a.position.y - pp.y) * (a.position.y - pp.y);
+        const float db = (b.position.x - pp.x) * (b.position.x - pp.x) + (b.position.y - pp.y) * (b.position.y - pp.y);
+        return da < db;
+    });
+}
+
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                                     bool actors_only, bool hostiles_only)
 {
@@ -1305,7 +1386,9 @@ std::vector<WorldEntity> ScriptQuestObjects(int radius, int max_results)
                 if (relevant(e, &qs)) { use = &e; break; }
             if (!use || !qs) continue;
             std::string label;
+            const bool mine = IsMineBase(base);
             if (const char* nm = BaseFormName(base)) label = GameStrToUtf8(nm);
+            if (mine && !label.empty()) label += strings::T(", uzbrojona", ", armed");
             if (label.empty()) {
                 label = (use->kind == questobjs::kTrigger || use->kind == questobjs::kMarker)
                             ? strings::T("Miejsce zadania", "Quest spot")
@@ -1321,6 +1404,7 @@ std::vector<WorldEntity> ScriptQuestObjects(int radius, int max_results)
             e.form_id = r->refID;
             e.refr = r;
             e.form_type = (uint8_t)base->typeID;
+            e.mine = mine;
             if (kind == WorldEntity::Kind::Door) {
                 e.load_door  = ReadIsLoadDoor(r);
                 e.open_state = ReadDoorOpenState(r);

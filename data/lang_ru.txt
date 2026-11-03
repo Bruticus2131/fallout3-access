@@ -1919,3 +1919,24 @@ ru: "Остановлено: клавиша движения."
 
 en: "You are losing health. Walk stopped."
 ru: "Вы теряете здоровье. Ходьба остановлена."
+
+en: ", armed"
+ru: ", на взводе"
+
+en: "An armed mine in the way: "
+ru: "Взведённая мина на пути: "
+
+en: ". Walk stopped. End disarms it."
+ru: ". Ходьба остановлена. End её обезвредит."
+
+en: "I won't teleport to an armed mine. End disarms it."
+ru: "Не телепортирую к взведённой мине. End её обезвредит."
+
+en: " takes you there."
+ru: " перенесёт вас туда."
+
+en: "Stuck off the way. Going back the way I came."
+ru: "Застрял в стороне от прохода. Возвращаюсь по своим следам."
+
+en: "Back on the way. Recalculating the route."
+ru: "Снова на проходе. Пересчитываю маршрут."

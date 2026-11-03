@@ -67,6 +67,19 @@ size_t       g_wp_index   = 0;
 bool         g_have_path  = false;
 // Places this walk must route round: locked doors met on the way.
 std::vector<game::Vec3> g_avoid;
+// Armed mines met in this place (MineCheck), each logged once. Points of one
+// place's coordinates.
+std::vector<game::Vec3> g_mine_avoid;
+uint32_t g_mine_space = 0;
+// The walk goes TO a mine (to disarm it with End): it stops short of it -
+// outside the 100 units that set it off, within End's 300.
+bool g_target_mine = false;
+constexpr float kMineArrive = 230.0f;
+// Where this walk has been (every 40 units), and the way back along it out
+// of a pocket off the walkable mesh (BeginBacktrack) - once per walk.
+std::vector<game::Vec3> g_trail;
+bool g_backtracked  = false;
+bool g_backtracking = false;
 // Lost-the-path check: how far off the route counts as lost, and how often a
 // new route may be worked out (a rebuild every tick would be its own problem).
 constexpr float kLostDist       = 450.0f;
@@ -1062,6 +1075,25 @@ float RouteLength2D(const std::vector<game::Vec3>& wp)
 }
 
 // Take the game's route once it is ready.
+// Does the route pass an armed mine this walk knows of - within 140 units of
+// one, on its level? A frag mine goes off 3 s after anyone comes within 100
+// (Fallout3.esm). The mine the walk goes to does not count.
+bool RoutePassesMine(const std::vector<game::Vec3>& wp)
+{
+    if (g_mine_avoid.empty() || wp.empty() || g_mine_space != game::PlayerSpaceId()) return false;
+    game::Vec3 prev = game::GetPlayerPosition();
+    for (const auto& p : wp) {
+        for (const auto& m : g_mine_avoid) {
+            if (g_target_mine && std::fabs(m.x - g_target_pos.x) < 16.0f &&
+                std::fabs(m.y - g_target_pos.y) < 16.0f)
+                continue;
+            if (std::fabs(m.z - p.z) < 250.0f && SegDist2D(m, prev, p) < 140.0f) return true;
+        }
+        prev = p;
+    }
+    return false;
+}
+
 void AdoptEngineRoute()
 {
     int st = mover::EnginePathState();
@@ -1077,9 +1109,16 @@ void AdoptEngineRoute()
         return;
     }
     if (RouteHitsAvoided(wp)) {
-        F3A_INFO("autowalk: engine route goes through an avoided door - ignored");
+        F3A_INFO("autowalk: engine route goes through an avoided door or mine - ignored");
         return;
     }
+    // Mines are NOT routed round: the game's route was thrown out for one
+    // and ours, round the mine's triangles (out on the wasteland they are
+    // hundreds of units across), took a friend into a pocket of a ruin off
+    // the walkable mesh, from where neither found a way (2026-11-03). The
+    // walk stops in front of a mine instead (MineCheck) - End disarms it.
+    if (RoutePassesMine(wp))
+        F3A_INFO("autowalk: the engine's route passes an armed mine - the walk will stop there");
     // The engine never steps off a ledge. Where our own route does, and is
     // MUCH the shorter for it, ours is walked. "Much": a ledge is only probed
     // for a wall, and in Megaton's walkways a 268-unit drop that passed the
@@ -3391,6 +3430,9 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     // evidence we need below when there's no reference to test the space with.
     g_avoid.clear();
     g_avoid_space = game::PlayerSpaceId();
+    g_target_mine = refr_in && game::IsMineRef(refr_in);
+    g_trail.clear();
+    g_backtracked = g_backtracking = false;
     g_rebuild_cooldown = 0.0f;
     g_waypoints.clear();
     g_wp_index  = 0;
@@ -3665,6 +3707,123 @@ void PlayerEndedWalk(const char* reason)
 }
 } // namespace
 
+namespace {
+// A walk that gives up, stuck: the teleport is there for that, and the
+// player was not told (a friend wedged in a ruin in the Minefield heard
+// "stuck" three times, with Moira 85000 units away - 2026-11-03). Not for
+// a mine, which the teleport refuses.
+// Out of a pocket off the walkable mesh: the inside of a ruin, a gap among
+// rubble. Neither route-finder works from there - the game's answers "no
+// route" (the player is not on its mesh), ours starts from the nearest
+// triangle, on the far side of a wall - and a friend in the Minefield ruins
+// heard "stuck" three times over (2026-11-03: 105 units from the nearest
+// triangle). The way in is the way out: back along this walk's own trail to
+// the last point of it that is on the mesh, then a new route from there.
+// Once per walk, and only from off the mesh.
+bool BeginBacktrack()
+{
+    if (g_backtracked || g_trail.size() < 2) return false;
+    const auto here = game::GetPlayerPosition();
+    std::vector<game::Vec3> pts(g_trail);
+    pts.push_back(here);
+    const std::vector<bool> on = navmesh::OnMesh(pts, 90.0f);
+    if (on.size() != pts.size() || on.back()) return false;    // no mesh, or on it
+    for (size_t i = g_trail.size(); i-- > 0;) {
+        if (!on[i] || Dist2D(g_trail[i], here) < 120.0f) continue;
+        std::vector<game::Vec3> back(g_trail.rbegin(), g_trail.rbegin() + (g_trail.size() - i));
+        F3A_INFO("autowalk: off the walkable mesh at (%.0f,%.0f,%.0f) - back along %u trail point(s) "
+                 "to (%.0f,%.0f,%.0f)", here.x, here.y, here.z, (unsigned)back.size(),
+                 g_trail[i].x, g_trail[i].y, g_trail[i].z);
+        g_waypoints = std::move(back);
+        g_wp_index = 0;
+        g_have_path = true;
+        g_route_engine = false;
+        g_route_partial = false;
+        g_backtracked = g_backtracking = true;
+        g_stall_spots.clear();
+        g_stuck_count = 0;
+        g_probe_route_left = -1.0f;
+        tolk::Speak(strings::T("Utknąłem poza przejściem. Wracam po swoich śladach.",
+                               "Stuck off the way. Going back the way I came."),
+                    tolk::Priority::Ui, false);
+        return true;
+    }
+    F3A_INFO("autowalk: off the walkable mesh at (%.0f,%.0f,%.0f), no trail point on it to go back to",
+             here.x, here.y, here.z);
+    return false;
+}
+
+std::string TeleportHint()
+{
+    if (!g_target_refr || g_target_mine) return {};
+    return " " + hotkeys::KeyText(config::Get().hotkeys.teleport) +
+           strings::T(" przeniesie cię tam.", " takes you there.");
+}
+
+// Mines. A frag mine goes off 3 s after anyone comes within 100 units of it,
+// 100 damage over 192 units (Fallout3.esm: MineFragProjectile and its
+// explosion). A friend walking to the Minefield playground died twice
+// (log 2026-11-02) - the walk led him on, and the scanner did not even list
+// the mines. Every 0.3 s on a walk: the armed mines within 900 units are
+// remembered (our own route keeps off them, the engine's is not taken past
+// them), and the walk stops - saying where - when the player is within 180
+// units of one, or the next 450 units of the route pass within 140 of one.
+// End disarms a mine without going nearer.
+DWORD g_mine_check_at = 0;
+
+bool RouteAheadPasses(const game::Vec3& m, float ahead, float within)
+{
+    if (!g_have_path || g_wp_index >= g_waypoints.size()) return false;
+    game::Vec3 prev = game::GetPlayerPosition();
+    float run = 0.0f;
+    for (size_t i = g_wp_index; i < g_waypoints.size() && run < ahead; ++i) {
+        const game::Vec3& p = g_waypoints[i];
+        if (std::fabs(m.z - p.z) < 250.0f && SegDist2D(m, prev, p) < within) return true;
+        run += std::hypot(p.x - prev.x, p.y - prev.y);
+        prev = p;
+    }
+    return false;
+}
+
+bool MineCheck()
+{
+    const DWORD now = GetTickCount();
+    if ((LONG)(now - g_mine_check_at) < 300) return false;
+    g_mine_check_at = now;
+    const uint32_t sp = game::PlayerSpaceId();
+    if (sp != g_mine_space) { g_mine_avoid.clear(); g_mine_space = sp; }
+    std::vector<game::WorldEntity> mines;
+    game::FindArmedMines(900.0f, &mines);
+    if (mines.empty()) return false;
+    for (const auto& m : mines) {
+        bool known = false;
+        for (const auto& a : g_mine_avoid)
+            if (std::fabs(a.x - m.position.x) < 16.0f && std::fabs(a.y - m.position.y) < 16.0f) known = true;
+        if (known || g_mine_avoid.size() >= 256) continue;
+        g_mine_avoid.push_back(m.position);       // seen: logged once
+        F3A_INFO("autowalk: armed mine '%s' %08X at (%.0f,%.0f,%.0f)", m.name.c_str(),
+                 (unsigned)m.form_id, m.position.x, m.position.y, m.position.z);
+    }
+    const auto pp = game::GetPlayerPosition();
+    for (const auto& m : mines) {
+        if (g_target_mine && m.form_id == g_target_form) continue;   // walking to disarm it
+        if (std::fabs(m.position.z - pp.z) > 250.0f) continue;      // another level
+        const float d = std::hypot(m.position.x - pp.x, m.position.y - pp.y);
+        if (!(d < 180.0f) && !RouteAheadPasses(m.position, 450.0f, 140.0f)) continue;
+        const auto b = game::ComputeBearing(pp, game::GetPlayerYaw(), m.position);
+        const std::string say =
+            strings::T("Uzbrojona mina na drodze: ", "An armed mine in the way: ") + m.name + ", " +
+            strings::FormatDistance(b.distance) + ", " + strings::ClockDirection(b.relative_yaw) +
+            strings::T(". Chodzenie zatrzymane. End ją rozbroi.", ". Walk stopped. End disarms it.");
+        F3A_INFO("autowalk: armed mine %08X %.0f units off, the route passes it - stopping",
+                 (unsigned)m.form_id, d);
+        StopWalking(say.c_str());
+        return true;
+    }
+    return false;
+}
+} // namespace
+
 void Tick(float dt)
 {
     TickUnblock();                    // a switch to press, a lock to pick: walking or not
@@ -3779,6 +3938,16 @@ void Tick(float dt)
             g_walkgraph_tried = false;          // a new place: the graph may help again
         }
     }
+    if (MineCheck()) return;                     // an armed mine ahead: stopped
+    // The trail: where this walk has been (BeginBacktrack).
+    if (!g_cross && !g_backtracking) {
+        const auto pp = game::GetPlayerPosition();
+        if (g_trail.empty() || Dist2D(g_trail.back(), pp) >= 40.0f ||
+            std::fabs(g_trail.back().z - pp.z) >= 60.0f) {
+            if (g_trail.size() >= 96) g_trail.erase(g_trail.begin(), g_trail.begin() + 32);
+            g_trail.push_back(pp);
+        }
+    }
 
     // Cross-worldspace routing runs its own steering (walk to a door, pass
     // through, re-evaluate) instead of the straight-line/navmesh walk below.
@@ -3801,7 +3970,7 @@ void Tick(float dt)
     // Arrival requires being on the SAME floor too — DistanceToTarget is 2D, so
     // without this we'd falsely "arrive" while standing directly under/over a
     // target on another floor.
-    if (!g_precise && dist <= kArriveDist && sameFloor) {
+    if (!g_precise && dist <= (g_target_mine ? kMineArrive : kArriveDist) && sameFloor) {
         char buf[192];
         std::snprintf(buf, sizeof(buf), strings::T("Dotarłeś: %s", "Arrived: %s"),
                       g_target_name.c_str());
@@ -3912,6 +4081,15 @@ void Tick(float dt)
     AdoptEngineRoute();
     if (g_state == State::Idle) return;     // it found a locked door it cannot pass
     AdvanceWaypoints();
+    if (g_backtracking && (g_wp_index >= g_waypoints.size() || g_route_engine)) {
+        g_backtracking = false;
+        g_stall_spots.clear();
+        F3A_INFO("autowalk: back on the walkable mesh - a new route from here");
+        if (!g_route_engine)
+            RebuildPath(strings::T("Wróciłem na przejście. Przeliczam trasę.",
+                                   "Back on the way. Recalculating the route."));
+        return;
+    }
     if (CheckRouteForSwitched()) return;    // a door on the way only its switch opens
     TickDrops();
 
@@ -4243,6 +4421,8 @@ void Tick(float dt)
                     g_probe_route_left = RouteLeft();   // the skip itself is not progress
                 }
                 ++g_stuck_count;
+                // Off the walkable mesh: back the way the walk came.
+                if (BeginBacktrack()) return;
                 bool personInWay = false;
                 const std::string obstacle = DescribeObstacle(&personInWay);
                 // Back on the same spot a third time, after walking on from it
@@ -4265,14 +4445,17 @@ void Tick(float dt)
                                                      "Nie widzę drogi do: ",
                                                      "Stuck in the same place several times. "
                                                      "I can't see a way to: ") +
-                                          g_target_name + ".";
+                                          g_target_name + "." + TeleportHint();
                         StopWalking(say.c_str());
                         return;
                     }
                 }
                 if (g_stuck_count >= kMaxStuck) {
-                    StopWalking(strings::T("Utknąłem. Spróbuj naprowadzania ręcznego.",
-                                           "I'm stuck. Try walking with the guide beacon."));
+                    const std::string say =
+                        std::string(strings::T("Utknąłem. Spróbuj naprowadzania ręcznego.",
+                                               "I'm stuck. Try walking with the guide beacon.")) +
+                        TeleportHint();
+                    StopWalking(say.c_str());
                     return;
                 }
                 // Wedged twice in a row: the route itself may be the problem

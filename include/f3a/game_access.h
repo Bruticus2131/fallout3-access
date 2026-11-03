@@ -100,7 +100,22 @@ struct WorldEntity {
     // lying far off): the place it is in (interior cell or worldspace form
     // id) - refr is null then. 0 = a loaded thing, ask its refr.
     uint32_t    space      = 0;
+    // An armed mine (IsMineBase): goes off when anyone comes near.
+    bool        mine       = false;
 };
+
+// Is this base form a MINE - the projectile an armed mine lying in the world
+// is? Placed mines are not items in Fallout3.esm but placed grenades (PGRE)
+// of a projectile that can be disarmed and picked up: BGSProjectile flags
+// (+0x60) 0x20 and 0x40, type (+0x62) 2, a lobbed one - only the four mines
+// have both (Fallout3.esm: MineFrag/Pulse/Plasma/BottleCapProjectile).
+// Thrown grenades and bullets are left out. Memory reads only.
+bool IsMineBase(const void* baseForm);
+// The same for a reference (its base form).
+bool IsMineRef(const void* refr);
+// The armed mines within `radius` (3D, game units) of the player, nearest
+// first, in the loaded cells. Memory reads only (any thread).
+void FindArmedMines(float radius, std::vector<WorldEntity>* out);
 
 // A fixture rather than something to pick up: activators (buttons, switches),
 // terminals, furniture, lights - "Przedmiot: Terminal" was wrong for them.

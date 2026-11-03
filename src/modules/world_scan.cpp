@@ -1637,6 +1637,15 @@ void TeleportKey()
             tr = g_scan_list[g_scan_index].refr; tid = g_scan_list[g_scan_index].form_id;
             tpos = g_scan_list[g_scan_index].position;
         }
+        // An armed mine: the teleport puts you beside it, inside the 100 units
+        // that set it off.
+        if (tr && game::IsMineRef(tr)) {
+            F3A_INFO("Teleport: %08X is an armed mine - refused", tid);
+            tolk::Speak(strings::T("Nie teleportuję do uzbrojonej miny. End ją rozbroi.",
+                                   "I won't teleport to an armed mine. End disarms it."),
+                        tolk::Priority::System, true);
+            return;
+        }
         const DWORD now = GetTickCount();
         const bool confirmed = tid && tid == s_warned_id && now - s_warned_at < 6000;
         if (tr && !confirmed && BehindLockedDoor(tpos, tr)) {

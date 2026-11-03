@@ -31,6 +31,12 @@ bool BuildPath(const game::Vec3& from, const game::Vec3& to,
 // only a guess: the engine's pathfinder needs a point on the ground.
 bool GroundZ(float x, float y, float nearZ, float* outZ);
 
+// For each point: does it stand on the walkable mesh of the loaded cells -
+// a triangle under it whose height there is within `maxDz` of the point's?
+// One gathering of the triangles for all of them. Empty when there is no
+// mesh to ask.
+std::vector<bool> OnMesh(const std::vector<game::Vec3>& pts, float maxDz);
+
 // Keep a route off the walls it turns round. A route pulled taut (the
 // engine's) has each corner ON the navmesh's edge, against the wall on the
 // inside of the turn, and a player following it brushes that wall or, cutting
@@ -76,7 +82,8 @@ void ClearBannedDrops();
 // through (see kWallMargin in navmesh.cpp).
 bool BuildPathOnTriangles(const std::vector<game::Vec3>& corners, const game::Vec3& from,
                           const game::Vec3& to, std::vector<game::Vec3>& out_waypoints,
-                          float clearance = 40.0f, float margin = 32.0f);
+                          float clearance = 40.0f, float margin = 32.0f,
+                          const std::vector<game::Vec3>* avoid = nullptr);
 // RetraceWithMargin on triangles given as corners, the same way.
 bool RetraceOnTriangles(const std::vector<game::Vec3>& corners, const std::vector<game::Vec3>& route,
                         std::vector<game::Vec3>& out, float clearance);

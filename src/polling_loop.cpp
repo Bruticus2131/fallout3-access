@@ -1489,6 +1489,11 @@ void TickNativeAim()
 const void*       g_teleport_refr = nullptr;
 uint32_t          g_teleport_refid = 0;
 std::atomic<bool> g_teleport_pending{ false };
+// A teleport that went onto the target itself (its place was not loaded, so
+// no ground beside it could be found first): checked once the world has
+// settled. Main thread.
+const void*       g_teleport_settle_refr = nullptr;
+uint32_t          g_teleport_settle_id   = 0;
 // Press the map's "travel to" button (a HandleClick → main thread only).
 std::atomic<bool> g_map_travel_pending{ false };
 // The quantity prompt's state, sampled on the MAIN thread. Reading that menu
@@ -1962,7 +1967,28 @@ void MainThreadWork()
                      std::sqrt(off.x * off.x + off.y * off.y));
         }
         game::TeleportPlayerToRef(g_teleport_refr, g_teleport_refid, beside ? &off : nullptr);
+        if (!beside) { g_teleport_settle_refr = g_teleport_refr; g_teleport_settle_id = g_teleport_refid; }
         if (game::WorldSettling()) { g_hp_watch.clear(); return; }
+    }
+    // MoveTo puts the player on the target's own origin - for the Minefield's
+    // merry-go-round, inside it, and the player could not move at all from
+    // there (2026-11-03). Once the place is loaded: beside it, on walkable
+    // ground, if the player is still standing on that origin.
+    if (g_teleport_settle_refr) {
+        const void* r = g_teleport_settle_refr;
+        const uint32_t id = g_teleport_settle_id;
+        g_teleport_settle_refr = nullptr;
+        game::Vec3 at{}, spot{};
+        const game::Vec3 pp = game::GetPlayerPosition();
+        if (game::GetRefPosition(r, id, &at) &&
+            std::hypot(pp.x - at.x, pp.y - at.y) < 100.0f && std::fabs(pp.z - at.z) < 200.0f &&
+            navmesh::StandingSpotNear(at, 56.0f, 260.0f, &spot)) {
+            const game::Vec3 off{ spot.x - at.x, spot.y - at.y, spot.z - at.z + 4.0f };
+            F3A_INFO("Teleport: landed on the target's origin - moved %.0f units beside it",
+                     std::sqrt(off.x * off.x + off.y * off.y));
+            game::TeleportPlayerToRef(r, id, &off);
+            if (game::WorldSettling()) { g_hp_watch.clear(); return; }
+        }
     }
     AnnounceStatus();
     AnnounceLevel();

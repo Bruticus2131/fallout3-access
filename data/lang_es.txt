@@ -1935,3 +1935,24 @@ es: "Detenido: una tecla de movimiento."
 
 en: "You are losing health. Walk stopped."
 es: "Estás perdiendo salud. Caminata detenida."
+
+en: ", armed"
+es: ", armada"
+
+en: "An armed mine in the way: "
+es: "Una mina armada en el camino: "
+
+en: ". Walk stopped. End disarms it."
+es: ". Caminata detenida. End la desactiva."
+
+en: "I won't teleport to an armed mine. End disarms it."
+es: "No me teletransporto a una mina armada. End la desactiva."
+
+en: " takes you there."
+es: " te lleva allí."
+
+en: "Stuck off the way. Going back the way I came."
+es: "Atascado fuera del camino. Vuelvo por donde vine."
+
+en: "Back on the way. Recalculating the route."
+es: "De vuelta en el camino. Recalculo la ruta."

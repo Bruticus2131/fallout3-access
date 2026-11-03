@@ -338,6 +338,30 @@ bool StandingSpotNear(const Vec3& at, float minDist, float maxDist, Vec3* out)
     return found;
 }
 
+std::vector<bool> OnMesh(const std::vector<Vec3>& pts, float maxDz)
+{
+    std::vector<bool> out;
+    std::vector<Tri> tris;
+    if (pts.empty() || !GatherCellTriangles(tris)) return out;
+    out.assign(pts.size(), false);
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const Vec3& p = pts[i];
+        for (const Tri& t : tris) {
+            if (!PointInTri2D(p, t.pos[0], t.pos[1], t.pos[2])) continue;
+            const Vec3& a = t.pos[0]; const Vec3& b = t.pos[1]; const Vec3& c = t.pos[2];
+            const float det = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+            float z = t.centroid.z;
+            if (std::fabs(det) > 1e-3f) {
+                const float wa = ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / det;
+                const float wb = ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / det;
+                z = wa * a.z + wb * b.z + (1.0f - wa - wb) * c.z;
+            }
+            if (std::isfinite(z) && std::fabs(z - p.z) <= maxDz) { out[i] = true; break; }
+        }
+    }
+    return out;
+}
+
 bool GroundZ(float x, float y, float nearZ, float* outZ)
 {
     if (!outZ) return false;
@@ -458,10 +482,11 @@ bool RetraceOn(const std::vector<Tri>& tris, const std::vector<Vec3>& route,
 } // namespace
 
 bool BuildPathOnTriangles(const std::vector<Vec3>& corners, const Vec3& from, const Vec3& to,
-                          std::vector<Vec3>& out_waypoints, float clearance, float margin)
+                          std::vector<Vec3>& out_waypoints, float clearance, float margin,
+                          const std::vector<Vec3>* avoid)
 {
     out_waypoints.clear();
-    return PathOnTris(TrisFromCorners(corners), from, to, out_waypoints, nullptr, clearance, margin);
+    return PathOnTris(TrisFromCorners(corners), from, to, out_waypoints, avoid, clearance, margin);
 }
 
 bool RetraceOnTriangles(const std::vector<Vec3>& corners, const std::vector<Vec3>& route,
