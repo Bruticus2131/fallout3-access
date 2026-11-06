@@ -162,6 +162,11 @@ void RequestHackSkipIntro();
 // flag per ledge (1 = open), comes back through LedgeCheckAnswer, true once.
 void RequestLedgeCheck(const std::vector<std::pair<game::Vec3, game::Vec3>>& legs);
 bool LedgeCheckAnswer(std::vector<char>* open);
+// Legs of a way round an obstacle (from, to): clear (game::SegmentLooksClear)?
+// Asked on the main thread; one flag per leg (1 = clear) through
+// ClearCheckAnswer, true once.
+void RequestClearCheck(const std::vector<std::pair<game::Vec3, game::Vec3>>& legs);
+bool ClearCheckAnswer(std::vector<char>* open);
 
 // Lockpicking: move the bobby pin by `units` (accumulated, applied on the main
 // thread through game::NudgeLockpick).

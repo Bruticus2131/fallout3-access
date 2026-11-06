@@ -33,7 +33,8 @@ It is a [FOSE](https://fose.silverlock.org) plugin that reads the game's interfa
   whole navigation mesh (roads preferred), and a target in another place is
   reached through the right chain of doors, however far away. Armed mines are
   listed and End disarms them; auto-walk stops in front of one, and walks
-  back out the way it came when it gets stuck off the walkable ground.
+  back out the way it came when it gets stuck off the walkable ground. It
+  goes through gates and round furniture the game's map does not know of.
 - **DLCs** — Broken Steel, Point Lookout, The Pitt, Operation: Anchorage and
   Mothership Zeta: walk graphs and doors for their places, and auto-walk leads
   you to the Pitt handcart, the Duchess Gambit and the presidential metro.
@@ -292,6 +293,7 @@ Useful `[Voice]` settings:
 | `ScannerRadius` | how far the PgUp/PgDn scanner reaches outdoors (default 8000 units, about 125 m); indoors it covers the whole interior |
 | `CompassUnits` | `0` = clock face ("three o'clock"), `1` = degrees |
 | `AimHelp` | the game's own Aim locks onto the enemy and carries the shot; `0` for a sighted player who aims with the mouse |
+| `AimSkeleton` | the held aim follows the enemy's torso bone as its body stands (crouched, crawling); `0` aims at the middle of its model |
 | `CutsceneCue` | a soft chime when a scene takes the controls away and another when it gives them back; put your own `cutscene_start.wav` / `cutscene_end.wav` in `Fallout3Access\sounds` to replace it |
 | `AudioDescEvents` | what the people round you do, read from the game as it happens (sits down, gets up, draws a weapon, passes out, dies): `0` never, `1` in scenes (default), `2` always |
 | `AudioDescPeople` | the written descriptions of how people look, on first sight (off by default) |

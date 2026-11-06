@@ -116,6 +116,10 @@ bool IsMineRef(const void* refr);
 // The armed mines within `radius` (3D, game units) of the player, nearest
 // first, in the loaded cells. Memory reads only (any thread).
 void FindArmedMines(float radius, std::vector<WorldEntity>* out);
+// Where the ordinary doors (not load doors) in the loaded cells are, within
+// `radius` of the player: the middle of each one's model. The navmesh joins
+// two meshes that meet only through such a door (a fence gate). Memory reads.
+void NearbyDoorPoints(float radius, std::vector<Vec3>* out);
 
 // A fixture rather than something to pick up: activators (buttons, switches),
 // terminals, furniture, lights - "Przedmiot: Terminal" was wrong for them.
@@ -467,6 +471,13 @@ void RestoreMovementAnimPace(void* actor);
 // its 3D isn't loaded. MUST run on the main thread: it calls into the model.
 bool GetCollisionAABBCenter(const void* refr, float* outX, float* outY, float* outZ);
 
+// The point the held aim keeps on an actor, every frame: the world position
+// of its torso bone ("Bip01 Spine2", else the next of the FNV mod's list -
+// neck, spine, pelvis, head, the root), as the skeleton stands NOW - crouched,
+// crawling, turned. Found once per target, then read. Plain memory reads (the
+// model as the game's Get3D reads it; nothing called). [Voice] AimBones.
+bool ActorAimBone(const void* refr, uint32_t refid, Vec3* out, const char** name = nullptr);
+
 // The best available aim point for a reference: the collision centre, else the
 // render bound's centre, else the origin lifted to chest height. `how` receives
 // which one was used, so the choice can be reported instead of guessed at.
@@ -759,6 +770,10 @@ bool GetCameraPos(Vec3* out);
 // just behind the edge, at knee and chest height, out over it. False = a wall
 // (a floor's edge at a building's wall, lower ground outside). MAIN THREAD.
 bool LedgeLooksOpen(const Vec3& ledge, const Vec3& landing);
+// Is the way from `from` to `to` clear at shin and waist height (rays from a
+// little ahead of `from`, the player's own body left out)? True when it
+// cannot be asked. MAIN THREAD.
+bool SegmentLooksClear(const Vec3& from, const Vec3& to);
 
 // The engine's own view raycast — the one that decides what is under the
 // crosshair. Returns true if anything was hit; `outRefId` names it (0 for
@@ -920,6 +935,9 @@ int LockSkillNeeded(int tier);
 uint32_t LockKeyForm(const void* refr, uint32_t expectedRefID, std::string* keyName = nullptr);
 // Is it locked now: 1 locked, 0 not (or no lock at all), -1 unreadable.
 int LockState(const void* refr, uint32_t expectedRefID);
+// The lock's level (0..100, a leveled lock's real one when known; >= 250 =
+// only its key), -1 no lock / unreadable. Memory reads only.
+int RefLockLevel(const void* refr, uint32_t expectedRefID);
 
 // ---- What opens what ----
 // A door or an activator that something else opens: the game's own list of

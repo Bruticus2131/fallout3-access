@@ -1956,3 +1956,6 @@ es: "Atascado fuera del camino. Vuelvo por donde vine."
 
 en: "Back on the way. Recalculating the route."
 es: "De vuelta en el camino. Recalculo la ruta."
+
+en: "The door is locked: "
+es: "La puerta está cerrada con llave: "

@@ -48,7 +48,12 @@ struct Tri {
     Vec3     centroid;
     uint64_t vkey[3];   // quantized vertex keys (for shared-edge detection)
     bool     water = false;   // NVTR flag 0x200
+    uintptr_t mesh = 0;       // which navmesh (its address in the game; 0 = unknown)
 };
+
+// The ordinary doors round the player, for this thread's path search
+// (BuildPath / RetraceWithMargin set it; BuildLinks joins meshes through them).
+thread_local const std::vector<Vec3>* t_doors = nullptr;
 
 uint64_t QuantKey(const Vec3& p)
 {
@@ -115,6 +120,7 @@ void GatherMeshFromCell(UInt8* cell, std::vector<Tri>& tris)
             }
             if (!ok) continue;
             out.water = (tri[6] & 0x200) != 0;
+            out.mesh  = reinterpret_cast<uintptr_t>(nm);
             out.centroid = {
                 (out.pos[0].x + out.pos[1].x + out.pos[2].x) / 3.0f,
                 (out.pos[0].y + out.pos[1].y + out.pos[2].y) / 3.0f,
@@ -409,7 +415,12 @@ bool BuildPath(const Vec3& from, const Vec3& to,
     out_waypoints.clear();
     std::vector<Tri> tris;
     if (!GatherCellTriangles(tris)) return false;
-    return PathOnTris(tris, from, to, out_waypoints, avoid, 40.0f, kWallMargin, withDrops);
+    std::vector<Vec3> doors;
+    game::NearbyDoorPoints(6000.0f, &doors);
+    t_doors = &doors;
+    const bool ok = PathOnTris(tris, from, to, out_waypoints, avoid, 40.0f, kWallMargin, withDrops);
+    t_doors = nullptr;
+    return ok;
 }
 
 namespace {
@@ -671,6 +682,65 @@ void BuildLinks(const std::vector<Tri>& tris, bool withDrops,
                     ++*seamCount;
                 }
         }
+    }
+
+    // Doors: two navmeshes that meet only through a door. The enclosure under
+    // the pylon by Springvale is a mesh of its own, joined to the wasteland's
+    // by nothing but its gate (no shared corners, no outside links): the
+    // game's route - closed doors are walls to it - ran the player into the
+    // fence, and ours found no way out at all (2026-11-06). Each door joins
+    // the nearest triangle of each mesh beside it, the way through being the
+    // door itself; the walk opens it when it gets there.
+    if (t_doors && !t_doors->empty()) {
+        constexpr float kDoorReach = 160.0f;
+        auto distTri2D = [](const Vec3& p, const Tri& t) {
+            if (PointInTri2D(p, t.pos[0], t.pos[1], t.pos[2])) return 0.0f;
+            float best = 1e30f;
+            for (int e = 0; e < 3; ++e) {
+                const Vec3& a = t.pos[e];
+                const Vec3& b = t.pos[(e + 1) % 3];
+                const float sx = b.x - a.x, sy = b.y - a.y, l2 = sx * sx + sy * sy;
+                float u = l2 > 1e-6f ? ((p.x - a.x) * sx + (p.y - a.y) * sy) / l2 : 0.0f;
+                u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+                const float qx = a.x + sx * u - p.x, qy = a.y + sy * u - p.y;
+                best = (std::min)(best, std::sqrt(qx * qx + qy * qy));
+            }
+            return best;
+        };
+        int doorLinks = 0;
+        for (const Vec3& D : *t_doors) {
+            struct Near { uintptr_t mesh; int tri; float d; };
+            std::vector<Near> best;
+            for (int i = 0; i < N; ++i) {
+                const Tri& t = tris[i];
+                if (t.mesh == 0 || t.water || std::fabs(t.centroid.z - D.z) > 150.0f) continue;
+                const float minx = (std::min)({ t.pos[0].x, t.pos[1].x, t.pos[2].x });
+                const float maxx = (std::max)({ t.pos[0].x, t.pos[1].x, t.pos[2].x });
+                const float miny = (std::min)({ t.pos[0].y, t.pos[1].y, t.pos[2].y });
+                const float maxy = (std::max)({ t.pos[0].y, t.pos[1].y, t.pos[2].y });
+                if (D.x < minx - kDoorReach || D.x > maxx + kDoorReach ||
+                    D.y < miny - kDoorReach || D.y > maxy + kDoorReach) continue;
+                const float d = distTri2D(D, t);
+                if (!(d <= kDoorReach)) continue;
+                bool have = false;
+                for (auto& b : best)
+                    if (b.mesh == t.mesh) { have = true; if (d < b.d) { b.tri = i; b.d = d; } break; }
+                if (!have) best.push_back({ t.mesh, i, d });
+            }
+            for (size_t x = 0; x < best.size(); ++x)
+                for (size_t y = x + 1; y < best.size(); ++y) {
+                    const Tri& A = tris[best[x].tri];
+                    const Tri& B = tris[best[y].tri];
+                    if (std::fabs(A.centroid.z - B.centroid.z) > 64.0f) continue;   // not one floor
+                    const Vec3 at{ D.x, D.y, 0.5f * (A.centroid.z + B.centroid.z) };
+                    adj[best[x].tri].push_back({ best[y].tri, at, at, 0, 0, false });
+                    adj[best[y].tri].push_back({ best[x].tri, at, at, 0, 0, false });
+                    ++doorLinks;
+                }
+        }
+        if (doorLinks)
+            F3A_INFO("navmesh: %d mesh join(s) through %u door(s)", doorLinks,
+                     (unsigned)t_doors->size());
     }
 
     // The corners on the mesh's real edge: those of an edge only one triangle

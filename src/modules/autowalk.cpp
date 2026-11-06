@@ -1048,6 +1048,11 @@ DWORD  g_drop_watch_until = 0;     // 0 = none
 bool   DropNotTaken(const char* why);   // below TickDrops
 
 bool OwnRoute() { return g_have_path && !g_route_engine; }
+// Stalled on the game's route: its answers are not taken for a while, while
+// ours (from where the player stands) is walked. Its route out of the fenced
+// enclosure by Springvale led into the fence every time, and each new answer
+// replaced ours again (2026-11-06).
+DWORD g_engine_distrust_until = 0;
 
 std::vector<std::pair<game::Vec3, game::Vec3>> DropLegs(const std::vector<game::Vec3>& wp)
 {
@@ -1110,6 +1115,19 @@ void AdoptEngineRoute()
     }
     if (RouteHitsAvoided(wp)) {
         F3A_INFO("autowalk: engine route goes through an avoided door or mine - ignored");
+        return;
+    }
+    {
+        // Where it leads, for the log: a route into a fence reads as one.
+        char pts[256] = {};
+        size_t used = 0;
+        for (size_t i = 0; i < wp.size() && i < 6 && used + 32 < sizeof(pts); ++i)
+            used += std::snprintf(pts + used, sizeof(pts) - used, "%s(%.0f,%.0f,%.0f)",
+                                  i ? " " : "", wp[i].x, wp[i].y, wp[i].z);
+        F3A_INFO("autowalk: engine route points: %s%s", pts, wp.size() > 6 ? " ..." : "");
+    }
+    if (g_engine_distrust_until && (LONG)(GetTickCount() - g_engine_distrust_until) < 0 && OwnRoute()) {
+        F3A_INFO("autowalk: engine route ignored - the walk stalled on its last one; walking ours");
         return;
     }
     // Mines are NOT routed round: the game's route was thrown out for one
@@ -2876,6 +2894,79 @@ void BeginCross()
 
 // Cross-worldspace tick: walk to the chosen door, activate it, wait for the
 // load, then re-evaluate. Runs instead of the normal steering while g_cross.
+// Going round something on the floor that the navmesh does not know of - a
+// chair, a table, a crate standing on walkable triangles. In the Tenleytown
+// station a chair stood in the middle of the route (the game's and ours: the
+// same mesh) and the walk pushed into it, sidestepped and pushed into it
+// again for two minutes (2026-11-06). On a stall: a point to one side and one
+// past the obstacle, on each side, asked of the game's rays; the clear side's
+// two points go in front of the route.
+struct Detour {
+    int        state = 0;            // 1 = asked, waiting for the answer
+    game::Vec3 a[2], b[2];
+    game::Vec3 at{};                 // where it was asked
+    int        tries = 0;            // asked at this spot
+    float      off = 90.0f;          // how far to the side
+};
+Detour g_detour;
+
+std::string TeleportHint();   // defined below
+
+void AskDetour()
+{
+    if (g_detour.state == 1 || !g_have_path || g_wp_index >= g_waypoints.size()) return;
+    const auto P = game::GetPlayerPosition();
+    if (Dist2D(P, g_detour.at) < 120.0f && std::fabs(P.z - g_detour.at.z) < 120.0f) {
+        if (++g_detour.tries > 3) return;            // this spot has had its chances
+        g_detour.off += 50.0f;
+    } else {
+        g_detour.tries = 1;
+        g_detour.off = 90.0f;
+    }
+    g_detour.at = P;
+    const auto& W = g_waypoints[g_wp_index];
+    float dx = W.x - P.x, dy = W.y - P.y;
+    const float l = std::sqrt(dx * dx + dy * dy);
+    if (!(l >= 1.0f)) return;
+    dx /= l; dy /= l;
+    const float px = -dy, py = dx, off = g_detour.off;
+    for (int k = 0; k < 2; ++k) {
+        const float s = k == 0 ? (float)g_recover_dir : -(float)g_recover_dir;
+        g_detour.a[k] = { P.x + px * s * off + dx * 20.0f, P.y + py * s * off + dy * 20.0f, P.z };
+        g_detour.b[k] = { g_detour.a[k].x + dx * (off + 120.0f),
+                          g_detour.a[k].y + dy * (off + 120.0f), P.z };
+    }
+    poll::RequestClearCheck({ { P, g_detour.a[0] }, { g_detour.a[0], g_detour.b[0] },
+                              { P, g_detour.a[1] }, { g_detour.a[1], g_detour.b[1] } });
+    g_detour.state = 1;
+}
+
+bool TakeDetour()
+{
+    if (g_detour.state != 1) return false;
+    std::vector<char> open;
+    if (!poll::ClearCheckAnswer(&open)) return false;
+    g_detour.state = 0;
+    if (open.size() != 4 || !g_have_path || g_wp_index > g_waypoints.size()) return false;
+    const std::vector<bool> on = navmesh::OnMesh({ g_detour.a[0], g_detour.b[0],
+                                                   g_detour.a[1], g_detour.b[1] }, 90.0f);
+    for (int k = 0; k < 2; ++k) {
+        if (!open[2 * k] || !open[2 * k + 1]) continue;
+        if (on.size() == 4 && (!on[2 * k] || !on[2 * k + 1])) continue;
+        g_waypoints.insert(g_waypoints.begin() + g_wp_index, { g_detour.a[k], g_detour.b[k] });
+        F3A_INFO("autowalk: going round an obstacle, %.0f units to the %s, by (%.0f,%.0f) and (%.0f,%.0f)",
+                 g_detour.off, (k == 0) == (g_recover_dir > 0) ? "right" : "left",
+                 g_detour.a[k].x, g_detour.a[k].y, g_detour.b[k].x, g_detour.b[k].y);
+        g_recover_timer = 0.0f;
+        g_probe_pos = game::GetPlayerPosition();
+        g_probe_timer = 0.0f;
+        g_probe_route_left = -1.0f;
+        return true;
+    }
+    F3A_INFO("autowalk: no clear way round the obstacle %.0f units to either side", g_detour.off);
+    return false;
+}
+
 void TickCross(float dt)
 {
     // A door activation / teleport is in progress: wait for the cell to change,
@@ -3007,6 +3098,24 @@ void TickCross(float dt)
     float dd = std::sqrt(dx * dx + dy * dy);
 
     if (dd <= kCrossDoorReach) {              // at the door → go through it
+        // Locked, and no key in the pocket: said as it is. Moira's shop is
+        // locked at night - the game put "you need a skill of 100" on the HUD,
+        // the walk waited for a load that never came and ended with "I can't
+        // get there on foot, use fast travel" (2026-11-06, 22:28 in the game).
+        if (game::LockState(g_cross_door_refr, g_cross_door_form) == 1) {
+            const uint32_t key = game::LockKeyForm(g_cross_door_refr, g_cross_door_form);
+            if (!(key && game::GetPlayerItemCount(key) > 0)) {
+                const int lvl = game::RefLockLevel(g_cross_door_refr, g_cross_door_form);
+                F3A_INFO("autowalk: the door to '%s' (%08X) is locked (level %d), no key - stopping",
+                         g_cross_door_name.c_str(), (unsigned)g_cross_door_form, lvl);
+                const std::string say =
+                    strings::T("Drzwi zamknięte: ", "The door is locked: ") + g_cross_door_name +
+                    " (" + LockWords(lvl) + ")." +
+                    LockAdvice(g_cross_door_refr, g_cross_door_form, lvl);
+                StopWalking(say.c_str());
+                return;
+            }
+        }
         game::QueueActivate(g_cross_door_refr, g_cross_door_form);
         mover::CancelEnginePath();
         g_waypoints.clear(); g_wp_index = 0; g_have_path = false;
@@ -3157,6 +3266,29 @@ void TickCross(float dt)
             // ordinary walk since 2026-10-29.
             bool personInWay = false;
             const std::string obstacle = DescribeObstacle(&personInWay);
+            if (!personInWay) {
+                AskDetour();
+                // The same spot again and again: no way on from here (the
+                // stall count alone never got there - a jiggle at the
+                // obstacle reset it every other window).
+                const auto here = game::GetPlayerPosition();
+                int n = 1;
+                for (const auto& s : g_stall_spots)
+                    if (Dist2D(s, here) <= 200.0f && std::fabs(s.z - here.z) < 160.0f) ++n;
+                if (g_stall_spots.size() < 64) g_stall_spots.push_back(here);
+                if (n >= kStallsHere * 2) {
+                    F3A_INFO("autowalk: dead end on the way to the door - stalled %d times within "
+                             "200 units, %s: %s", n, StallWhere().c_str(), obstacle.c_str());
+                    const std::string say =
+                        std::string(strings::T("Utknąłem kilka razy w tym samym miejscu. "
+                                               "Nie widzę drogi do: ",
+                                               "Stuck in the same place several times. "
+                                               "I can't see a way to: ")) +
+                        g_cross_door_name + "." + TeleportHint();
+                    StopWalking(say.c_str());
+                    return;
+                }
+            }
             // Someone who never moves (stands in the doorway for good) still
             // ends it, three times later.
             const bool tooMany = personInWay ? ++g_cross_person >= kCrossMaxStuck * 3
@@ -3179,7 +3311,8 @@ void TickCross(float dt)
             // past turned a walk into a running commentary, and the player
             // cannot act on any of it — the mod is already going round.
             F3A_INFO("autowalk: stalled %s: %s", StallWhere().c_str(), obstacle.c_str());
-        } else if (progress >= kMinProgress) {
+        } else if (progress >= 64.0f) {
+            // Real ground covered, not a jiggle against the obstacle.
             g_cross_stuck   = 0;
             g_cross_person  = 0;
             g_recover_tries = 0;   // it is getting through; stop escalating
@@ -3431,6 +3564,8 @@ void StartTo(const game::Vec3& pos_in, const std::string& name,
     g_avoid.clear();
     g_avoid_space = game::PlayerSpaceId();
     g_target_mine = refr_in && game::IsMineRef(refr_in);
+    g_engine_distrust_until = 0;
+    g_detour = {};
     g_trail.clear();
     g_backtracked = g_backtracking = false;
     g_rebuild_cooldown = 0.0f;
@@ -3939,6 +4074,7 @@ void Tick(float dt)
         }
     }
     if (MineCheck()) return;                     // an armed mine ahead: stopped
+    TakeDetour();                                // a way round an obstacle, when answered
     // The trail: where this walk has been (BeginBacktrack).
     if (!g_cross && !g_backtracking) {
         const auto pp = game::GetPlayerPosition();
@@ -4425,6 +4561,7 @@ void Tick(float dt)
                 if (BeginBacktrack()) return;
                 bool personInWay = false;
                 const std::string obstacle = DescribeObstacle(&personInWay);
+                if (!personInWay) AskDetour();      // a chair on the route: round it
                 // Back on the same spot a third time, after walking on from it
                 // in between: no way on from here. Said and stopped, not
                 // circled with new routes. Only the first stall of each go
@@ -4462,6 +4599,7 @@ void Tick(float dt)
                 // (a gap the navmesh claims is there). Work it out afresh from
                 // here before more sidestepping.
                 // On the engine's route at once (it repaths, as the FNV mod does).
+                if (onEngineRoute) g_engine_distrust_until = GetTickCount() + 20000;
                 if (g_stuck_count == (onEngineRoute ? 1 : 2) && g_rebuild_cooldown <= 0.0f)
                     RebuildPath(strings::T("Przeliczam trasę.", "Recalculating the route."));
                 g_recover_dir   = -g_recover_dir;   // try the other side

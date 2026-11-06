@@ -126,7 +126,7 @@ struct Settings {
     // the polling thread. This project already wrote that rule down after the
     // second crash and it was broken again anyway. Until the aim point is
     // resolved on the game's own thread, this stays off.
-    bool   aim_bones          = false;
+    bool   aim_bones          = true;    // [Voice] AimSkeleton
     // Ask the engine who is fighting the player (a virtual call) rather than
     // treating the nearest actor as the enemy. Switchable because it calls
     // into the game.

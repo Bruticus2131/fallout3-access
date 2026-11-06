@@ -1230,6 +1230,38 @@ void FindArmedMines(float radius, std::vector<WorldEntity>* out)
     });
 }
 
+void NearbyDoorPoints(float radius, std::vector<Vec3>* out)
+{
+    if (!out) return;
+    out->clear();
+    auto* p = rt::Player();
+    if (!p || !p->parentCell) return;
+    const Vec3 pp = GetPlayerPosition();
+    const float r2 = radius * radius;
+    for (TESObjectCELL* cell : NearbyCells(p->parentCell)) {
+        if (!Readable(cell, 0xB4)) continue;
+        struct Node { TESObjectREFR* item; Node* next; };
+        auto* node = reinterpret_cast<Node*>(&cell->objectList);
+        for (int safety = 0; node && safety < 8192 && out->size() < 256; ++safety) {
+            if (!Readable(node, 8)) break;
+            TESObjectREFR* r = node->item;
+            node = node->next;
+            if (!r || !Readable(r, 0x40) || (r->flags & 0x820)) continue;
+            TESForm* base = r->baseForm;
+            if (!Readable(base, 0x08) || base->typeID != kFormType_Door) continue;
+            if (ReadIsLoadDoor(r) != 0) continue;              // a load door, or cannot tell
+            const float dx = r->posX - pp.x, dy = r->posY - pp.y;
+            if (!(dx * dx + dy * dy <= r2)) continue;
+            Vec3 c{ r->posX, r->posY, r->posZ };
+            float half = 0.0f;
+            Vec3 mc{};
+            if (RefModelCenter(r, &mc, &half)) c = mc;
+            if (!(std::isfinite(c.x) && std::isfinite(c.y) && std::isfinite(c.z))) continue;
+            out->push_back(c);
+        }
+    }
+}
+
 std::vector<WorldEntity> ScanNearby(int radius, int max_results,
                                     bool actors_only, bool hostiles_only)
 {
@@ -3385,6 +3417,28 @@ bool LedgeLooksOpen(const Vec3& ledge, const Vec3& landing)
     return true;
 }
 
+bool SegmentLooksClear(const Vec3& from, const Vec3& to)
+{
+    float dx = to.x - from.x, dy = to.y - from.y;
+    const float l = std::sqrt(dx * dx + dy * dy);
+    if (!(l >= 8.0f) || !RayCastReady()) return true;
+    dx /= l; dy /= l;
+    constexpr float kAhead = 28.0f;            // out of the player's own body
+    if (l <= kAhead + 4.0f) return true;
+    for (float h : { 30.0f, 70.0f }) {
+        const Vec3 o{ from.x + dx * kAhead, from.y + dy * kAhead, from.z + h };
+        uint32_t id = 0;
+        float dist = 0.0f;
+        if (RayCastView(o, { dx, dy, 0.0f }, l - kAhead + 24.0f, &id, &dist) &&
+            dist < l - kAhead + 16.0f) {
+            F3A_INFO("Detour: (%.0f,%.0f)->(%.0f,%.0f) at %.0f up hits %08X at %.0f units",
+                     from.x, from.y, to.x, to.y, h, id, dist + kAhead);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool RayCastView(const Vec3& from, const Vec3& dir, float maxDist,
                  uint32_t* outRefId, float* outDist, const void** outRef)
 {
@@ -4189,20 +4243,49 @@ constexpr UInt32 kNiAV_GetAsNiNode     = 3;      // vtable slot
 // Havok stores collision in its own units; the game divides by ~1/7 to draw it.
 constexpr float  kHavokToGame          = 6.999125f;
 
-// The reference's 3D model. FOSE has no field for it, but the engine fetches it
-// through a virtual: SetAngle's worker does `mov edx,[vtable+0x1D0]; call edx`
-// and then writes the rotation matrix into the result at +0x34.
+// The reference's 3D model, read as the game itself reads it: its
+// non-virtual Get3D at 0x00424EB0 is `mov eax,[ecx+0x5C] / test / mov
+// eax,[eax+0x14] / ret` (for the player it first tries a per-thread cache).
+// The earlier way - calling vtable[0x1D0] - crashed the game: that slot was a
+// New Vegas guess with the wrong arguments. Plain reads now, nothing called.
 void* RefNiNode(TESObjectREFR* refr)
 {
-    if (!refr || IsBadReadPtr(refr, 0x40) || !IsLiveRef(refr)) return nullptr;
-    void** vtable = *reinterpret_cast<void***>(refr);
-    if (!vtable || IsBadReadPtr(vtable, 0x1D4)) return nullptr;
-    using GetNiNodeFn = void* (__thiscall*)(void* self, int flag);
-    auto fn = reinterpret_cast<GetNiNodeFn>(vtable[0x1D0 / 4]);
-    if (!fn) return nullptr;
-    void* node = fn(refr, 0);
-    if (!node || IsBadReadPtr(node, 0xA0)) return nullptr;
+    if (!refr || IsBadReadPtr(refr, 0x60) || !IsLiveRef(refr)) return nullptr;
+    auto* rs = *reinterpret_cast<UInt8* const*>(reinterpret_cast<UInt8*>(refr) + 0x5C);
+    if (!rs || IsBadReadPtr(rs + 0x14, 4)) return nullptr;
+    void* node = *reinterpret_cast<void* const*>(rs + 0x14);
+    if (!node || IsBadReadPtr(node, 0xA8)) return nullptr;
     return node;
+}
+
+// Is this scene-graph object an NiNode (one with children)? Its vtable slot 3
+// is GetAsNiNode: in an NiNode (vtable 0x00E213CC) it is 0x00AA2340 `mov
+// eax,ecx / ret`, in everything else `xor eax,eax / ret` (0x00887DA0). The
+// slot's code is READ, never called - calling New Vegas-derived slots is what
+// crashed before. Anything else (an override that does more): not a node.
+bool IsNiNodeObject(const void* obj)
+{
+    if (!obj || IsBadReadPtr(obj, 4)) return false;
+    auto* vt = *reinterpret_cast<const UInt32* const*>(obj);
+    if (!vt || IsBadReadPtr(vt, 0x10)) return false;
+    const UInt32 fn = vt[3];
+    if (!(fn >= 0x00401000 && fn < 0x01200000)) return false;
+    const auto* code = reinterpret_cast<const UInt8*>(fn);
+    if (IsBadReadPtr(code, 3)) return false;
+    return code[0] == 0x8B && code[1] == 0xC1 && code[2] == 0xC3;
+}
+
+// An NiNode's children (NiTArray at +0x9C: data +0xA0, count u16 +0xA6 -
+// as NiNode's own loops at 0x0082E076.. read them).
+bool NodeChildren(const void* node, void*** kids, UInt16* n)
+{
+    if (!IsNiNodeObject(node) || IsBadReadPtr(node, 0xA8)) return false;
+    auto* b = reinterpret_cast<const UInt8*>(node);
+    void** k = *reinterpret_cast<void** const*>(b + 0xA0);
+    const UInt16 c = *reinterpret_cast<const UInt16*>(b + 0xA6);
+    if (!k || c > 512 || IsBadReadPtr(k, (size_t)c * 4)) return false;
+    *kids = k; *n = c;
+    return true;
 }
 
 // Havok's shape diagonal comes back in SSE vectors, so both must be 16-aligned.
@@ -4261,20 +4344,9 @@ bool GetCollisionAABBCenter(const void* refr, float* outX, float* outY, float* o
             return true;
         }
 
-        // Only real NiNodes have children; the cast is the engine's own test.
-        UInt32* vt = *reinterpret_cast<UInt32**>(node);
-        if (!vt || IsBadReadPtr(vt, (kNiAV_GetAsNiNode + 1) * 4)) continue;
-        using AsNodeFn = void* (__thiscall*)(void*);
-        auto asNode = reinterpret_cast<AsNodeFn>(vt[kNiAV_GetAsNiNode]);
-        if (!asNode) continue;
-        void* asNiNode = asNode(node);
-        if (!asNiNode) continue;
-
-        UInt8* arr = reinterpret_cast<UInt8*>(asNiNode) + kNiNode_Children;
-        if (IsBadReadPtr(arr, 0x10)) continue;
-        void** children = *reinterpret_cast<void***>(arr + 0x04);
-        UInt16 count    = *reinterpret_cast<UInt16*>(arr + 0x0A);
-        if (!children || count > 512 || IsBadReadPtr(children, count * 4)) continue;
+        void** children = nullptr;
+        UInt16 count = 0;
+        if (!NodeChildren(node, &children, &count)) continue;
         for (UInt16 i = 0; i < count && top < 64; ++i)
             if (children[i]) stack[top++] = children[i];
     }
@@ -4466,54 +4538,65 @@ bool SanePos(float x, float y, float z)
            std::fabs(z) < kWorldLimit;
 }
 
-bool FindBoneWorldPos(TESObjectREFR* r, Vec3* out, const char** boneName)
+// The best of kBoneCandidates in the reference's skeleton: its node (for
+// the held aim to keep reading) and name. One walk over the tree.
+void* FindBoneNode(TESObjectREFR* r, const char** boneName)
 {
     // Nothing is read off the model until the REFERENCE itself looks real. If
     // its own position is nonsense then the pointer is not a reference at all,
     // and walking its 3D is walking arbitrary memory.
-    if (!r || !SanePos(r->posX, r->posY, r->posZ)) return false;
+    if (!r || !SanePos(r->posX, r->posY, r->posZ)) return nullptr;
     void* root = RefNiNode(r);
-    if (!root) return false;
-
-    for (const char* want : kBoneCandidates) {
-        void* stack[96];
-        int   top = 0;
-        stack[top++] = root;
-        while (top > 0) {
-            UInt8* node = reinterpret_cast<UInt8*>(stack[--top]);
-            if (!node || IsBadReadPtr(node, kNiAV_WorldTranslate + 12)) continue;
-
-            const char* nm = *reinterpret_cast<const char**>(node + 0x08);
-            if (nm && !IsBadReadPtr((void*)nm, 1) && _stricmp(nm, want) == 0) {
-                float* wt = reinterpret_cast<float*>(node + kNiAV_WorldTranslate);
-                // Believe it only if it is a real coordinate AND actually ON
-                // this reference. Written as an explicit "must be within" test,
-                // never as "reject if beyond": the second form lets NaN pass.
-                if (!SanePos(wt[0], wt[1], wt[2])) break;
-                float dx = wt[0] - r->posX, dy = wt[1] - r->posY,
-                      dz = wt[2] - r->posZ;
-                float d2 = dx * dx + dy * dy + dz * dz;
-                if (!(std::isfinite(d2) && d2 <= 400.0f * 400.0f)) break;
-                *out = { wt[0], wt[1], wt[2] };
-                if (boneName) *boneName = want;
-                return true;
-            }
-
-            // Only an NiNode has children; the vtable slot says whether it is.
-            void** vt = *reinterpret_cast<void***>(node);
-            if (!vt || IsBadReadPtr(vt, (kNiAV_GetAsNiNode + 1) * 4)) continue;
-            using AsNode = void* (__thiscall*)(void*);
-            void* asNode = reinterpret_cast<AsNode>(vt[kNiAV_GetAsNiNode])(node);
-            if (!asNode || IsBadReadPtr(asNode, kNiNode_Children + 0xC)) continue;
-            UInt8* arr = reinterpret_cast<UInt8*>(asNode) + kNiNode_Children;
-            void** kids = *reinterpret_cast<void***>(arr + 0x4);
-            UInt16  n   = *reinterpret_cast<UInt16*>(arr + 0xA);
-            if (!kids || n > 512 || IsBadReadPtr(kids, (size_t)n * 4)) continue;
-            for (UInt16 i = 0; i < n && top < 96; ++i)
-                if (kids[i]) stack[top++] = kids[i];
+    if (!root) return nullptr;
+    constexpr int kN = (int)(sizeof(kBoneCandidates) / sizeof(kBoneCandidates[0]));
+    void* best = nullptr;
+    int bestRank = kN;
+    void* stack[128];
+    int top = 0, seen = 0;
+    stack[top++] = root;
+    while (top > 0 && seen < 2048) {
+        void* node = stack[--top];
+        ++seen;
+        if (!node || IsBadReadPtr(node, kNiAV_WorldTranslate + 12)) continue;
+        const char* nm = *reinterpret_cast<const char* const*>(
+                             reinterpret_cast<const UInt8*>(node) + kNiAV_Name);
+        if (nm && !IsBadReadPtr(nm, 16)) {
+            for (int k = 0; k < bestRank; ++k)
+                if (_stricmp(nm, kBoneCandidates[k]) == 0) { best = node; bestRank = k; break; }
+            if (bestRank == 0) break;              // the first choice: done
         }
+        void** kids = nullptr;
+        UInt16 n = 0;
+        if (!NodeChildren(node, &kids, &n)) continue;
+        for (UInt16 i = 0; i < n && top < 128; ++i)
+            if (kids[i]) stack[top++] = kids[i];
     }
-    return false;
+    if (best && boneName) *boneName = kBoneCandidates[bestRank];
+    return best;
+}
+
+// A bone node's world position, if it is a real coordinate on the
+// reference (within 400 units of its origin - "must be within", so NaN fails).
+bool BoneWorldPos(const void* node, const TESObjectREFR* r, Vec3* out)
+{
+    if (!node || IsBadReadPtr(node, kNiAV_WorldTranslate + 12)) return false;
+    const float* wt = reinterpret_cast<const float*>(
+                          reinterpret_cast<const UInt8*>(node) + kNiAV_WorldTranslate);
+    if (!SanePos(wt[0], wt[1], wt[2])) return false;
+    const float dx = wt[0] - r->posX, dy = wt[1] - r->posY, dz = wt[2] - r->posZ;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (!(std::isfinite(d2) && d2 <= 400.0f * 400.0f)) return false;
+    *out = { wt[0], wt[1], wt[2] };
+    return true;
+}
+
+bool FindBoneWorldPos(TESObjectREFR* r, Vec3* out, const char** boneName)
+{
+    const char* nm = nullptr;
+    void* node = FindBoneNode(r, &nm);
+    if (!node || !BoneWorldPos(node, r, out)) return false;
+    if (boneName) *boneName = nm;
+    return true;
 }
 } // namespace
 
@@ -4532,6 +4615,47 @@ const HitCentre kHitCentres[] = {
 };
 } // namespace
 
+bool ActorAimBone(const void* refr, uint32_t refid, Vec3* out, const char** name)
+{
+    if (!config::Get().aim_bones || !out) return false;
+    auto* r = reinterpret_cast<TESObjectREFR*>(const_cast<void*>(refr));
+    if (!r || !IsLiveRef(r, refid) || !RefIsActor(r)) return false;
+    // The node found last, kept while it still carries the same (interned)
+    // name and stands on this reference: the skeleton is walked once per
+    // target, not every frame. The held aim is the only caller (game thread).
+    static uint32_t    s_id = 0;
+    static void*       s_node = nullptr;
+    static const char* s_name = nullptr;     // the node's own name pointer
+    static const char* s_bone = nullptr;     // which candidate it is
+    static DWORD       s_miss_at = 0;        // when the last search found nothing
+    if (s_id == refid && s_node && !IsBadReadPtr(s_node, kNiAV_WorldTranslate + 12) &&
+        *reinterpret_cast<const char* const*>(reinterpret_cast<const UInt8*>(s_node) + kNiAV_Name) ==
+            s_name &&
+        BoneWorldPos(s_node, r, out)) {
+        if (name) *name = s_bone;
+        return true;
+    }
+    const DWORD now = GetTickCount();
+    if (s_id == refid && !s_node && now - s_miss_at < 1000) return false;   // no skeleton: not every frame
+    s_id = refid;
+    s_node = nullptr;
+    const char* bone = nullptr;
+    void* node = FindBoneNode(r, &bone);
+    Vec3 p{};
+    if (!node || !BoneWorldPos(node, r, &p)) {
+        s_miss_at = now;
+        return false;
+    }
+    s_node = node;
+    s_name = *reinterpret_cast<const char* const*>(reinterpret_cast<const UInt8*>(node) + kNiAV_Name);
+    s_bone = bone;
+    *out = p;
+    if (name) *name = bone;
+    F3A_INFO("AimBone: %08X - '%s' at (%.0f,%.0f,%.0f), origin (%.0f,%.0f,%.0f)", refid, bone,
+             p.x, p.y, p.z, r->posX, r->posY, r->posZ);
+    return true;
+}
+
 bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
 {
     if (how) *how = "none";
@@ -4548,7 +4672,7 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
 
     // Bones first: this is the point a sighted player's crosshair ends up on.
     const char* bone = nullptr;
-    if (config::Get().aim_bones && OnMainThread() && FindBoneWorldPos(r, out, &bone)) {
+    if (config::Get().aim_bones && RefIsActor(r) && FindBoneWorldPos(r, out, &bone)) {
         if (how) *how = bone;
         F3A_INFO("AimPoint: bone '%s' at (%.0f,%.0f,%.0f), origin (%.0f,%.0f,%.0f)",
                  bone, out->x, out->y, out->z, r->posX, r->posY, r->posZ);
@@ -4627,7 +4751,7 @@ bool GetAimPointFor(const void* refr, Vec3* out, const char** how)
     // Behind the same switch as the bone walk, and for the same reason: it
     // reaches the model through a virtual call, which is only safe on the
     // game's own thread.
-    if (void* root = (config::Get().aim_bones && OnMainThread()) ? RefNiNode(r) : nullptr) {
+    if (void* root = config::Get().aim_bones ? RefNiNode(r) : nullptr) {
         if (!IsBadReadPtr(root, 0x24)) {
             auto* wb = *reinterpret_cast<float**>(reinterpret_cast<UInt8*>(root) + 0x20);
             if (wb && !IsBadReadPtr(wb, 16)) {
@@ -5731,6 +5855,13 @@ uint32_t LockKeyForm(const void* refr, uint32_t expectedRefID, std::string* keyN
     if (keyName)
         if (const char* nm = BaseFormName(key)) *keyName = GameStrToUtf8(nm);
     return key->refID;
+}
+
+int RefLockLevel(const void* refr, uint32_t expectedRefID)
+{
+    auto* r = reinterpret_cast<const TESObjectREFR*>(refr);
+    if (!Readable(r, 0x48) || r->refID != expectedRefID) return -1;
+    return ReadLockLevel(r, nullptr);
 }
 
 int LockState(const void* refr, uint32_t expectedRefID)

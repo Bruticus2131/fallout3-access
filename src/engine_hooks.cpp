@@ -162,7 +162,13 @@ void __cdecl PrepareShot(unsigned char* player, const uint32_t* args)
     bool moved = false;
     const bool haveFrom = ShotOrigin(args, from);
     const bool haveCentre = ShotMeasuredFrom(player, centre);
-    const float* pos = reinterpret_cast<const float*>(player + 0x30);
+    // The player's position: TESObjectREFR posX/Y/Z at +0x2C (FOSE). It was
+    // read at +0x30 - Y, Z and the scale - so the muzzle never counted as
+    // near the player, and the correction below never ran: every shot of a
+    // friend's fight logged "muzzle unknown" with "player (1600,12675,1)" for
+    // a player at (-9612,1600,12675), and went ~50 units over the point aimed
+    // at - over a mole rat's back (2026-11-06).
+    const float* pos = reinterpret_cast<const float*>(player + 0x2C);
     if (haveFrom && haveCentre && !IsBadReadPtr(pos, 12)) {
         auto nearby = [&](const float* v) {
             const float dx = v[0] - pos[0], dy = v[1] - pos[1], dz = v[2] - pos[2];

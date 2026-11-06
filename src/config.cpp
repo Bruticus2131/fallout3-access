@@ -278,7 +278,9 @@ bool Load(const wchar_t* ini_path)
     s.native_face         = ReadBool(L"Voice", L"NativeFace",       true, ini_path);
     s.native_walk         = ReadBool(L"Voice", L"NativeWalk",       true, ini_path);
     s.aim_collision       = ReadBool(L"Voice", L"AimCollision",     false, ini_path);
-    s.aim_bones           = ReadBool(L"Voice", L"AimBones",         false, ini_path);
+    // AimSkeleton, not the old AimBones: that one was off (0) in every INI
+    // because the old way crashed, and a kept INI would keep it off.
+    s.aim_bones           = ReadBool(L"Voice", L"AimSkeleton",      true, ini_path);
     s.hostile_from_combat = ReadBool(L"Voice", L"HostileFromCombat", true, ini_path);
     s.aim_mouse_takeover  = ReadBool(L"Voice", L"AimMouseTakeover",  true, ini_path);
     s.aim_help            = ReadBool(L"Voice", L"AimHelp",           true, ini_path);

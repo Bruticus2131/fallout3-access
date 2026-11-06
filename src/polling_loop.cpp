@@ -1566,6 +1566,9 @@ std::mutex g_ledge_mx;
 std::vector<std::pair<game::Vec3, game::Vec3>> g_ledge_ask;
 std::vector<char> g_ledge_open;
 std::atomic<int>  g_ledge_state{ 0 };   // 0 none, 1 asked, 2 answered
+std::vector<std::pair<game::Vec3, game::Vec3>> g_clear_ask;   // under g_ledge_mx
+std::vector<char> g_clear_open;
+std::atomic<int>  g_clear_state{ 0 };   // 0 none, 1 asked, 2 answered
 // Hacking: the candidate to enter (its number and text), and the type-out to skip.
 std::mutex         g_hack_mx;
 int                g_hack_idx = -1;
@@ -2185,6 +2188,20 @@ void MainThreadWork()
         }
         g_ledge_state.store(2);
     }
+    if (g_clear_state.load() == 1) {
+        std::vector<std::pair<game::Vec3, game::Vec3>> ask;
+        {
+            std::lock_guard<std::mutex> lk(g_ledge_mx);
+            ask = g_clear_ask;
+        }
+        std::vector<char> open;
+        for (const auto& l : ask) open.push_back(game::SegmentLooksClear(l.first, l.second) ? 1 : 0);
+        {
+            std::lock_guard<std::mutex> lk(g_ledge_mx);
+            g_clear_open = std::move(open);
+        }
+        g_clear_state.store(2);
+    }
     // Lockpicking: the bobby pin, moved by the arrow keys.
     if (int units = g_lockpick_nudge.exchange(0)) {
         bool edge = false;
@@ -2775,6 +2792,27 @@ void RequestLedgeCheck(const std::vector<std::pair<game::Vec3, game::Vec3>>& leg
         g_ledge_open.clear();
     }
     g_ledge_state.store(1);
+}
+
+void RequestClearCheck(const std::vector<std::pair<game::Vec3, game::Vec3>>& legs)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_ledge_mx);
+        g_clear_ask = legs;
+        g_clear_open.clear();
+    }
+    g_clear_state.store(1);
+}
+
+bool ClearCheckAnswer(std::vector<char>* open)
+{
+    if (g_clear_state.load() != 2) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_ledge_mx);
+        if (open) *open = g_clear_open;
+    }
+    g_clear_state.store(0);
+    return true;
 }
 
 bool LedgeCheckAnswer(std::vector<char>* open)
@@ -3490,10 +3528,20 @@ void AimTick()
         if (game::GetRefPosition(g_aimtrack_refr.load(),
                                  g_aimtrack_refid.load(), &tp)) {
             game::Vec3 origin = tp;
-            // The live origin plus where on it we were asked to aim.
-            tp.x += BitsToF(g_aimtrack_offx.load());
-            tp.y += BitsToF(g_aimtrack_offy.load());
-            tp.z += BitsToF(g_aimtrack_offz.load());
+            // On an actor: its torso bone as the body stands now (the FNV
+            // mod's way). A fixed height over the feet missed whatever was
+            // not standing straight - a mole rat low on the ground, a dog,
+            // a crouching raider (2026-11-06). Else the live origin plus
+            // where on it we were asked to aim.
+            game::Vec3 bone{};
+            if (!g_aimtrack_face.load() &&
+                game::ActorAimBone(g_aimtrack_refr.load(), g_aimtrack_refid.load(), &bone)) {
+                tp = bone;
+            } else {
+                tp.x += BitsToF(g_aimtrack_offx.load());
+                tp.y += BitsToF(g_aimtrack_offy.load());
+                tp.z += BitsToF(g_aimtrack_offz.load());
+            }
             game::Vec3 lead{};
             if (AimLead(g_aimtrack_refid.load(), origin, tp, &lead)) {
                 tp.x += lead.x; tp.y += lead.y; tp.z += lead.z;

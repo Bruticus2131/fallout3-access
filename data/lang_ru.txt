@@ -1940,3 +1940,6 @@ ru: "Застрял в стороне от прохода. Возвращаюс�
 
 en: "Back on the way. Recalculating the route."
 ru: "Снова на проходе. Пересчитываю маршрут."
+
+en: "The door is locked: "
+ru: "Дверь заперта: "
