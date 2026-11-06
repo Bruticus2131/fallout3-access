@@ -7608,12 +7608,11 @@ int InventoryStep(void* menu, int delta)
 {
     // The Pip-Boy's Items page: InventoryMenu (vtable 0x00E05F6C), its item
     // list a ListBox like the container's (built by 0x00632DA0 at +0x94, rows
-    // id 20), and the game selects in it with the same 0x00633140 (0x00653600
-    // after a tab click, from the index it saved per category at +0x64).
+    // id 20, vtable 0x00E0498C).
     auto* m = reinterpret_cast<UInt8*>(menu);
     if (!Readable(m, 0xC8) || *reinterpret_cast<UInt32*>(m) != 0x00E05F6C) return -1;
     UInt8* list = m + 0x94;
-    if (!Readable(list, 0x28)) return -1;
+    if (!Readable(list, 0x28) || *reinterpret_cast<UInt32*>(list) != 0x00E0498C) return -1;
     Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
     if (!Readable(box, sizeof(Tile))) return -1;
     const int n = CountVisibleRows(box, 20.0f);
@@ -7635,9 +7634,27 @@ int InventoryStep(void* menu, int delta)
         if (nw > n - 1) nw = n - 1;
         if (nw == cur) return 2;                 // at that end already
     }
+    // Selected as the game's own arrow selects (0x006240C0, after the list's
+    // step 0x00632EB0 picked the row): the row by its listindex (list vt[5]
+    // 0x0063DCC0 with 0), the interface's SetActiveTile (0x00623D70, trait
+    // mouseover) - which sets the list's +0x10 and calls the menu's
+    // HandleMouseover, so the item becomes the selected one (0x01076864) and
+    // its card shows - then list vt[4] (0x0062F020), which scrolls it into
+    // view. NOT the list's select routine 0x00633140, as in the container:
+    // with keyboard and mouse it ends in the menu's HandleUnmouseover, and
+    // here that (0x00653CF0 -> 0x00653770) clears the selected item and hides
+    // the card - Enter then used nothing (0.6.3, "Enter on an item doesn't
+    // activate it").
+    using RowFn = Tile* (__thiscall*)(void*, int, int);
+    Tile* target = reinterpret_cast<RowFn>(0x0063DCC0)(list, nw, 0);
+    if (!target || !Readable(target, sizeof(Tile))) return -1;
+    void* ifm = *reinterpret_cast<void**>(0x01075B24);
+    if (!Readable(ifm, 0xD0)) return -1;
     *reinterpret_cast<float*>(list + 0x24) = (float)nw;
-    using SelectFn = void (__thiscall*)(void*, UInt32);
-    reinterpret_cast<SelectFn>(0x00633140)(list, 1);
+    using ActiveFn = void (__thiscall*)(void*, Tile*, UInt32, UInt32);
+    reinterpret_cast<ActiveFn>(0x00623D70)(ifm, target, 0xFC3, 1);
+    using ScrollFn = void (__thiscall*)(void*);
+    reinterpret_cast<ScrollFn>(0x0062F020)(list);
     return 1;
 }
 

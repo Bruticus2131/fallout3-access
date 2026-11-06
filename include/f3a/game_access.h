@@ -1099,8 +1099,8 @@ struct ContainerSide { std::string title; int rows = 0; };
 bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs);
 
 // Up/Down on the Pip-Boy's Items page, done by the mod: one row of the item
-// list through the game's own select routine (the item panel and E follow
-// it). `menu` = the InventoryMenu. 1 moved, 2 at an end, 0 empty list, -1 not
+// list, selected as the game's own arrow selects it (the item card and Enter
+// follow it). `menu` = the InventoryMenu. 1 moved, 2 at an end, 0 empty list, -1 not
 // that menu. The game's own arrows went dead after a category left with
 // nothing selected. MAIN THREAD (it is called inside the game's key handling).
 int InventoryStep(void* menu, int delta);
