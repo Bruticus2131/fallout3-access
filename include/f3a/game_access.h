@@ -1098,6 +1098,13 @@ bool GetInventoryView(InventoryView* out);
 struct ContainerSide { std::string title; int rows = 0; };
 bool GetContainerSides(ContainerSide* mine, ContainerSide* theirs);
 
+// Up/Down on the Pip-Boy's Items page, done by the mod: one row of the item
+// list through the game's own select routine (the item panel and E follow
+// it). `menu` = the InventoryMenu. 1 moved, 2 at an end, 0 empty list, -1 not
+// that menu. The game's own arrows went dead after a category left with
+// nothing selected. MAIN THREAD (it is called inside the game's key handling).
+int InventoryStep(void* menu, int delta);
+
 // Move the keyboard focus to one column of the container menu through the
 // menu's OWN Shift+Left / Shift+Right handler. MAIN THREAD ONLY.
 // Returns 1 = focus is now on that column, 0 = the menu refused (that column

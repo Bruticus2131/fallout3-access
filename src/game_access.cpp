@@ -7604,6 +7604,43 @@ int StepContainerSelection(bool container_side, int delta)
     return 1;
 }
 
+int InventoryStep(void* menu, int delta)
+{
+    // The Pip-Boy's Items page: InventoryMenu (vtable 0x00E05F6C), its item
+    // list a ListBox like the container's (built by 0x00632DA0 at +0x94, rows
+    // id 20), and the game selects in it with the same 0x00633140 (0x00653600
+    // after a tab click, from the index it saved per category at +0x64).
+    auto* m = reinterpret_cast<UInt8*>(menu);
+    if (!Readable(m, 0xC8) || *reinterpret_cast<UInt32*>(m) != 0x00E05F6C) return -1;
+    UInt8* list = m + 0x94;
+    if (!Readable(list, 0x28)) return -1;
+    Tile* box = *reinterpret_cast<Tile**>(list + 0x0C);
+    if (!Readable(box, sizeof(Tile))) return -1;
+    const int n = CountVisibleRows(box, 20.0f);
+    if (n <= 0) return 0;
+    Tile* row = SelectedRowOf(list, 20.0f);
+    int cur = row ? (int)TileNum(row, kTileValue_listindex) : -1;
+    int nw;
+    if (cur < 0 || cur >= n) {
+        // Nothing selected - the state the arrows went dead in (a category
+        // left with nothing selected saves -1, and coming back selects
+        // nothing): the first press lands on a row, no step.
+        const float saved = *reinterpret_cast<float*>(list + 0x24);
+        nw = (std::isfinite(saved) && saved >= 0.0f) ? (int)saved : 0;
+        if (nw > n - 1) nw = n - 1;
+        cur = -1;
+    } else {
+        nw = cur + delta;
+        if (nw < 0) nw = 0;
+        if (nw > n - 1) nw = n - 1;
+        if (nw == cur) return 2;                 // at that end already
+    }
+    *reinterpret_cast<float*>(list + 0x24) = (float)nw;
+    using SelectFn = void (__thiscall*)(void*, UInt32);
+    reinterpret_cast<SelectFn>(0x00633140)(list, 1);
+    return 1;
+}
+
 int SwitchContainerSide(bool container_side)
 {
     const ColumnMenu* d = nullptr;

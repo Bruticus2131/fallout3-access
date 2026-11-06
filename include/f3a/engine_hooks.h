@@ -17,6 +17,8 @@
 //     category with them (the mod switches columns; Shift+arrows step it).
 //   - Up and Down in the container screen: taken from the game while the mod
 //     moves the row itself (the game's moved whichever list had a row last).
+//   - Up and Down on the Pip-Boy's Items page: the same, after the game's
+//     went dead on a category left with nothing selected.
 
 #include <cstdint>
 
@@ -27,6 +29,12 @@ namespace f3a::engine {
 // the key from the game. Called on the game's thread, inside its key handling.
 using ContainerKeyFilter = bool (*)(unsigned int code);
 void SetContainerKeyFilter(ContainerKeyFilter filter);
+
+// A menu's key the game's own handler did not take (`menu` = that menu,
+// `code` its slot 14 code): true when the filter took it. Game thread.
+using MenuKeyFilter = bool (*)(void* menu, unsigned int code);
+// The Pip-Boy's Items page (InventoryMenu): Up and Down go here.
+void SetInventoryKeyFilter(MenuKeyFilter filter);
 
 // The function now in the container screen's key slot, 0 when that patch is
 // not installed - game_access checks the slot to know the screen, and the

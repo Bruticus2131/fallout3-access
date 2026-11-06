@@ -412,6 +412,41 @@ bool __fastcall ContainerSpecialKey_Hook(void* menu, void* /*edx*/, uint32_t cod
     return reinterpret_cast<Fn>(kContSpecialKey)(menu, code, state);
 }
 
+// The Pip-Boy's Items page has the same trouble: its slot 14 (0x00652B70)
+// takes none of Up/Down either, and the interface hands them to whichever
+// list still holds a selected row - none after a category left with nothing
+// selected ("arrows dead until I switch the tab and back", 2026-11-06), or
+// another list, which made the highlight jump. The game's handler runs first
+// (the hotkey wheel takes the arrows there); what it leaves of Up/Down goes
+// to the filter, which steps the item list itself. Held keys repeat as the
+// game repeats them.
+constexpr uintptr_t kInvVtable     = 0x00E05F6C;
+constexpr uintptr_t kInvSpecialKey = 0x00652B70;
+MenuKeyFilter g_inv_key_filter = nullptr;
+bool g_inv_updown_patched = false;
+
+bool __fastcall InventorySpecialKey_Hook(void* menu, void* /*edx*/, uint32_t code, float state)
+{
+    using Fn = bool(__thiscall*)(void*, uint32_t, float);
+    if (reinterpret_cast<Fn>(kInvSpecialKey)(menu, code, state)) return true;
+    MenuKeyFilter f = g_inv_key_filter;
+    return f && f(menu, code);
+}
+
+void PatchInventoryUpDown()
+{
+    auto* slot = reinterpret_cast<uint32_t*>(kInvVtable + 14 * 4);
+    DWORD old = 0;
+    if (!IsBadReadPtr(slot, 4) && *slot == kInvSpecialKey &&
+        VirtualProtect(slot, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        *slot = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&InventorySpecialKey_Hook));
+        VirtualProtect(slot, 4, old, &old);
+        g_inv_updown_patched = true;
+    }
+    F3A_INFO("engine_hooks: Pip-Boy items Up/Down by the mod %s.",
+             g_inv_updown_patched ? "installed" : "NOT installed (code differs)");
+}
+
 void PatchContainerUpDown()
 {
     auto* slot = reinterpret_cast<uint32_t*>(kContVtable + 14 * 4);
@@ -447,11 +482,13 @@ bool InstallHooks()
     PatchMenuEnter();
     PatchContainerArrows();
     PatchContainerUpDown();
+    PatchInventoryUpDown();
     return g_drop_patched && g_edit_arrows_patched && g_shot_patched == 3 && g_menu_key_patched &&
-           g_cont_arrows_patched && g_cont_updown_patched;
+           g_cont_arrows_patched && g_cont_updown_patched && g_inv_updown_patched;
 }
 
 void SetContainerKeyFilter(ContainerKeyFilter filter) { g_cont_key_filter = filter; }
+void SetInventoryKeyFilter(MenuKeyFilter filter) { g_inv_key_filter = filter; }
 
 uintptr_t ContainerKeySlotHook()
 {

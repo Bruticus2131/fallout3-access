@@ -6,6 +6,7 @@
 #include "f3a/strings.h"
 #include "f3a/config.h"
 #include "f3a/logger.h"
+#include "f3a/engine_hooks.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -394,10 +395,21 @@ void OnTick(float)
     AnnounceSelection(false);
 }
 
+// Up and Down on the Items page are the mod's (engine_hooks): one row of the
+// item list each, through the game's own select routine. The game's went
+// dead after a category was left with nothing selected, and sometimes moved
+// another list's highlight (2026-11-06). Game thread, inside its key handling.
+bool ItemsUpDown(void* menu, unsigned int code)
+{
+    if ((code != 1 && code != 2) || !config::IsEnabled()) return false;
+    return game::InventoryStep(menu, code == 2 ? +1 : -1) >= 0;
+}
+
 } // namespace
 
 void Init()
 {
+    engine::SetInventoryKeyFilter(&ItemsUpDown);
     menu::RegisterMenu(menu::Id::PipBoy, &OnOpen, &OnClose, &OnTick);
     menu::RegisterMenu(menu::Id::Inventory, &OnOpen, &OnClose, &OnTick);
     menu::RegisterMenu(menu::Id::Stats, &OnOpen, &OnClose, &OnTick);
